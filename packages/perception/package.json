@@ -1,0 +1,25 @@
+{
+  "name": "@pilotfish/perception",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@pilotfish/cdp": "0.0.1",
+    "@pilotfish/browser": "0.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gAI-ventures/pilotfish-mcp.git",
+    "directory": "packages/perception"
+  }
+}

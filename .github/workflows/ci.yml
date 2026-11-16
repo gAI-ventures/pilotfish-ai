@@ -1,0 +1,43 @@
+name: CI
+
+# Every push and pull request: the build, the unit tests, and the local MCP against a real Chrome (in process, and the
+# CLI over stdio with no API key). Nothing here reaches the internet beyond npm: the ad-block lists are the built-in
+# seed list.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PILOTFISH_CHROME: /usr/bin/google-chrome
+      PILOTFISH_ADBLOCK_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Unit tests
+        run: npm test
+      # Ubuntu 24.04 blocks unprivileged user namespaces via AppArmor, which Chrome's sandbox needs.
+      - name: Chrome sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          google-chrome --version
+      - name: Local MCP e2e (in process, and the CLI over stdio)
+        run: npx vitest run packages/mcp --testTimeout 120000
+        env:
+          PILOTFISH_E2E: "1"
+      - name: The npm packages build with their checks
+        run: npm run package

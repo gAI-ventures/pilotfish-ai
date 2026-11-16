@@ -1,0 +1,26 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/cdp"
+    },
+    {
+      "path": "packages/browser"
+    },
+    {
+      "path": "packages/perception"
+    },
+    {
+      "path": "packages/interrupts"
+    },
+    {
+      "path": "packages/agent"
+    },
+    {
+      "path": "packages/mcp"
+    },
+    {
+      "path": "packages/mcp-managed"
+    }
+  ]
+}

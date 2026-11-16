@@ -1,0 +1,31 @@
+{
+  "name": "@pilotfish/mcp-managed",
+  "version": "0.0.1",
+  "description": "pilotfish managed MCP: connects any stdio MCP client to your pilotfish account (saved tasks, logins, cloud browser, stealth, replays) with your own sign-in or an API key.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "pilotfish-mcp-managed": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "devDependencies": {
+    "zod": "^4.6.7"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gAI-ventures/pilotfish-mcp.git",
+    "directory": "packages/mcp-managed"
+  }
+}

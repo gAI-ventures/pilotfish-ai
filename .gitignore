@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+.env
+.env.*
+.DS_Store
+
+# npm packages built by packages/*/scripts/package.mjs
+packages/*/npm-package/

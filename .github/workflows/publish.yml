@@ -1,0 +1,106 @@
+name: Publish
+
+# Keeps the two npm packages in step with this repository (docs/PUBLISHING.md):
+#   @gaiventures/pilotfish-mcp          packages/mcp, the open local MCP (bundles the core packages)
+#   @gaiventures/pilotfish-mcp-managed  packages/mcp-managed, the managed MCP's stdio relay
+#
+# On every push to main, for each package: build and test; scripts/mcp-release.mjs picks the next version and builds
+# the package with its checks; the tarball is installed in an empty project and tested; then it is published to npm
+# (trusted publishing, with provenance) and listed in the MCP Registry, but only when what the package ships changed.
+# No stored tokens: npm and the registry's GitHub login use this run's OIDC token.
+#
+# Publishing also needs the repository variable PUBLISH_ENABLED=true (Settings → Secrets and variables → Actions →
+# Variables). Without it every run is a dry run, so this repository never publishes while another one still does.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/**
+      - scripts/mcp-*.mjs
+      - .github/workflows/publish.yml
+      - package-lock.json
+      - tsconfig.base.json
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish what changed (otherwise a dry run)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [mcp, mcp-managed]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One release of a package at a time: two pushes never pick the same version.
+    concurrency:
+      group: publish-${{ matrix.package }}
+      cancel-in-progress: false
+    env:
+      PILOTFISH_CHROME: /usr/bin/google-chrome
+      PILOTFISH_ADBLOCK_OFFLINE: "1"
+      PUBLISH: ${{ vars.PUBLISH_ENABLED == 'true' && (github.event_name == 'push' || inputs.publish == true) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # npm 11.5.1 or later for trusted publishing. No dependency cache in a release build.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build
+      - name: Unit tests
+        run: npm test
+      - name: Chrome sandbox
+        if: matrix.package == 'mcp'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Local MCP e2e (in process, and the CLI over stdio)
+        if: matrix.package == 'mcp'
+        run: npx vitest run packages/mcp --testTimeout 120000
+        env:
+          PILOTFISH_E2E: "1"
+      - name: Version and package
+        id: release
+        run: node scripts/mcp-release.mjs ${{ matrix.package }}
+      - name: Pack, and install the tarball as a user would
+        run: |
+          mkdir -p "$RUNNER_TEMP/tarball"
+          cd "packages/${{ matrix.package }}/npm-package"
+          npm pack --pack-destination "$RUNNER_TEMP/tarball"
+          mkdir -p "$RUNNER_TEMP/user" && cd "$RUNNER_TEMP/user" && npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/tarball/*.tgz
+          ls -la "node_modules/${{ steps.release.outputs.name }}"
+      - name: The installed package starts with no API key and drives a browser
+        if: matrix.package == 'mcp'
+        run: npx vitest run packages/mcp/src/mcp.e2e.test.ts -t "CLI over stdio" --testTimeout 120000
+        env:
+          PILOTFISH_E2E: "1"
+          PILOTFISH_MCP_CLI: ${{ runner.temp }}/user/node_modules/@gaiventures/pilotfish-mcp/cli.js
+      - name: The installed relay carries a session over stdio
+        if: matrix.package == 'mcp-managed'
+        run: npx vitest run packages/mcp-managed -t "CLI relays"
+        env:
+          PILOTFISH_MCP_MANAGED_CLI: ${{ runner.temp }}/user/node_modules/@gaiventures/pilotfish-mcp-managed/cli.js
+      - name: Dry run
+        if: env.PUBLISH != 'true'
+        run: echo "::notice::Dry run (PUBLISH_ENABLED is not true, or a manual run without publish). ${{ steps.release.outputs.name }} ${{ steps.release.outputs.version }}, changed=${{ steps.release.outputs.changed }}."
+      - name: Publish to npm
+        if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true' && steps.release.outputs.changed == 'true'
+        working-directory: packages/${{ matrix.package }}/npm-package
+        run: npm publish --access public --provenance
+      - name: List in the MCP Registry
+        if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true'
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz" | tar xz -C "$RUNNER_TEMP" mcp-publisher
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          node scripts/mcp-registry.mjs ${{ matrix.package }} ${{ steps.release.outputs.changed == 'true' && format('--expect {0}', steps.release.outputs.version) || '' }}
+        env:
+          MCP_PUBLISHER: ${{ runner.temp }}/mcp-publisher

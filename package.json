@@ -1,0 +1,42 @@
+{
+  "name": "pilotfish-mcp",
+  "private": true,
+  "version": "0.0.0",
+  "description": "pilotfish's open MCP server: a real Chrome on your own computer for any MCP agent. Raw CDP core, structure-first page snapshots, evidence-returning actions.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gAI-ventures/pilotfish-mcp.git"
+  },
+  "homepage": "https://github.com/gAI-ventures/pilotfish-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/gAI-ventures/pilotfish-mcp/issues"
+  },
+  "workspaces": [
+    "packages/cdp",
+    "packages/browser",
+    "packages/perception",
+    "packages/interrupts",
+    "packages/agent",
+    "packages/mcp",
+    "packages/mcp-managed"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "test:e2e": "PILOTFISH_E2E=1 vitest run --testTimeout 120000",
+    "package": "node packages/mcp/scripts/package.mjs && node packages/mcp-managed/scripts/package.mjs",
+    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo packages/*/npm-package"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "@types/ws": "^8.18.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

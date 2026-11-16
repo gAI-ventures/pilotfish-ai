@@ -1,0 +1,8 @@
+{
+  "name": "@gaiventures/pilotfish-mcp",
+  "version": "0.1.1",
+  "mcpName": "io.github.gAI-ventures/pilotfish",
+  "title": "pilotfish (local)",
+  "description": "Give any MCP agent a real Chrome on your own computer. Free, no account, no API key.",
+  "npmDescriptionNote": "mcprush.com-ba6a69f5121bd8a0089bb26a"
+}

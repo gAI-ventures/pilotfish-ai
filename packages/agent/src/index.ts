@@ -1,0 +1,21 @@
+// @pilotfish/agent — Claude-driven browser agent with evidence-returning tools.
+export { Agent, QUESTION_SYSTEM } from "./agent.js";
+export type { AgentOptions, AgentRead, AgentResult, StepEvent, TargetDesc, ActOutcome, ConsentWatcher, CodeQuery, CodeFound, CodeChannel, QuestionLabel } from "./agent.js";
+export { buildTools, DEFAULT_TOOLS, ToolInputs } from "./tools.js";
+export type { ToolName, ToolInput } from "./tools.js";
+export { SecretBroker } from "./secrets.js";
+export type { SecretSpec } from "./secrets.js";
+export { DefaultPolicy, isPrivateHost, parseMoney, totalFromText } from "./policy.js";
+export type { ActionPolicy, ActionContext, PolicyDecision, DefaultPolicyOptions, PreApproval, WriteKind, Money } from "./policy.js";
+export { SYSTEM_PROMPT, SYSTEM_PROMPT_FAST } from "./prompt.js";
+export { TabManager } from "./tabs.js";
+export type { InterventionContext, InterventionRequest, InterventionResponse, InterruptionCleared, SignupDetails, SiteInterruptions, ChallengeSolveRequest, ChallengeSolveOutcome, PreparedSolve, SolveChallenge } from "./interventions.js";
+export { hostMatches, InterruptionStats, neverAutomate, NEVER_AUTOMATE_HOSTS } from "./interventions.js";
+export type { CodeLoginResponse, SignInMethod } from "./interventions.js";
+export { looksLikePhone, signInOffers, signInPreference, type SignInPreference } from "./sign-in.js";
+export { UsageMeter, kTokens, costOf, registerModelPrice } from "./usage.js";
+export { challengePolicy, challengePolicyFromEnv, DEFAULT_CHALLENGE_POLICY, MIN_POLL_MS } from "./challenge-policy.js";
+export type { ChallengePolicy, ChallengePolicyOptions, ChallengePolicyOverride } from "./challenge-policy.js";
+export { Budget, BudgetExceededError, budgetFromEnv, defaultClient, guardClient, processBudget, setProcessBudget, type DailyCap } from "./budget.js";
+export type { ModelRate, Usage } from "./usage.js";
+export { registerModelProvider, modelProvider, DEFAULT_MODEL_PROVIDER, NO_PROVIDER_MESSAGE, type ModelProvider, type ClientOptions } from "./model-provider.js";

@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Two-factor authentication · Acme</title></head>
+<body><main style="width:340px;margin:60px auto">
+<h1>Two-factor authentication</h1>
+<form action="/sessions/two-factor" method="post">
+  <label for="app_totp">Authentication code</label>
+  <input id="app_totp" name="app_otp" type="text" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="XXXXXX">
+  <button type="submit">Verify</button>
+</form>
+<p>Open your two-factor authenticator (TOTP) app or browser extension to view your authentication code.</p>
+<p><a href="/sessions/two-factor/recovery">Use a recovery code</a></p>
+</main></body></html>
