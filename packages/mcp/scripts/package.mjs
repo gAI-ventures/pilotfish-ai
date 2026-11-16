@@ -25,7 +25,7 @@ import { createRequire, builtinModules } from "node:module";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PROVIDER_MARKERS, SERVER_LINKS, SERVER_SCHEMA, checkDocs, copy, declaredRanges, json, namesInTable, packageJson, readRelease, readText, writePackage } from "../../../scripts/mcp-package-common.mjs";
+import { PROVIDER_MARKERS, SERVER_SCHEMA, checkDocs, copy, declaredRanges, json, namesInTable, packageJson, readRelease, readText, serverLinks, writePackage } from "../../../scripts/mcp-package-common.mjs";
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(pkgDir, "../..");
@@ -216,6 +216,7 @@ const pkg = packageJson(release, {
   bin: { "pilotfish-mcp": "cli.js" },
   dependencies,
   directory: "packages/mcp",
+  homepage: "https://pilotfish.gai.ventures/docs/open",
   keywords: ["mcp", "mcp-server", "model-context-protocol", "pilotfish", "browser", "browser-automation", "browser-agent", "ai-agent", "chromium", "chrome-devtools-protocol", "claude-code", "codex", "cursor"],
 });
 const optional = (name, description, isSecret = false) => ({ name, description, isRequired: false, format: "string", isSecret });
@@ -225,7 +226,7 @@ const server = {
   title: release.title,
   description: release.description,
   version: release.version,
-  ...SERVER_LINKS,
+  ...serverLinks("packages/mcp"),
   packages: [
     {
       registryType: "npm",

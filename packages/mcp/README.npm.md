@@ -215,6 +215,12 @@ pilotfish servers, no model providers.
   signed in as you.
 - [The pilotfish app](https://pilotfish.gai.ventures): run tasks from the web, save logins, watch live, see replays.
 
+## Source and issues
+
+- Source: [gAI-ventures/pilotfish-mcp](https://github.com/gAI-ventures/pilotfish-mcp/tree/main/packages/mcp) on GitHub.
+  This package is published from there, with npm provenance.
+- Issues: [github.com/gAI-ventures/pilotfish-mcp/issues](https://github.com/gAI-ventures/pilotfish-mcp/issues).
+
 ## License
 
 MIT

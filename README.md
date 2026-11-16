@@ -1,12 +1,18 @@
 # pilotfish MCP
 
+[![npm: @gaiventures/pilotfish-mcp](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp?label=%40gaiventures%2Fpilotfish-mcp)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp)
+[![npm: @gaiventures/pilotfish-mcp-managed](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp-managed?label=%40gaiventures%2Fpilotfish-mcp-managed)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp-managed)
+[![MCP Registry: io.github.gAI-ventures/pilotfish](https://img.shields.io/badge/MCP_Registry-io.github.gAI--ventures%2Fpilotfish-blue)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Give any MCP agent (Claude Code, Codex CLI, Cursor, ...) a real Chrome on your own computer. Free, no account, no
 API key: your agent's own model reads each page and decides every step through the `browser_*` tools, and this
 server makes no model calls.
 
 - **Install:** `npx -y @gaiventures/pilotfish-mcp` ([npm](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp))
 - **Docs:** <https://pilotfish.gai.ventures/docs/open> (setup per client, tools, settings)
-- **MCP Registry:** `io.github.gAI-ventures/pilotfish`
+- **MCP Registry:** `io.github.gAI-ventures/pilotfish` ([listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish))
+- **Issues:** <https://github.com/gAI-ventures/pilotfish-mcp/issues>
 
 ```json
 {

@@ -69,11 +69,17 @@ export const json = (o) => `${JSON.stringify(o, null, 2)}\n`;
 export { copyFileSync };
 
 /**
+ * The public source repository of both packages (docs/PUBLISHING.md, "Public mirror"): their code, issues and releases. The
+ * mirror export writes the repository it exports to here.
+ */
+export const SOURCE_REPO = "https://github.com/gAI-ventures/pilotfish-mcp";
+
+/**
  * package.json fields both packages share. `release.npmDescriptionNote`, when set, is added to the npm description
  * only (a marketplace's ownership token: mcprush reads it from npm's latest version); the MCP Registry's server.json
  * keeps `release.description`, which the registry caps at 100 characters.
  */
-export function packageJson(release, { bin, dependencies, directory, keywords }) {
+export function packageJson(release, { bin, dependencies, directory, homepage, keywords }) {
   return {
     name: release.name,
     version: release.version,
@@ -85,10 +91,11 @@ export function packageJson(release, { bin, dependencies, directory, keywords })
     engines: { node: ">=22" },
     dependencies: Object.fromEntries(Object.entries(dependencies).sort(([a], [z]) => a.localeCompare(z))),
     mcpName: release.mcpName,
-    // npm trusted publishing checks this against the repository the workflow runs in.
-    repository: { type: "git", url: "git+https://github.com/gAI-ventures/pilotfish-mcp.git", directory },
-    homepage: "https://github.com/gAI-ventures/pilotfish-mcp#readme",
-    bugs: { url: "https://github.com/gAI-ventures/pilotfish-mcp/issues" },
+    // The public repository, which publishes both packages (npm checks this against the repository a provenance
+    // statement names). The homepage is the package's product docs; the source and issues are on GitHub.
+    repository: { type: "git", url: `git+${SOURCE_REPO}.git`, directory },
+    homepage,
+    bugs: { url: `${SOURCE_REPO}/issues` },
     keywords,
     // npm's provenance ("built from this commit"), from this public repository.
     publishConfig: { access: "public", provenance: true },
@@ -98,18 +105,18 @@ export function packageJson(release, { bin, dependencies, directory, keywords })
 export const SERVER_SCHEMA = "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json";
 
 /**
- * What both MCP Registry entries share (server.json, by SERVER_SCHEMA): the website, and the icons it serves from
- * apps/web/public (a square PNG for clients that take PNG or JPEG only, and the SVG favicon). And this
- * public source repository.
+ * The links of an MCP Registry entry (server.json, by SERVER_SCHEMA): the website, the package's folder in the public
+ * source repository, and the icons the website serves from apps/web/public (a square PNG for clients that take PNG or
+ * JPEG only, and the SVG favicon).
  */
-export const SERVER_LINKS = {
+export const serverLinks = (subfolder) => ({
   websiteUrl: "https://pilotfish.gai.ventures",
-  repository: { url: "https://github.com/gAI-ventures/pilotfish-mcp", source: "github" },
+  repository: { url: SOURCE_REPO, source: "github", subfolder },
   icons: [
     { src: "https://pilotfish.gai.ventures/icon-512.png", mimeType: "image/png", sizes: ["512x512"] },
     { src: "https://pilotfish.gai.ventures/favicon.svg", mimeType: "image/svg+xml", sizes: ["any"] },
   ],
-};
+});
 
 /** Names that must never ship. The maintainers' repository checks them before every sync, so none are listed here. */
 export const PROVIDER_MARKERS = [];

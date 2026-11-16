@@ -19,7 +19,7 @@ import { createRequire, builtinModules } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROVIDER_MARKERS, SERVER_LINKS, SERVER_SCHEMA, checkDocs, copy, json, namesInTable, packageJson, readRelease, readText, writePackage } from "../../../scripts/mcp-package-common.mjs";
+import { PROVIDER_MARKERS, SERVER_SCHEMA, checkDocs, copy, json, namesInTable, packageJson, readRelease, readText, serverLinks, writePackage } from "../../../scripts/mcp-package-common.mjs";
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(pkgDir, "../..");
@@ -81,6 +81,7 @@ const pkg = packageJson(release, {
   bin: { "pilotfish-mcp-managed": "cli.js" },
   dependencies,
   directory: "packages/mcp-managed",
+  homepage: "https://pilotfish.gai.ventures/docs/managed",
   keywords: ["mcp", "mcp-server", "model-context-protocol", "pilotfish", "browser-automation", "browser-agent", "ai-agent", "cloud-browser", "web-automation", "claude-code", "codex", "cursor"],
 });
 const server = {
@@ -89,7 +90,7 @@ const server = {
   title: release.title,
   description: release.description,
   version: release.version,
-  ...SERVER_LINKS,
+  ...serverLinks("packages/mcp-managed"),
   remotes: [
     {
       type: "streamable-http",

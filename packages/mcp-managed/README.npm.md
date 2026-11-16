@@ -494,6 +494,12 @@ Only for this package (the relay). Clients that connect to the URL need none.
 - **`ERROR start_rate`, `queue_full` or `rate_limited`:** too many tasks or requests at once; the `Next:` line says when
   to try again.
 
+## Source and issues
+
+- Source: [gAI-ventures/pilotfish-mcp](https://github.com/gAI-ventures/pilotfish-mcp/tree/main/packages/mcp-managed) on GitHub.
+  The relay is published from there, with npm provenance.
+- Issues: [github.com/gAI-ventures/pilotfish-mcp/issues](https://github.com/gAI-ventures/pilotfish-mcp/issues).
+
 ## License
 
 This relay is MIT licensed. The pilotfish service is covered by its
