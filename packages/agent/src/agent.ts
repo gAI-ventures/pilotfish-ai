@@ -968,11 +968,6 @@ export class Agent {
   private readonly rateWaits = new Map<string, number>();
   /** Those of them the ladder saw go: one drawn on the same page again is put to the model once. */
   private readonly inPagePassed = new Set<string>();
-  /**
-   * Token checks (site + origin and path) whose solved token the model was told to send with the form, and the document
-   * that was on: once each, then the person (`tokenHandoff`).
-   */
-  private readonly tokenHanded = new Map<string, number>();
   /** A HUMAN check cleared on this site at this time: a full page load soon after tends to bring it back. */
   /** Sites a page of which read clear in this run (no check, its document under 400): their exit has reached them. */
   private readonly reachedClean = new Set<string>();
@@ -3547,9 +3542,6 @@ export class Agent {
     // A page with nothing on it, its document answered under 400: this site has been reached on this run's exit (see
     // edgeFirst in the ladder).
     if (c.category === "none" && (before.response?.status ?? 200) < 400 && host) this.reachedClean.add(siteOf(host));
-    // A token check the model was told to send the form past, still on that document: the model is at it. Another
-    // ladder here would buy another solve for every field it fills before the submit.
-    if (isChallenge(c.category) && this.tokenHanded.get(this.tokenKey(host)) === this.page.lastDocumentAt) return { note: "", snap: cur };
     if (!c.blocking && !inPage) {
       // One the ladder saw go, drawn on this page again (a "try again" later than its watch): said once.
       if (c.inPage && isChallenge(c.category) && this.inPagePassed.delete(widget)) return leftToModel("came back after it went away");
@@ -3565,16 +3557,6 @@ export class Agent {
         return r.out;
       }
       ({ c, before, cur, solverTokenInjected } = r);
-      // The solver's token is in the widget's form, the widget still drawn: the site reads the token when the form
-      // is sent, so the model sends it (29 Oct: a reCAPTCHA solved in 5.6 s went to the
-      // person, who never came, with the token in place and Submit one click away).
-      if (solverTokenInjected) {
-        const note = this.tokenHandoff(c, host);
-        if (note) {
-          event("left_to_model");
-          return { note, snap: cur };
-        }
-      }
       // The ladder's last look found the page usable, though the check did not clearly go.
       if (!c.blocking && !(c.inPage && isChallenge(c.category))) return { note: "", snap: cur };
       if (!c.blocking) return leftToModel("did not clear by itself");
@@ -4440,29 +4422,6 @@ export class Agent {
     return { gone: false, snap: next, ...(last ? { r: last } : {}) };
   }
 
-  /** Where a token check is remembered (`tokenHanded`): the site and the page's origin and path. */
-  private tokenKey(host: string): string {
-    return `${siteOf(host)} ${pathKey(this.page.url)}`;
-  }
-
-  /**
-   * The solver's token is in a widget's form and the widget is still drawn: the note telling the model to send the form,
-   * once per site and page (the document remembered, so the checks on it while the model fills the form are left
-   * alone), or null for the person: a wall's cookie (nothing to send), a check with no known token vendor, or a token
-   * the model already sent once.
-   */
-  private tokenHandoff(c: Interruption, host: string): string | null {
-    const key = this.tokenKey(host);
-    if (!tokenWidget(c) || this.tokenHanded.has(key) || this.stopRequest || this.opts.signal?.aborted) return null;
-    this.tokenHanded.set(key, this.page.lastDocumentAt);
-    const name = c.vendor === "recaptcha" ? "reCAPTCHA" : c.vendor === "hcaptcha" ? "hCaptcha" : c.vendor === "arkose" ? "Arkose check" : "Turnstile check";
-    return (
-      `The ${name} on this page (${host}) was answered automatically: its token is in the page, though the box may still look unticked. ` +
-      `Do not tick or solve it yourself. Fill in anything else the form still needs, then press its submit or continue button.` +
-      (this.opts.onIntervention ? ` If the page then shows the check again or says it was not completed, call ask_user with kind "check".` : "")
-    );
-  }
-
   /** Tell the host an obstacle is over (it saves the site profile then); the site's policy caps the wait. The address is scrubbed (a sign-in link's token). */
   private async cleared(e: InterruptionCleared): Promise<void> {
     const cb = this.opts.onInterruptionCleared;
@@ -4525,16 +4484,8 @@ export class Agent {
           if (found.inPage && (await this.passedOff(r.out.snap))) this.inPagePassed.add(widget);
           return await this.withEvidence(async () => undefined, label, () => r.out.note, { settle: false });
         }
+        if (r.solverTokenInjected) tokenNote = " A token was already obtained and injected automatically, so try submitting or continuing first.";
         this.lastSnapshot = r.cur;
-        if (r.solverTokenInjected) {
-          // As for a check the classifier found: the model sends the form with the token, once; then the person.
-          const note = this.tokenHandoff(r.c, host);
-          if (note) {
-            ev("left_to_model");
-            return await this.withEvidence(async () => undefined, label, () => note, { settle: false });
-          }
-          tokenNote = " A token was already obtained and injected automatically, so try submitting or continuing first.";
-        }
       }
     }
     if (!this.opts.onIntervention) return err(`No person is available to ${kind === "login" ? "sign in" : "pass the check"} on ${host}. Finish with done(success=false) if the task needs it.`);
@@ -5000,14 +4951,6 @@ function sameDoc(src: string, url: string, base: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * A check answered by a token the site reads when its form is sent (reCAPTCHA, hCaptcha, Arkose, an embedded Turnstile).
- * A wall's cookie (Cloudflare's interstitial, DataDome, AWS WAF) is put in with a reload instead: nothing to send.
- */
-function tokenWidget(c: Pick<Interruption, "category" | "vendor">): boolean {
-  return c.category === "captcha" && /^(recaptcha|hcaptcha|arkose|cloudflare)$/.test(c.vendor ?? "");
 }
 
 /** origin + path of a URL (query and hash left out), or "" when it is not one. */
