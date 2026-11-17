@@ -144,6 +144,7 @@ other address.
 | `browser_screenshot` `{}` | A JPEG of the viewport. Off when secrets are configured, since the image could show them. |
 | `browser_wait` `{seconds, until?, gone?}` | Wait up to 0.5 to 10 seconds, then return what changed. With `until` or `gone` it returns the moment that text appears on the page or goes (a result's label, the site's "Calculating…"). Actions already wait for the requests they start, for answers a page gets over its own WebSocket, and for a loading line or countdown the site shows. |
 | `browser_resume` `{timeout_s?}` | After a result said `NEEDS A PERSON`: wait (default 300 s) until you have dealt with the page, then return it. |
+| `browser_page_tool` `{tool, arguments?}` | Call a tool the page itself offers through [WebMCP](https://webmachinelearning.github.io/webmcp/), as listed on the `PAGE TOOLS` line of its snapshot: the site's own way to do a step (a search, a booking step), often one call where clicks take several. Returns the tool's answer and what changed. In the tool list only once a page offers tools (your client is told the list changed). A form tool that only fills its form leaves the submit to `browser_click`. |
 | `browser_tabs` `{switch_to?}` | List open tabs, or switch with `switch_to: "t2"`. |
 | `browser_close` `{}` | Close the browser; the next call opens a fresh one. Not needed at the end: it closes when the client disconnects. |
 
@@ -164,6 +165,14 @@ that supports elicitation asks you directly. A bot check that clears on its own 
 
 **Confirmations.** Actions that look irreversible (pay, place an order, send, delete) need your yes. A client with
 elicitation asks you; any other client gets the action refused, with the reason.
+
+**Pages that offer their own tools (WebMCP).** A page can offer tools to agents with WebMCP
+(`document.modelContext.registerTool`, or a `<form toolname>`). pilotfish reads them through Chrome's DevTools
+protocol, lists them with the page's snapshot as `PAGE TOOLS` (name, inputs, what each does), and calls them with
+`browser_page_tool`. A tool's call goes through the same rules as a click: one whose name reads as paying, sending or
+deleting, or that the page marks as consequential, needs your yes, and `{{name}}` secrets are filled in for that
+site only. What a tool returns is shown as the site's words, never as instructions. The browser is started with
+Chrome's `WebMCP` feature on, so any page can offer tools (checked on Chrome 157; a Chrome without WebMCP simply shows no page tools).
 
 ## Settings
 

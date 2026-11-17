@@ -332,7 +332,14 @@ describe.skipIf(!E2E)("browser e2e", () => {
         const deadline = Date.now() + 10_000;
         while (!tab.url.includes("?via=") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
         expect(tab.url, via).toBe(`${a.origin}/second?via=${via}`);
-        expect(await tab.main.evaluate<string>("document.querySelector('h1')?.textContent ?? ''"), via).toBe("Second");
+        // The address is the commit's; under load the document can still be parsing then: wait for its heading.
+        const heading = () => tab.main.evaluate<string>("document.querySelector('h1')?.textContent ?? ''").catch(() => "");
+        let h1 = await heading();
+        while (h1 !== "Second" && Date.now() < deadline + 5_000) {
+          await new Promise((r) => setTimeout(r, 50));
+          h1 = await heading();
+        }
+        expect(h1, via).toBe("Second");
         await tab.close();
       }
     } finally {

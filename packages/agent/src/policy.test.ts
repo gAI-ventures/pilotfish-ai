@@ -132,6 +132,43 @@ function allow(d: PolicyDecision): Extract<PolicyDecision, { kind: "allow" }> {
   return d as Extract<PolicyDecision, { kind: "allow" }>;
 }
 
+describe("DefaultPolicy: a page's own tools (WebMCP page_tool)", () => {
+  const tool = (target: string, input: Record<string, unknown> = {}, opts: DefaultPolicyOptions = {}) =>
+    new DefaultPolicy(opts).check({ tool: "page_tool", input: { tool: "t", ...input }, url: "https://hotel.example.com/", target: `<page-tool name="t">${target}</page-tool>`, task: "find a room" });
+
+  it("judges a tool by its name in words, like a control", async () => {
+    expect((await tool("search rooms")).kind).toBe("allow");
+    expect(await tool("place order")).toMatchObject({ kind: "confirm", write: "pay" });
+    expect(await tool("delete booking")).toMatchObject({ kind: "confirm", write: "delete" });
+    expect(await tool("send message")).toMatchObject({ kind: "confirm", write: "send" });
+    // A filter is not a payment, and taking an item out of a cart is not a deletion.
+    expect((await tool("filter by pay")).kind).toBe("allow");
+    expect((await tool("remove item from cart")).kind).toBe("allow");
+  });
+
+  it("asks about a tool the page marks consequential, with the kind its words name, so a pre-approval covers it", async () => {
+    const consequential = { consequential: true };
+    expect(await tool("book room - Books the room for the dates", consequential)).toMatchObject({ kind: "confirm", write: "pay" });
+    // No word names the kind: asked all the same, as the page says it has consequences.
+    const plain = await tool("update profile - Saves your profile", consequential);
+    expect(plain.kind).toBe("confirm");
+    expect((plain as { write?: string }).write).toBeUndefined();
+    expect((await tool("book room - Books the room", consequential, { preApproved: { kinds: ["pay"] } })).kind).toBe("allow");
+    expect((await tool("book room - Books the room for $120", consequential, { preApproved: { kinds: ["pay"], maxAmount: 100, currency: "USD" } })).kind).toBe("confirm");
+  });
+
+  it("lets a form tool that only fills its form through (its submit button is judged when clicked), and stops at a trial's commit", async () => {
+    expect((await tool("place order", { fillsOnly: true })).kind).toBe("allow");
+    expect((await tool("book room", { consequential: true }, { trial: true })).kind).toBe("deny");
+    expect((await tool("confirm booking", {}, { trial: true })).kind).toBe("deny");
+    expect((await tool("search rooms", {}, { trial: true })).kind).toBe("allow");
+  });
+
+  it("keeps the allowed hosts", async () => {
+    expect((await tool("search rooms", {}, { allowedHosts: ["other.example"] })).kind).toBe("deny");
+  });
+});
+
 describe("DefaultPolicy irreversible actions", () => {
   it("asks the person before each irreversible kind, and names the kind on the verdict", async () => {
     for (const [kind, label] of IRREVERSIBLE) {

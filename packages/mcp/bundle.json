@@ -31,6 +31,7 @@
     "browser/src/network.ts",
     "browser/src/page.ts",
     "browser/src/profile-prefs.ts",
+    "browser/src/webmcp.ts",
     "browser/src/write-guard.ts",
     "cdp/src/connection.ts",
     "cdp/src/transport.ts",

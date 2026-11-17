@@ -47,6 +47,16 @@ describe("Chrome's own traffic", () => {
   });
 });
 
+describe("WebMCP", () => {
+  it("lets every page offer its tools by default (one --enable-features), and keeps Chrome's own default when asked", () => {
+    const enabled = (a: string[]) => a.filter((x) => x.startsWith("--enable-features="));
+    expect(enabled(defaultArgs({}, "/tmp/p"))).toEqual(["--enable-features=NetworkService,NetworkServiceInProcess2,WebMCP"]);
+    expect(enabled(defaultArgs({ webmcp: false }, "/tmp/p"))).toEqual(["--enable-features=NetworkService,NetworkServiceInProcess2"]);
+    // A launch extension's word wins over the options'.
+    expect(enabled(defaultArgs({}, "/tmp/p", { webmcp: false }))).toEqual(["--enable-features=NetworkService,NetworkServiceInProcess2"]);
+  });
+});
+
 describe("a headed window", () => {
   it("has no unsupported-flag bar over its page (--test-type), and a headless browser has no such flag", () => {
     expect(defaultArgs({ headless: false }, "/tmp/p")).toContain("--test-type");

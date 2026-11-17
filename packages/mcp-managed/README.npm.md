@@ -440,6 +440,10 @@ for every sign-in it needs at the start, carries what each site gives to the nex
 the task what may be completed without asking ("pay with my saved card", "go ahead and submit"); anything else that
 is final waits for a yes.
 
+A site that offers its own tools to agents through [WebMCP](https://webmachinelearning.github.io/webmcp/) (the
+origin trial's sites in Chrome) has them used where they fit, under the same rules: a tool that pays, sends or deletes,
+or that the site marks as consequential, waits for a yes like the same button would.
+
 A task that names no site ("research Postgres vs MySQL for a startup") may be answered from a web search, every fact
 linked to its page, with no browser. A price or availability for particular dates is always read on the site itself.
 

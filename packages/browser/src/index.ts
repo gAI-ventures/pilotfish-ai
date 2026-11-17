@@ -18,5 +18,7 @@ export { parseShortcut, describeKey } from "./keys.js";
 export { CHROME_SERVICE_HOSTS, isNonPublicAddress } from "./network.js";
 export { RequestInterceptor, mergeHeaders } from "./intercept.js";
 export { blockPageWrites } from "./write-guard.js";
+export { PageTools, pageToolOutputText, describeToolInput } from "./webmcp.js";
+export type { PageTool, PageToolAnnotations, PageToolResult } from "./webmcp.js";
 export type { Interception, PausedRequest, RequestHandler, HandlerRegistration } from "./intercept.js";
 export type { KeyDescriptor, ParsedShortcut } from "./keys.js";

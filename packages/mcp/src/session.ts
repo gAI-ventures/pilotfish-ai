@@ -160,6 +160,8 @@ export class BrowserSession {
       // result again on each later call, and three screens of a results page ran to 24,000 characters (4 Nov).
       actionSnapshotBand: 0,
       snapshotMoreHint: "browser_scroll for the next screen, browser_get_text for the page's text, or browser_snapshot (whole_page) for every element",
+      // A page's WebMCP tools are listed with its snapshot, for browser_page_tool (enabled once a page offers one).
+      pageToolCall: "browser_page_tool",
     });
     return this.agent;
   }

@@ -24,6 +24,7 @@ import type { WriteRequest } from "./network.js";
 import { describeKey, parseShortcut, type KeyDescriptor } from "./keys.js";
 import { READ_ONLY_GUARD } from "./write-guard.js";
 import { inputDriver, type InputDriver } from "./input-driver.js";
+import { PageTools } from "./webmcp.js";
 
 /** The read-only world's name: one per process, naming nothing (a world's name is not visible to the page). */
 const READ_ONLY_WORLD = randomBytes(6).toString("hex");
@@ -513,6 +514,8 @@ export class Page {
   private historyCancelled: () => void = () => {};
   private openDialog: Protocol.Page.JavascriptDialogOpeningEvent | null = null;
   readonly dialogs: DialogInfo[] = [];
+  /** The tools this page offers agents through WebMCP (webmcp.ts), kept current from Chrome's WebMCP domain. */
+  readonly webmcp: PageTools = new PageTools(() => this.main.frameId);
   dialogHandler: DialogHandler | null = null;
   /** Default dialog policy: accept alerts, dismiss everything else. */
   defaultDialogPolicy: (type: Protocol.Page.DialogType) => boolean = (type) => type === "alert";
@@ -733,6 +736,8 @@ export class Page {
       s.send("Accessibility.enable").catch(() => undefined),
       s.send("Inspector.enable").catch(() => undefined),
       s.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }),
+      // The page's WebMCP tools (webmcp.ts): a DevTools domain, nothing the page can see; a no-op on a Chrome without it.
+      this.webmcp.attach(s),
     ]);
     // Init scripts, bindings and blocking rules go in before the document runs (see Browser.sessionInitializers).
     if (!openerCutOff(s.targetInfo)) {

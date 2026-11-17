@@ -137,6 +137,10 @@ export const ToolInputs = {
     instruction: z.string().describe("What to extract, e.g. 'all product names and prices in the results list'"),
     schema_json: z.string().optional().describe("Optional JSON Schema (as a JSON string) the result must match"),
   }),
+  page_tool: z.object({
+    tool: z.string().min(1).max(200).describe("A tool's name from the PAGE TOOLS line"),
+    arguments_json: z.string().max(20_000).describe('Its input as a JSON object matching the parameters listed there, e.g. {"city":"Goa"} ("{}" for none). {{secret_name}} placeholders work in string values.'),
+  }),
   done: z.object({
     success: z.boolean(),
     result: z.string().describe("The answer the person reads (Markdown): the answer in one sentence, then the details as a short list. Complete: every item the task asked for, with the evidence you saw. Many rows or a long text a read returned in the shape asked for: never type them again. Write {{rows}} in their place for the rows of your latest collect, or {{last_read}} for your latest query, get_text or extract result in full, even where you were shown it cut short."),
@@ -184,6 +188,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   query: "Read values directly from the page with a small read-only JavaScript expression (returns JSON, max 4000 chars shown; a longer result is kept whole for {{last_read}} in done). Much cheaper than reading the whole page when you know what you need (a price, an order id, a count, a list of titles). What it stores on globalThis stays for later queries on the same page: collect rows there across scrolls of a list that unloads what scrolled away.",
   collect: "Gather the rows of a long or endless list (a feed, search results, reviews, a table that loads as it scrolls) in ONE call, instead of scrolling and reading by turns: starting at the top of the page, it is scrolled a screen at a time and your expression is run after each, every new row kept once and in order, until there are `count` rows or scrolling brings no more. Returns how many it has and the first of them; all of them are kept for {{rows}} in done's result.",
   extract: "Extract structured data from the current page text with a helper model. Returns JSON. Slow for a long list (the helper writes out every row): for many rows of the same shape, one query is far faster.",
+  page_tool: "Call a tool the page itself offers (WebMCP; listed on the PAGE TOOLS line of the snapshot): the site's own way to do something, such as a search or a booking step, often in one call where clicking takes several. Returns the tool's answer and what changed on the page. Prefer it when one fits the step; a tool that fills a form leaves it for you to check and submit with its own button.",
   done: "Finish the task. Set success=false if the task cannot be completed and explain why. Never claim success without evidence from the page.",
   ask_user: "Pause and ask the person (blocks until answered), only for what they alone can give: a 2FA code, a login, a choice only they can make. Several values to ask (a form's details the task does not give): all in one call with questions, as soon as you know you need them. Not for confirmations (the system handles irreversible steps), not for ambiguities a reasonable reading settles, and never to have them look at or work the page for you, to ask how to work it (what to do about a step that will not work, where something is), or to read a progress note (refused).",
 };

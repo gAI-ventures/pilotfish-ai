@@ -33,6 +33,8 @@ export interface LaunchSpawn {
   env?: Record<string, string>;
   /** More profile preferences, written with the launch's own before Chrome starts (profile-prefs.ts). */
   prefs?: Record<string, unknown>;
+  /** false: no --enable-features=WebMCP for this launch, whatever LaunchOptions.webmcp says (Chrome's own default). */
+  webmcp?: boolean;
 }
 
 /** A virtual display a headed browser opens on (LaunchExtension.startDisplay). */

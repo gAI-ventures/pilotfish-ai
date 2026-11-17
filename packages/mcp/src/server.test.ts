@@ -26,7 +26,16 @@ describe("tool input schemas", () => {
   });
 
   it("are the direct browser tools only: no task runner of pilotfish's own", () => {
-    expect(Object.keys(Inputs).sort()).toEqual(TOOLS);
+    // browser_page_tool (a page's WebMCP tools) is listed only once a page offers some (mcp.e2e.test.ts).
+    expect(Object.keys(Inputs).sort()).toEqual([...TOOLS, "browser_page_tool"].sort());
+  });
+
+  it("take a page tool's name and an open object of arguments", () => {
+    expect(Inputs.browser_page_tool.safeParse({ tool: "search_flights", arguments: { from: "DEL", to: { city: "BOM" } } }).success).toBe(true);
+    expect(Inputs.browser_page_tool.safeParse({ tool: "search_flights" }).success).toBe(true);
+    expect(Inputs.browser_page_tool.safeParse({ tool: "" }).success).toBe(false);
+    expect(Inputs.browser_page_tool.safeParse({ tool: "x", arguments: "{}" }).success).toBe(false);
+    expect(Inputs.browser_page_tool.safeParse({ tool: "x", input: {} }).success).toBe(false);
   });
 
   it("check refs, URLs and enums", () => {

@@ -7,7 +7,8 @@
 
 Give any MCP agent (Claude Code, Codex CLI, Cursor, ...) a real Chrome on your own computer. Free, no account, no
 API key: your agent's own model reads each page and decides every step through the `browser_*` tools, and this
-server makes no model calls.
+server makes no model calls. A page that offers its own tools through [WebMCP](https://webmachinelearning.github.io/webmcp/)
+gets them listed with its snapshot, callable with `browser_page_tool`.
 
 - **Install:** `npx -y @gaiventures/pilotfish-mcp` ([npm](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp))
 - **Docs:** <https://pilotfish.gai.ventures/docs/open> (setup per client, tools, settings)

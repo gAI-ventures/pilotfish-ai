@@ -231,6 +231,28 @@ export class DefaultPolicy implements ActionPolicy {
         return { kind: "deny", reason: `The current page (${host}) is not in the allowed list (${this.opts.allowedHosts.join(", ")}); navigate back to an allowed site first` };
       }
     }
+    // A page's own tool (WebMCP, the agent's page_tool): judged like a control, by its name in words (and, when the page
+    // marks it consequential, by what it says it does). A form tool that only fills its form commits nothing: its
+    // submit button is judged when it is clicked. A consequential one is asked about even when no word names the step,
+    // as the page itself says it has consequences; its kind is read from its words where they name one, so a task's
+    // pre-approval (or the person's own go-ahead) covers it like the same click.
+    if (ctx.tool === "page_tool") {
+      if (ctx.input["fillsOnly"] === true) return { kind: "allow" };
+      const text = ctx.target ?? "";
+      const { says } = targetParts(text);
+      const consequential = ctx.input["consequential"] === true;
+      if (this.opts.trial && (consequential || TRIAL_COMMIT.test(says))) return { kind: "deny", reason: trialStop(text) };
+      const patterns: Array<{ kind?: WriteKind; re: RegExp; intl?: boolean }> = this.opts.irreversiblePatterns?.map((re) => ({ kind: undefined, re })) ?? DEFAULT_IRREVERSIBLE;
+      for (const p of patterns) {
+        if (!p.re.test(says)) continue;
+        if (p.kind === "delete" && CART_EDIT.test(says) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
+        if (!parseMoney(says) && (CLEARS_FILTER.test(says) || (p.kind === "pay" && FILTER_WORDS.test(says))) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
+        return this.preApproval({ kind: "confirm", reason: `Target looks irreversible: ${text.slice(0, 160)}`, ...(p.kind ? { write: p.kind } : {}) }, ctx, says);
+      }
+      if (!consequential) return { kind: "allow" };
+      const kind: WriteKind | undefined = PAY_INTENT.test(says) ? "pay" : (Object.keys(STEP_INTENT) as Array<Exclude<WriteKind, "pay">>).find((k) => STEP_INTENT[k].test(says));
+      return this.preApproval({ kind: "confirm", reason: `The page marks this tool as having consequences: ${text.slice(0, 160)}`, ...(kind ? { write: kind } : {}) }, ctx, says);
+    }
     // The caller sets `submit` for a type that actually submits (the agent computes it from per_key and
     // the field type); a newline in the text alone is not a submit (insertText never presses Enter).
     if (ctx.tool === "click" || (ctx.tool === "type" && ctx.input["submit"] === true) || (ctx.tool === "press" && isSubmitKey(String(ctx.input["key"])))) {

@@ -84,6 +84,12 @@ export interface LaunchOptions {
    * (setLaunchExtension), if any.
    */
   extension?: LaunchExtension | null;
+  /**
+   * Default true: --enable-features=WebMCP, so any page may offer its tools to the agent (navigator's
+   * `document.modelContext`, webmcp.ts). false keeps Chrome's own default, where only a page carrying the WebMCP
+   * origin trial's token has the API (a launch extension may say so too: LaunchSpawn.webmcp).
+   */
+  webmcp?: boolean;
 }
 
 /** Google Chrome stable, installed system-wide (or, on Windows, per user): what CI and the servers run. */
@@ -194,7 +200,8 @@ export function defaultArgs(opts: LaunchOptions, userDataDir: string, extra: Lau
     // exit whenever any site is routed (CHECK_SERVICE_HOSTS).
     // An extension may disable more (LaunchSpawn.disableFeatures): a second --disable-features would replace this one.
     `--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,DestroyProfileOnBrowserClose,HttpsUpgrades,PrivacySandboxSettings4,LensOverlay,AimEnabled,SafeBrowsingHashPrefixRealTimeLookups,NetworkTimeServiceQuerying${extra.disableFeatures?.length ? `,${extra.disableFeatures.join(",")}` : ""}`,
-    "--enable-features=NetworkService,NetworkServiceInProcess2",
+    // WebMCP (webmcp.ts): pages may register tools for agents. Without it only a page with the origin trial's token can.
+    `--enable-features=NetworkService,NetworkServiceInProcess2${(extra.webmcp ?? opts.webmcp ?? true) ? ",WebMCP" : ""}`,
     // The on-device model manifest registers itself with the component updater and installs at every start
     // (update.googleapis.com, edgedl.me.gvt1.com) despite --disable-component-update. An empty override config
     // (written by launch(), see profile-prefs.ts) means no manifest: the built-in AI APIs report unavailable.
