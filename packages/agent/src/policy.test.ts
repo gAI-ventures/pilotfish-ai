@@ -428,6 +428,17 @@ describe("a payment the person's own words approve (11 Nov)", () => {
 
   it("any final step the words ask for, each on its own; moving money needs \"go ahead\" said; a draft or \"ask me first\" approves none", () => {
     expect(approvedByWords("Post 'We are hiring' on my LinkedIn")).toEqual(["send"]);
+    // "Make the payment" asks to pay (17 Nov: three follow-ups saying so each stopped at a confirm).
+    expect(approvedByWords("make the payment - i'll share details and store it to vault as well")).toEqual(["pay"]);
+    expect(approvedByWords("ok makethe upi payment and tell me - i'll make it here only")).toEqual(["pay"]);
+    expect(approvedByWords("use the coupon and complete the payment, dont ask")).toEqual(["pay"]);
+    expect(approvedByWords("how do I make a payment?")).toEqual([]);
+    expect(approvedByWords("tell me the payment options")).toEqual([]);
+    // Being told at the payment step holds paying back.
+    expect(approvedByWords("add this and proceed, notify me at payment")).toEqual([]);
+    expect(holdsBack("now proceed and notify ,e at payment")).toBe(true);
+    expect(holdsBack("add it to the cart and stop at checkout")).toBe(true);
+    expect(holdsBack("order it and tell me the order number")).toBe(false);
     expect(approvedByWords("Reply to the latest email from Ada saying yes, Thursday works")).toEqual(["send"]);
     expect(approvedByWords("Cancel my Netflix subscription")).toEqual(["cancel"]);
     expect(approvedByWords("Delete my old office address from my Amazon account")).toEqual(["delete"]);

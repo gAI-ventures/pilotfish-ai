@@ -488,6 +488,22 @@ describe("tier C: snapshot", () => {
 
 // ---------------------------------------------------------------- resume predicates
 
+describe("a check at a sign-in address", () => {
+  it("a puzzle page between the login and the account is the check, not the sign-in (17 Nov)", () => {
+    // An identity provider's verification address whose puzzle is drawn by a script no frame signature knows: read as the
+    // sign-in, the run ended there with the person at hand to solve it.
+    const u = "https://www.amazon.in/ap/cvf/request?arb=e8b2";
+    const puzzle = S(u, [E("h1", {}, ["Solve this puzzle to protect your account"]), E("a", { href: "#" }, ["Need help?"])], { title: "Authentication required" });
+    expect(classify({ url: u, snapshot: puzzle })).toMatchObject({ category: "captcha", blocking: true, needs: "solve_in_live_view" });
+    // Its "Verifying your device" moment before the puzzle is drawn waits like any interstitial.
+    const verifying = S(u, [E("h1", {}, ["Verifying your device"])], { title: "Authentication required" });
+    expect(classify({ url: u, snapshot: verifying })).toMatchObject({ category: "bot_challenge", autoResolvable: true });
+    // The same address asking for the code is still the sign-in's own step.
+    const otp = S(u, [E("h1", {}, ["Verify mobile number"]), E("p", {}, ["A text with a One Time Password (OTP) has been sent to your mobile number: +91 ******1234"]), E("label", { for: "o" }, ["Enter OTP"]), E("input", { id: "o", name: "otpCode", type: "tel", autocomplete: "one-time-code" }), E("button", {}, ["Submit code"])]);
+    expect(classify({ url: u, snapshot: otp }).category).toBe("otp");
+  });
+});
+
 describe("isResolved", () => {
   it("captcha: token filled resolves an inline widget; a gate needs the challenge gone plus a navigation or clearance", () => {
     const ts = "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv/abc/0x4/light/fbE/new/normal/auto/";
@@ -579,6 +595,15 @@ describe("isResolved", () => {
     const push = S("https://a.example/mfa", [E("h1", {}, ["Check your phone"]), E("p", {}, ["Tap Yes on the notification to sign in."])]);
     expect(isResolved("push_approval", { snapshot: push }, { snapshot: push })).toBe(false);
     expect(isResolved("push_approval", { snapshot: push }, { snapshot: done })).toBe(true);
+  });
+
+  it("a payment the person completes on the site's own page (no issuer frame) is done once the page moves on", () => {
+    const pay = "https://shop.example/pay-checkout/payment-selection?id=1";
+    const qr = { url: pay, navigatedAt: 1, snapshot: S(pay, [E("h1", {}, ["Scan the QR code to pay"]), E("img", { alt: "UPI QR code" })]) } satisfies InterruptInput;
+    // Still on it (the person has not scanned yet, or a poll redrew the page): not done.
+    expect(isResolved("payment_3ds", qr, { ...qr })).toBe(false);
+    const done = "https://shop.example/order/thankyou?orderId=403-1";
+    expect(explainResolution("payment_3ds", qr, { url: done, navigatedAt: 2, snapshot: S(done, [E("h1", {}, ["Order placed, thank you"])]) })).toMatchObject({ resolved: true, signals: ["main-frame navigation"] });
   });
 
   it("3DS: issuer frame gone; http_auth: no 401", () => {

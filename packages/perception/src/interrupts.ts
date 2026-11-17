@@ -355,8 +355,10 @@ export const CHALLENGE_RULES: TextRule[] = [
   { category: "captcha", vendor: "amazon", signal: "Amazon character CAPTCHA", all: [/(enter|type) the characters you see/, /robot|characters/] },
   { category: "captcha", vendor: "aws-waf", signal: "AWS WAF \"Let's confirm you are human\"", all: [/let'?s confirm you are human/] },
   { category: "bot_challenge", vendor: "cloudflare", signal: "Cloudflare challenge interstitial text", all: [/checking (your browser|if the site connection is secure)|verify(ing)? you are human by completing|needs to review the security of your connection|performing security verification|enable javascript and cookies to continue|ddos protection by cloudflare/], title: /^just a moment|^attention required|^one more step/i, sparse: true, autoResolvable: true },
-  { category: "bot_challenge", signal: "generic \"checking your browser\" interstitial", all: [/checking your browser|please wait while we (verify|check)|browser check|verifying (that )?you are (a )?human|verify(ing)? you are human/], sparse: true, autoResolvable: true },
-  { category: "captcha", signal: "generic \"are you a robot\" gate", all: [/are you a (robot|human)|prove you('?re| are) (not a robot|human)|complete the (security check|captcha)|please verify you are (a )?human|i'?m not a robot|human verification/], sparse: true },
+  { category: "bot_challenge", signal: "generic \"checking your browser\" interstitial", all: [/checking your browser|please wait while we (verify|check)|browser check|verifying (that )?you are (a )?human|verify(ing)? you are human|verifying your (device|browser)/], sparse: true, autoResolvable: true },
+  // "Solve this puzzle to protect your account" (17 Nov: a sign-in's puzzle page, its puzzle drawn by a script no frame
+  // signature knows, read as the sign-in itself; the run ended there while the person was at hand to solve it).
+  { category: "captcha", signal: "generic \"are you a robot\" gate", all: [/are you a (robot|human)|prove you('?re| are) (not a robot|human)|complete the (security check|captcha)|please verify you are (a )?human|i'?m not a robot|human verification|solve (this|the) puzzle/], sparse: true },
 ];
 
 const OTP_TEXT = [
@@ -1521,6 +1523,10 @@ function refineAuth(m: Model, hit: Hit): Hit {
   const v = pageView(m);
   const hard = matchRules(m, v, HARD_BLOCK_RULES);
   if (hard) return { ...hard, vendor: hard.vendor ?? hit.vendor, signals: [...hard.signals, ...hit.signals] };
+  // A check page at a sign-in address (a puzzle between the login and the account): the check, not the sign-in, so it
+  // goes to the challenge ladder and the person. The provider is not the check's vendor: only the rule's own is kept.
+  const check = matchRules(m, v, CHALLENGE_RULES);
+  if (check) return { ...check, signals: [...check.signals, ...hit.signals] };
   if (v.inputs.some((i) => i.type === "password" && i.inViewport)) return { ...hit, needs: "login_in_live_view" };
   const step = detectAuthStep(m, v, true);
   if (step) return { ...step, vendor: step.vendor ?? hit.vendor, signals: [...step.signals, ...hit.signals] };
@@ -1719,6 +1725,12 @@ export function explainResolution(category: InterruptCategory, before: Interrupt
     }
     case "payment_3ds": {
       const open = frameHits(ma).some((h) => h.category === "payment_3ds" && h.blocking);
+      // A payment the person completes on the site's own page (a UPI QR to scan, an approval in their app, card details),
+      // with no issuer frame: done once the page moves on from it (the site's confirmation, its next step).
+      if (!frameHits(buildModel(before)).some((h) => h.category === "payment_3ds" && h.blocking)) {
+        const nav = navigated(before, after);
+        return { resolved: !open && !!nav, signals: [open ? "issuer frame shown" : nav ?? "still on the payment page"] };
+      }
       return { resolved: !open, signals: [open ? "issuer frame still shown" : "issuer frame gone"] };
     }
     case "http_auth": {

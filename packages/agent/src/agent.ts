@@ -2855,6 +2855,7 @@ export class Agent {
           }
           if (input["kind"] === "signup") return await this.askSignup(String(input["question"]));
           if (input["kind"] === "passkey") return await this.askPasskey(String(input["question"]));
+          if (input["kind"] === "pay") return await this.askPay(String(input["question"]));
           // A CAPTCHA or bot check goes to the person in the live view, whatever kind the model chose
           // (a text or code box gives them nothing to do with it).
           if (input["kind"] === "check" || CHECK_QUESTION.test(String(input["question"]))) {
@@ -4739,6 +4740,53 @@ export class Agent {
     const r = await this.opts.onSignup({ site, host, url: this.page.url, reason: clip(reason, 300) });
     if ("declined" in r) return ok(`The person did not approve creating an account on ${site}${r.declined ? ` (${r.declined})` : ""}. Do not sign up: do what the task allows without an account, or finish and say an account is needed.`, "ask_user: signup declined");
     return ok(this.signupBrief(site, r), "ask_user: signup approved");
+  }
+
+  /**
+   * A payment step only the person can take on the site's own page (kind "pay"): a UPI QR code to scan, an approval in
+   * their bank or UPI app, card details to type. They take it in the live view, and the run goes on once the page moves
+   * on from it (the site's confirmation) or they say it is done. 17 Nov: asked for "the QR", a run had no way to show it
+   * (no screenshot on a signed-in site) and asked the person to approve pressing Pay twice instead.
+   */
+  private async askPay(reason: string): Promise<ToolOutcome> {
+    const host = safeHost(this.page.url);
+    const label = "ask_user: pay";
+    if (!this.opts.onIntervention) return err(`No person is available to complete the payment on ${host}. Call done(success=false) saying the order is waiting for their payment, and how to pay (the method the page shows).`);
+    const before = this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 }));
+    const event = (handled: InterruptionHandled, waitedMs?: number) =>
+      this.opts.onStep?.({ type: "interruption", category: "payment_3ds", needs: "solve_in_live_view", handled, host, ...(waitedMs !== undefined ? { waitedMs } : {}), signals: [clip(reason, 120)], source: "ask_user" });
+    event("asked");
+    const start = await classifyPage(this.page, before).catch(() => null);
+    const out = await this.handOff(
+      {
+        id: `iv${++this.interventionSeq}`,
+        category: "payment_3ds",
+        needs: "solve_in_live_view",
+        url: this.secrets.scrub(this.page.url),
+        host,
+        title: before.title,
+        message: `Please complete the payment on ${host} in the live view (scan the QR code, approve it in your app, or enter your card details there); the run carries on once it goes through. ${clip(reason, 200)}`,
+        autoResume: !!start,
+      },
+      start?.input ?? ({} as InterruptInput),
+      before,
+      true,
+    );
+    if (out.kind === "ended") {
+      const s = this.handOffEnded({ category: "payment_3ds" }, out, event);
+      return ok(`${s.note} Do not try to get past it.`, `${label} stopped`);
+    }
+    if (out.kind === "declined") {
+      event("unresolved", out.waitedMs);
+      return ok(`The person did not complete the payment on ${host}${out.reason ? ` (${out.reason})` : ""}. Do not press pay again: call done(success=false) saying the order is waiting for their payment.`, `${label} declined`);
+    }
+    if (out.kind === "cleared") {
+      event("resolved", out.waitedMs);
+      return await this.withEvidence(async () => undefined, label, () => `The person completed the payment step on ${host}. Read the page below for the order or payment confirmation (its number, total and status) and carry on.`, { settle: false });
+    }
+    // They said it is done while the page has not moved on yet (a confirmation still loading): the page decides.
+    event("resolved", out.waitedMs);
+    return await this.withEvidence(async () => undefined, label, () => `The person says they completed the payment on ${host}. The confirmation may take a moment: read the page below (reload or open the site's orders page if it has not changed) and report what it shows.`, { settle: false });
   }
 
   /** A site offers a passkey (kind "passkey"): the person decides once per site whether pilotfish keeps one. */

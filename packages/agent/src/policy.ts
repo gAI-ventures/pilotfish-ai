@@ -314,7 +314,9 @@ export class DefaultPolicy implements ActionPolicy {
 }
 
 /** Words of a payment to make: pay, buy, order, check out, book, reserve, subscribe, renew, recharge, top up. */
-const PAY_INTENT = /\b(pay|paying|purchase|buy|order|check ?out|book|reserve|subscribe|renew|recharge|top[- ]?up|place (the|my|an?) order)\b/i;
+// "Make the payment", "complete the UPI payment" ask for one too (17 Nov: "make the payment", "ok make the upi payment",
+// "use the coupon and make the payment dont ask" each stopped at a confirm, the word "payment" not read as paying).
+const PAY_INTENT = /\b(pay|paying|purchase|buy|order|check ?out|book|reserve|subscribe|renew|recharge|top[- ]?up|place (the|my|an?) order)\b|\b(make|complete|finish|do)\s*(the|my|a|this)?\s*([a-z]+ )?payment\b/i;
 /** Words saying how, or that it is to be done without asking: a saved method, a wallet, credits, a coupon, "go ahead". */
 const PAY_HOW = /\b(saved|stored|default|existing|on file|wallet|balance|credits?|points|miles|coupons?|vouchers?|promo code|gift ?cards?|upi|cash on delivery|cod|net ?banking|go ahead|proceed|without (asking|confirming|checking with me)|(don'?t|do not|no need to) (ask|confirm|check with me)|complete (the|my) (payment|purchase|order|booking)|confirm (the|my) (booking|order|payment|purchase)|make the payment|finish (the|my) (payment|purchase|order|booking))\b/i;
 /** Words of each final step to make (pay has its own above): send or post, delete, cancel, transfer. */
@@ -330,7 +332,9 @@ const GO_AHEAD = /\b(go ahead|proceed|without (asking|confirming|checking with m
 const HELD_ANY = /\b(ask|check with|confirm with) me (first|before)\b|\b(let|show) me (see|review|check)\b|\b(draft|preview)\b|\b(just|only) (find|search|look|check|compare|read|tell)\b/i;
 /** A message that holds one kind back: "don't send it", "before you delete", "without cancelling". */
 const HELD: Record<WriteKind, RegExp> = {
-  pay: /\b(don'?t|do not|never|without) (pay|paying|buy|buying|order|ordering|book|booking|check ?out|purchase|place)\b|\bbefore (you )?(pay|paying|buy|buying|book|booking|order|ordering|checkout|checking out)\b|\bleave (it )?in (the|my) (cart|basket|bag)\b/i,
+  // "Notify me at payment", "stop at checkout": the person pays, or says so, there (17 Nov: "now proceed and notify me at
+  // payment" carried an earlier "just order it for me" as approved).
+  pay: /\b(don'?t|do not|never|without) (pay|paying|buy|buying|order|ordering|book|booking|check ?out|purchase|place)\b|\bbefore (you )?(pay|paying|buy|buying|book|booking|order|ordering|checkout|checking out)\b|\bleave (it )?in (the|my) (cart|basket|bag)\b|\b(notify|tell|ping|alert|call|ask|wake)\b[^.\n]{0,6}\b(at|before|on|when (you )?(reach|get to|are at))\s+(the\s+)?(payment|checkout|pay(ment)? (page|step))\b|\bstop (at|before) (the )?(payment|checkout|pay(ment)? (page|step))\b/i,
   send: /\b(don'?t|do not|never|without) (send|sending|post|posting|publish|publishing|submit|submitting|reply|replying)\b|\bbefore (you )?(send|sending|post|posting|publish|submitting)\b/i,
   delete: /\b(don'?t|do not|never|without) (delete|deleting|remove|removing)\b|\bbefore (you )?(delete|deleting|remove|removing)\b/i,
   cancel: /\b(don'?t|do not|never|without) (cancel|cancelling|canceling|unsubscribe)\b|\bbefore (you )?(cancel|cancelling|canceling)\b/i,
