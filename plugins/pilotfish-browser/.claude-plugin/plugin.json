@@ -1,0 +1,19 @@
+{
+  "name": "pilotfish-browser",
+  "displayName": "pilotfish browser",
+  "version": "1.0.0",
+  "description": "A real Chrome on your own computer for Claude: open pages, click, type and read them through pilotfish's browser_* MCP tools. Free, no account, no API key.",
+  "author": {
+    "name": "gAI Ventures",
+    "url": "https://pilotfish.gai.ventures"
+  },
+  "homepage": "https://pilotfish.gai.ventures/docs/open",
+  "repository": "https://github.com/gAI-ventures/pilotfish-mcp",
+  "license": "MIT",
+  "keywords": ["browser", "chrome", "browser-automation", "web", "cdp", "mcp", "pilotfish"],
+  "icon": "./assets/logo.png",
+  "documentationUrl": "https://pilotfish.gai.ventures/docs/open",
+  "supportUrl": "https://github.com/gAI-ventures/pilotfish-mcp/issues",
+  "privacyPolicyUrl": "https://pilotfish.gai.ventures/privacy",
+  "termsOfServiceUrl": "https://pilotfish.gai.ventures/terms"
+}

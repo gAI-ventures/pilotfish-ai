@@ -1,0 +1,17 @@
+{
+  "name": "pilotfish",
+  "description": "pilotfish's open MCP server as a Claude Code plugin: a real Chrome on your own computer, driven by Claude through the browser_* tools.",
+  "owner": {
+    "name": "gAI Ventures",
+    "url": "https://pilotfish.gai.ventures"
+  },
+  "plugins": [
+    {
+      "name": "pilotfish-browser",
+      "source": "./plugins/pilotfish-browser",
+      "description": "A real Chrome on your own computer for Claude: open pages, click, type and read them through pilotfish's browser_* MCP tools. Free, no account, no API key.",
+      "category": "automation",
+      "tags": ["browser", "chrome", "mcp"]
+    }
+  ]
+}

@@ -14,6 +14,29 @@ server makes no model calls.
 - **MCP Registry:** `io.github.gAI-ventures/pilotfish` ([listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish))
 - **Issues:** <https://github.com/gAI-ventures/pilotfish-mcp/issues>
 
+## Install
+
+[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=pilotfish&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBnYWl2ZW50dXJlcy9waWxvdGZpc2gtbWNwIl19)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_pilotfish-0098FF)](https://vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522pilotfish%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522-y%2522%252C%2522%2540gaiventures%252Fpilotfish-mcp%2522%255D%257D)
+[![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_pilotfish-24bfa5)](https://insiders.vscode.dev/redirect?url=vscode-insiders%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522pilotfish%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522-y%2522%252C%2522%2540gaiventures%252Fpilotfish-mcp%2522%255D%257D)
+
+Each button opens the app with the server filled in, for you to review and add.
+
+**Claude Code**, in a terminal:
+
+```sh
+claude mcp add pilotfish -- npx -y @gaiventures/pilotfish-mcp
+```
+
+or as a plugin, from this repository's plugin marketplace, inside Claude Code:
+
+```text
+/plugin marketplace add gAI-ventures/pilotfish-mcp
+/plugin install pilotfish-browser@pilotfish
+```
+
+**Any other MCP client** (Codex CLI, Cline, Windsurf, ...): add this to its MCP settings.
+
 ```json
 {
   "mcpServers": {
@@ -21,6 +44,9 @@ server makes no model calls.
   }
 }
 ```
+
+Node 22 or later and Google Chrome (or Chromium) on the same computer. Setup per client:
+<https://pilotfish.gai.ventures/docs/open>.
 
 ## What is here
 
@@ -33,6 +59,8 @@ server makes no model calls.
 | `packages/perception` | Structure-first page snapshots, element handles, and the evidence diff after each action. |
 | `packages/interrupts` | Cookie banners and ads handled deterministically, with maintained rule sets. |
 | `packages/agent` | The executor every tool runs through: policy before page-affecting actions, secrets typed as `{{name}}` and never shown to the model, evidence after. |
+| `plugins/pilotfish-browser` | The server as a plugin for Claude Code (`.claude-plugin/plugin.json`, `.mcp.json`) and Cursor (`.cursor-plugin/plugin.json`, `mcp.json`), listed by the marketplace files `.claude-plugin/marketplace.json` and `.cursor-plugin/marketplace.json`. |
+| `.mcp.json` | The server entry, read by directories that index this repository; opening the repository in Claude Code offers to start it too. |
 
 ## The managed MCP
 

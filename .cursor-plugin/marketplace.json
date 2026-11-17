@@ -1,0 +1,18 @@
+{
+  "name": "pilotfish",
+  "owner": {
+    "name": "gAI Ventures",
+    "url": "https://pilotfish.gai.ventures"
+  },
+  "metadata": {
+    "description": "pilotfish's open MCP server as a Cursor plugin: a real Chrome on your own computer, driven by your agent through the browser_* tools.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "pilotfish-browser",
+      "source": "./plugins/pilotfish-browser",
+      "description": "A real Chrome on your own computer for your agent: open pages, click, type and read them through pilotfish's browser_* MCP tools. Free, no account, no API key."
+    }
+  ]
+}

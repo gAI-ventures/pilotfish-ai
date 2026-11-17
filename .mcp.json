@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pilotfish": {
+      "command": "npx",
+      "args": ["-y", "@gaiventures/pilotfish-mcp"]
+    }
+  }
+}
