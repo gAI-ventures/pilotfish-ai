@@ -133,10 +133,10 @@ other address.
 | `browser_navigate` `{url, snapshot?}` | Open an http(s) URL and return what happened plus the visible screen, with counts of what is above and below. `snapshot: false` returns only what happened and the counts, for a page you will read with `browser_query` and not act on. |
 | `browser_snapshot` `{whole_page?}` | The page as a compact outline with refs (`[e12]<button>Search`): about three screens around the viewport, or all of it with `whole_page`. Every word and ref is kept; repeated text, closing tags and generated ids are left out. A plain table row is one line, its cells between `|`. |
 | `browser_click` `{ref}` | Click an element. Refused if it is covered, stale or not visible. |
-| `browser_type` `{ref, text, submit?}` | Replace a field's text. `{{name}}` types a configured secret. |
-| `browser_select` `{ref, values}` | Pick `<select>` options by label or value. |
-| `browser_press` `{key}` | Press a key or shortcut (`Enter`, `Escape`, `Control+a`). |
-| `browser_scroll` `{direction}` | Scroll about one screen and return it. |
+| `browser_type` `{ref, text, submit?}` | Replace a field's text (it never appends); `submit` presses Enter after it. `{{name}}` types a configured secret. |
+| `browser_select` `{ref, values}` | Pick options of a native `<select>` by label or value. The values replace the current selection. |
+| `browser_press` `{key}` | Press a key or shortcut (`Enter`, `Escape`, `Control+a`) on whatever has focus. |
+| `browser_scroll` `{direction}` | Scroll about one screen and return it, with refs. |
 | `browser_actions` `{actions}` | Up to 10 steps in one call, such as a form's fields and its submit button. Each step is `{action, …}`: `click`, `type`, `select`, `press`, `scroll` or `wait`, with the same fields as its own tool. A malformed step stops the batch before anything runs; otherwise it stops at the first step that fails or moves to another page. |
 | `browser_query` `{expression, schema?}` | Read values with a JavaScript expression that returns JSON (up to 4,000 characters): a list of results, prices, counts. It cannot click, type, submit or send data. The cheapest way to read a page. With `schema` (a JSON Schema), the result is checked against it: a match also comes back as `structuredContent: {value}`, a mismatch as an error starting `ERROR schema_mismatch` with up to 5 `path: message` lines. |
 | `browser_find` `{query}` | Find elements anywhere on the page by their words, best match first. Separate several targets with commas. |

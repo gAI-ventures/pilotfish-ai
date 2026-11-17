@@ -96,13 +96,13 @@ export const Inputs = {
   browser_type: z
     .object({
       ref: Ref,
-      text: z.string().max(20_000),
-      submit: z.boolean().optional().describe("Press Enter afterwards"),
+      text: z.string().max(20_000).describe('Full new text ("" empties it); dates as YYYY-MM-DD'),
+      submit: z.boolean().optional().describe("Press Enter after, e.g. to search or send"),
     })
     .strict(),
-  browser_select: z.object({ ref: Ref, values: z.array(z.string()).min(1).max(50) }).strict(),
-  browser_press: z.object({ key: z.string().min(1).max(40).describe('e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a"') }).strict(),
-  browser_scroll: z.object({ direction: Direction }).strict(),
+  browser_select: z.object({ ref: Ref, values: z.array(z.string()).min(1).max(50).describe("Exact labels or values; several only for a multi-select") }).strict(),
+  browser_press: z.object({ key: z.string().min(1).max(40).describe('Key or +-joined shortcut, e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a"') }).strict(),
+  browser_scroll: z.object({ direction: Direction.describe("down: the next screen; up: back") }).strict(),
   browser_screenshot: z.object({}).strict(),
   browser_get_text: z
     .object({
@@ -323,7 +323,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     "browser_type",
     {
       title: "Type",
-      description: `Type into an input, textarea or editable element by ref, replacing its text. Returns evidence.${secretHint}`,
+      description: `Replace the text of an input, textarea or editable element by ref (never appends). In an autocomplete box the result shows its suggestions: browser_click one. For a <select>, browser_select. Returns what changed.${secretHint}`,
       inputSchema: Inputs.browser_type,
       annotations: acting,
     },
@@ -332,19 +332,37 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
 
   tool(
     "browser_select",
-    { title: "Select options", description: "Choose option(s) of a <select> by label or value. Returns evidence.", inputSchema: Inputs.browser_select, annotations: acting },
+    {
+      title: "Select options",
+      description:
+        "Choose options of a native <select> by label or value, replacing the current selection (unlisted options are unselected). Custom dropdown: browser_click it, then the option. Returns the values selected and what changed.",
+      inputSchema: Inputs.browser_select,
+      // Choosing an option is undone by choosing another, and the same values twice leave the same selection.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
     (args, extra) => direct(extra, "select_option", { ref: args.ref, values: args.values }),
   );
 
   tool(
     "browser_press",
-    { title: "Press a key", description: "Press a key or shortcut on the focused element. Returns evidence.", inputSchema: Inputs.browser_press, annotations: acting },
+    {
+      title: "Press a key",
+      description:
+        "Press a key or shortcut on whatever has focus (no ref; browser_click a field first). E.g. Escape closes a dialog, ArrowDown then Enter picks a suggestion; Enter may submit a form; reload keys are refused. For text, browser_type. Returns what changed.",
+      inputSchema: Inputs.browser_press,
+      annotations: acting,
+    },
     (args, extra) => direct(extra, "press", { key: args.key }),
   );
 
   tool(
     "browser_scroll",
-    { title: "Scroll", description: "Scroll about one screen. Returns evidence and the newly visible elements.", inputSchema: Inputs.browser_scroll, annotations: { ...readOnly, readOnlyHint: false, destructiveHint: false } },
+    {
+      title: "Scroll",
+      description: "Scroll the page about one screen; returns the screen now in view, with refs. To reach a named element, browser_find; for text, browser_get_text.",
+      inputSchema: Inputs.browser_scroll,
+      annotations: { ...readOnly, readOnlyHint: false, destructiveHint: false },
+    },
     (args, extra) => direct(extra, "scroll", { direction: args.direction }, false),
   );
 

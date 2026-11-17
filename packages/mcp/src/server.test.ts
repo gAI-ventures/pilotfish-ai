@@ -139,6 +139,8 @@ describe("MCP protocol (no browser)", () => {
     // Secret names (never values) are advertised where the model types them.
     const type = tools.find((t) => t.name === "browser_type")!;
     expect(type.description).toContain("{{pw}}");
+    // Choosing an option is reversible and repeatable: not destructive, idempotent.
+    expect(tools.find((t) => t.name === "browser_select")!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
     expect(JSON.stringify(tools)).not.toContain("hunter2");
     expect(client.getInstructions()).toContain("{{pw}}");
   });
