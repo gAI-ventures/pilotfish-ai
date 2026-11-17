@@ -41,7 +41,8 @@ import {
 } from "@pilotfish/perception";
 import { buildTools, DEFAULT_TOOLS, ToolInputs, type ToolName } from "./tools.js";
 import { SecretBroker, type SecretSpec } from "./secrets.js";
-import { DefaultPolicy, isReloadKey, isSubmitKey, totalFromText, type ActionPolicy, type Money, type PolicyDecision } from "./policy.js";
+import { DefaultPolicy, isReloadKey, isSubmitKey, parseMoney, totalFromText, type ActionPolicy, type Money, type PolicyDecision } from "./policy.js";
+import { NOT_NOW, payMethodNamed, payOptions, pickedOption } from "./pay-methods.js";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_FAST } from "./prompt.js";
 import { TabManager } from "./tabs.js";
 import { challengePolicy, MIN_POLL_MS, vendorClearMs, type ChallengePolicyOptions } from "./challenge-policy.js";
@@ -83,6 +84,12 @@ export function wrapUpNote(left: number): string {
   return left === 1
     ? `You have 1 step left: call done now with what you have, and ${report}.`
     : `You have ${left} steps left, and the run ends with them. Finish only what fits in them, start nothing that does not, and call done before they run out: ${report}.`;
+}
+
+/** The person's newest words in a task a host built ("…\n\nNow: <message>"), else the task itself. */
+function ownWordsOf(task: string): string {
+  const i = task.lastIndexOf("\n\nNow: ");
+  return i >= 0 ? task.slice(i + 7) : task;
 }
 
 /** The texts near a field, buttons included (a country picker reads "+91"): its ancestors' nodes, three up. */
@@ -152,7 +159,13 @@ export interface AgentOptions {
   secrets?: Record<string, string | SecretSpec>;
   policy?: ActionPolicy;
   /** Called when policy says "confirm" or the model calls ask_user. Return the user's answer; "" or null denies. */
-  askUser?: (question: string, more?: { fields?: Array<{ label: string; options?: string[] }>; secret?: boolean }) => Promise<string | null>;
+  askUser?: (question: string, more?: { fields?: Array<{ label: string; options?: string[] }>; secret?: boolean; approval?: boolean }) => Promise<string | null>;
+  /**
+   * The person's own words for this run (their newest message, and the request it finishes), for what only they decide:
+   * whether they named a way to pay. Default: the task's own words after "Now:" (the orchestrator sets it: its executor's
+   * task is a brief with the plan's words in it).
+   */
+  personWords?: string;
   /**
    * Sorts a free-form ask_user question (no kind, or kind "question") before askUser sees it: only a "person"
    * question is asked; "page" (look at or work the page for the agent) and "note" (a progress note) go back to
@@ -925,6 +938,8 @@ export class Agent {
   /** System prompt and tools, estimated once, for the OpenAI context edit's trigger. */
   private baseTokens: number | undefined;
   private interventionSeq = 0;
+  /** The way to pay the person picked on this run, by site: asked once, and their pick is their yes to the pay step. */
+  private readonly payChosen = new Map<string, string>();
   /** The model's tool list: rebuilt once, when `page_tool` joins it (the first page that offers WebMCP tools). */
   private tools: Anthropic.Tool[];
   private readonly enabled: Set<ToolName>;
@@ -2242,6 +2257,13 @@ export class Agent {
       }
       this.opts.onStep?.({ type: "policy", decision, name });
       if (decision.kind === "deny") return err(`Blocked by policy: ${decision.reason}`);
+      // The pay step, approved or not: a way to pay the person never named, with several on the page, is theirs to pick.
+      const paying = (decision.kind === "confirm" && decision.write === "pay") || (decision.kind === "allow" && /^pre-approved pay\b/.test(decision.note ?? ""));
+      if (paying) {
+        const way = await this.payWay(task, target);
+        if (way.kind === "stop" || way.kind === "select") return { isError: false, halt: true, summary: way.kind === "stop" ? "pay: not now" : "pay: method chosen", content: way.note };
+        if (way.kind === "approved" && decision.kind === "confirm") decision = { kind: "allow", note: "the person picked how to pay" };
+      }
       if (decision.kind === "confirm") {
         if (!this.opts.askUser) return err(`This action requires human confirmation (${decision.reason}) but no confirmation channel is configured. Do not retry it; report via done(success=false) if it is required to complete the task.`);
         const answer = await this.opts.askUser(`Confirm action ${approvalText(name, input, target, safeHost(this.page.url), decision.write, decision.reason)} Reply "yes" to proceed.`);
@@ -4787,6 +4809,39 @@ export class Agent {
     // They said it is done while the page has not moved on yet (a confirmation still loading): the page decides.
     event("resolved", out.waitedMs);
     return await this.withEvidence(async () => undefined, label, () => `The person says they completed the payment on ${host}. The confirmation may take a moment: read the page below (reload or open the site's orders page if it has not changed) and report what it shows.`, { settle: false });
+  }
+
+  /**
+   * The way to pay, at the pay step (17 Nov): the person's words name none ("with UPI", "use the voucher", "any card"
+   * would), and the page offers two or more ways that can be picked now. Then they pick one on a card of the page's own
+   * choices, plus not paying yet, once a site per run; their pick is their yes to the step. "approved": go on and press
+   * (picked, and already the page's selection); "select": the model selects their pick first; "stop": not now; "none":
+   * nothing to ask (a way named, one or none on the page, nobody to ask), the step goes on as the policy said.
+   */
+  private async payWay(task: string, target: string | undefined): Promise<{ kind: "none" | "approved" } | { kind: "select" | "stop"; note: string }> {
+    const site = siteOf(safeHost(this.page.url));
+    if (this.payChosen.has(site)) return { kind: "approved" };
+    const words = this.opts.personWords ?? ownWordsOf(task);
+    if (!this.opts.askUser || payMethodNamed(words)) return { kind: "none" };
+    const snap = this.turnSnapshot ?? this.lastSnapshot;
+    const options = snap ? payOptions(snap.nodes) : [];
+    if (options.length < 2) return { kind: "none" };
+    const amount = target ? parseMoney(target)?.text : undefined;
+    const answer = await this.opts.askUser(`How should I pay${amount ? ` ${amount}` : ""} on ${site}? Your message did not say, and ${site} offers these.`, {
+      fields: [{ label: "Pay with", options: [...options.map((o) => o.label), NOT_NOW] }],
+      approval: true,
+    });
+    const said = (/Answer:\s*(.+)/.exec(answer ?? "")?.[1] ?? answer ?? "").trim();
+    if (!said || /^\(leave this blank\)$/i.test(said) || said.toLowerCase() === NOT_NOW.toLowerCase()) {
+      return { kind: "stop", note: `The person chose not to pay now. Do not press the pay or order button: call done(success=false) saying the order is ready at ${site}'s payment step, with its total and the ways to pay it offers.` };
+    }
+    const picked = pickedOption(said, options);
+    this.payChosen.set(site, picked.label);
+    if (picked.option?.checked) return { kind: "approved" };
+    return {
+      kind: "select",
+      note: `The person chose to pay with "${picked.label}". Select that on this page${picked.option?.ref ? ` (${picked.option.ref})` : ""}, check the total, then press the pay button again: it goes through without asking. Do not ask about the way to pay again.`,
+    };
   }
 
   /** A site offers a passkey (kind "passkey"): the person decides once per site whether pilotfish keeps one. */

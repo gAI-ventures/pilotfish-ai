@@ -14,6 +14,7 @@
     "agent/src/files.ts",
     "agent/src/interventions.ts",
     "agent/src/model-provider.ts",
+    "agent/src/pay-methods.ts",
     "agent/src/policy.ts",
     "agent/src/prompt.ts",
     "agent/src/repeat-failure.ts",
