@@ -63,12 +63,20 @@ Node 22 or later and Google Chrome (or Chromium) on the same computer. Setup per
 | `plugins/pilotfish-browser` | The server as a plugin for Claude Code (`.claude-plugin/plugin.json`, `.mcp.json`) and Cursor (`.cursor-plugin/plugin.json`, `mcp.json`), listed by the marketplace files `.claude-plugin/marketplace.json` and `.cursor-plugin/marketplace.json`. |
 | `.mcp.json` | The server entry, read by directories that index this repository; opening the repository in Claude Code offers to start it too. |
 
-## The managed MCP
+## Local or managed?
 
-The hosted service (whole tasks run in pilotfish's cloud browser, saved logins, saved and scheduled tasks, replays)
-is separate and is not in this repository. Connect to it at `https://pilotfish-be.gai.ventures/mcp`, or over stdio
-with the relay in `packages/mcp-managed`: `npx -y @gaiventures/pilotfish-mcp-managed`. See
-<https://pilotfish.gai.ventures/docs>.
+This repository is the local version, free and MIT licensed. pilotfish managed is a paid service: pilotfish runs the whole task in its cloud browser and hands your agent the result.
+
+|  | **Local** (this repository) | **Managed** |
+| --- | --- | --- |
+| Who does the work | Your agent's model, one step at a time. | pilotfish runs the whole task and returns the result (the `browser_task` tool). |
+| Browser and IP | A fresh Chrome on your computer, on your own IP, closed when your agent disconnects. | pilotfish's cloud browser, which keeps running when your computer is off. |
+| Sites that block bots | You clear each check yourself. | Handled by the managed service. See the managed docs and pricing page for what is included. |
+| Sign-ins | You sign in each time and nothing is kept. | Saved logins in an encrypted vault, several accounts per site, authenticator-app codes and codes sent to your email or phone. |
+| Watching and cost | The browser window. | Live view, replays, per-task cost and monthly spending limits. |
+| Price | Free. | Pay as you go from $5 of credit. See the pricing page for usage charges. |
+
+Connect to managed at `https://pilotfish-be.gai.ventures/mcp` (sign in with your pilotfish account or use an organization API key), or over stdio with the relay: `npx -y @gaiventures/pilotfish-mcp-managed`. Docs: <https://pilotfish.gai.ventures/docs>. Pricing: <https://pilotfish.gai.ventures/pricing>.
 
 ## Build and test
 
