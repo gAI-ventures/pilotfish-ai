@@ -6,6 +6,7 @@
 // coordinates, interactivity and visibility, from which the serializer builds
 // the model-facing text and the handle table.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Protocol } from "@pilotfish/cdp";
 import type { FrameSession, Page, Rect } from "@pilotfish/browser";
 import { isAdFrameUrl } from "@pilotfish/browser";
@@ -24,11 +25,31 @@ export interface SnapNode {
   nodeType: number;
   tag: string; // lowercase localName, "#text", "#document", "#shadow-root"
   text?: string; // for text nodes (collapsed whitespace)
+  /**
+   * The element's attributes as the page has them, plus the capture's own metadata under keys starting "__" (`__block`,
+   * `__cursor`, `__pe`, `__clip`): never page evidence. Read the page's own through `pageAttrs`.
+   */
   attrs: Record<string, string>;
   /** AX role (e.g. "button") or tag-derived fallback. */
   role: string;
-  /** AX accessible name. */
+  /** AX accessible name (for an element the page hides from assistive tech, see `axHidden`). */
   name: string;
+  /**
+   * The page hides this element from assistive tech (aria-hidden on it or an ancestor, a modal dialog open, inert):
+   * Chromium then gives it no role and no name. Its role and name are the ones Chromium gave this same element before,
+   * when what names it is unchanged, else derived from the DOM (`restoreHiddenNames`); its states from its aria-*
+   * attributes. Without this, every element of a page that hides its background while a listbox or dialog is open
+   * changed its structural key: reported as removed and new, printed another way, and the whole screen reprinted.
+   */
+  axHidden?: boolean;
+  /**
+   * Chromium's accessibility tree has no entry for this element: hidden by the page (above), "uninteresting" to it, or
+   * read a moment before the tree caught up with the DOM (17 Nov, Google Flights: the capture right after opening its
+   * listbox read the tree with the background already dropped and the DOM a moment before `aria-hidden` was set on it,
+   * so the inputs were neither named nor marked hidden). Such an element keeps Chromium's earlier name for the same
+   * node when what names it is unchanged and that name was Chromium's own (`restoreHiddenNames`). Naming only.
+   */
+  axUnlisted?: boolean;
   /** Current value for inputs/selects/textareas (never for password fields). */
   value?: string;
   checked?: boolean;
@@ -37,6 +58,8 @@ export interface SnapNode {
   disabled?: boolean;
   focused?: boolean;
   required?: boolean;
+  /** The element is marked invalid (AX `invalid`, aria-invalid): data only, printed nowhere unless asked (17 Nov). */
+  invalid?: boolean;
   /** Layout box in top-level page CSS pixels, if rendered. */
   rect?: Rect;
   paintOrder?: number;
@@ -62,6 +85,22 @@ export interface SnapNode {
 
 export interface Snapshot {
   takenAt: number;
+  /**
+   * The main-frame document the capture read (its loaderId, Page.documentId): no main-frame commit was seen between
+   * the capture's start and its end. Null when that document is not known (a tab whose identity was not read yet), or
+   * when `unsettled`: such a snapshot is bound to no document.
+   */
+  document?: string | null;
+  /**
+   * Page.documentSeq when the capture began and ended (the same: see `document`); unset when `unsettled`. A look that
+   * pairs this snapshot with anything read later (a response, the address, cookies) checks the page is still on it.
+   */
+  documentSeq?: number;
+  /**
+   * The main frame committed another document during each of captureSnapshot's CAPTURE_TRIES captures: the snapshot
+   * (the last) is bound to no document, and nothing that pairs it with a document's response may read it.
+   */
+  unsettled?: true;
   url: string;
   title: string;
   viewport: Rect;
@@ -137,10 +176,121 @@ interface AXInfo {
   name: string;
   value?: string;
   props: Record<string, unknown>;
+  /** Ignored by Chromium because the page hides it (HIDDEN_BY_PAGE), not because it is not rendered. */
+  hidden?: true;
 }
 
-/** Capture a snapshot of the page across all frames. */
+/** Why Chromium leaves a rendered element out of the accessibility tree when the page itself hides it from assistive tech. */
+const HIDDEN_BY_PAGE = new Set(["ariaHiddenElement", "ariaHiddenSubtree", "activeModalDialog", "inertElement", "inertSubtree"]);
+
+/**
+ * Captures counted per unit of work (17 Nov, Stage A2; scoped after review): a caller runs its work inside
+ * `withCaptureStats`, and every capture made in that async context (the action's, re-captures, re-grounds, reads)
+ * adds to that unit's own count and summed wall ms, never another client's working at the same time. Numbers only;
+ * a capture that fails still counts; a capture outside any unit is not counted.
+ */
+export interface CaptureStats {
+  count: number;
+  ms: number;
+}
+const captureScope = new AsyncLocalStorage<CaptureStats>();
+
+/** Runs `fn` as one counted unit of work; `currentCaptureStats()` inside it reads that unit's counts. */
+export function withCaptureStats<T>(fn: () => Promise<T>): Promise<T> {
+  return captureScope.run({ count: 0, ms: 0 }, fn);
+}
+
+/** The counts of the unit of work this code runs in, or null outside one. */
+export function currentCaptureStats(): CaptureStats | null {
+  return captureScope.getStore() ?? null;
+}
+
+/**
+ * Fields that were password fields when typed into (17 Nov): a page may turn one into a text field, and its value
+ * would then be captured. Kept per page (tab), by DOM node and by structural key (a field redrawn keeps its key);
+ * every capture of that page masks their values as a password field's are.
+ */
+const sensitiveFields = new WeakMap<object, { ids: Set<string>; keys: Set<string> }>();
+
+export function markSensitiveField(page: Page, n: SnapNode): void {
+  let s = sensitiveFields.get(page);
+  if (!s) sensitiveFields.set(page, (s = { ids: new Set(), keys: new Set() }));
+  s.ids.add(`${n.frameId}:${n.backendNodeId}`);
+  s.keys.add(nodeKey(n));
+}
+
+/** Captures captureSnapshot makes, at most, for one that starts and ends on the same main-frame document. */
+export const CAPTURE_TRIES = 3;
+
+/**
+ * Runs `capture` until one starts and ends on the same main-frame document (no commit seen meanwhile: Page.documentSeq
+ * unchanged, an event count, never a time), at most `tries` times. `document` is that document's loaderId (null when
+ * the page does not know it), or undefined when no try settled: the last value, bound to no document.
+ *
+ * `corroborate`, when given, asks the page itself after each capture which main-frame document it has committed (its
+ * loaderId; null or undefined when it cannot say). A try settles only when that equals the document the Node side
+ * holds: Chrome may tell Node of a commit only after a capture already read the new document's elements, and such a
+ * capture would otherwise be bound to the old document and its response (fifth review, v5: the late event).
+ *
+ * A capture while the main frame commits another document may hold either one, its address the new one's (read last);
+ * paired with a response, the block page HUMAN's script reloaded read with the next document's 200 as a Press & Hold
+ * that was not there (fifth review, 17 Nov).
+ */
+export async function onOneDocument<T>(
+  page: Pick<Page, "documentSeq" | "documentId">,
+  capture: () => Promise<T>,
+  tries = CAPTURE_TRIES,
+  corroborate?: () => Promise<string | null | undefined>,
+): Promise<{ value: T; document: string | null | undefined; tries: number }> {
+  for (let n = 1; ; n++) {
+    const seq = page.documentSeq;
+    const document = page.documentId;
+    const value = await capture();
+    // The page's own word, read after the capture: no newer document has committed than the one Node holds.
+    const confirmed = !corroborate || document === null || (await corroborate().catch(() => undefined)) === document;
+    if (page.documentSeq === seq && confirmed) return { value, document, tries: n };
+    if (n >= tries) return { value, document: undefined, tries: n };
+  }
+}
+
+/** The main-frame document the page has committed, by its own account (Page.getFrameTree's loaderId); undefined if not read. */
+export async function committedLoader(page: Page): Promise<string | undefined> {
+  const r = await page.session.send("Page.getFrameTree", undefined, { timeoutMs: 3_000 }).catch(() => null);
+  return r?.frameTree?.frame?.loaderId;
+}
+
+/** Capture a snapshot of the page across all frames, bound to the main-frame document it read (onOneDocument). */
 export async function captureSnapshot(page: Page, opts: SnapshotOptions = {}): Promise<Snapshot> {
+  const t0 = Date.now();
+  const stats = captureScope.getStore();
+  let captures = 0;
+  // The count the last try began at: on a settled capture, the one it ended at too.
+  let seq = 0;
+  try {
+    const out = await onOneDocument(
+      page,
+      () => {
+        captures++;
+        seq = page.documentSeq;
+        return captureOnce(page, opts);
+      },
+      CAPTURE_TRIES,
+      () => committedLoader(page),
+    );
+    const snap = out.value;
+    snap.document = out.document ?? null;
+    if (out.document === undefined) snap.unsettled = true;
+    else snap.documentSeq = seq;
+    return snap;
+  } finally {
+    if (stats) {
+      stats.count += captures;
+      stats.ms += Date.now() - t0;
+    }
+  }
+}
+
+async function captureOnce(page: Page, opts: SnapshotOptions): Promise<Snapshot> {
   const started = Date.now();
   const timings: SnapshotTimings = { wait: 0, dom: 0, ax: 0, frames: 0, build: 0 };
   // The page's size, pixel ratio and title are asked for together and alongside the captures below: each waits for
@@ -205,6 +355,17 @@ export async function captureSnapshot(page: Page, opts: SnapshotOptions = {}): P
     // snapshot after a scroll showed the top three screens of the page whatever was on screen.
     const offset = cap.frame.isMain ? { x: cap.offset.x - metrics.scroll.x, y: cap.offset.y - metrics.scroll.y } : cap.offset;
     buildDocument(cap.dom, 0, cap.frame, cap.ax, mountParent, offset, nodes, oopifMounts, nthCounter, geo);
+  }
+  // Elements the page hides from assistive tech get their role and name back; the positional numbers that depend on
+  // names are then counted again, in the same document order the build counted them.
+  if (restoreHiddenNames(nodes, opts.previous ?? null)) {
+    nthCounter.clear();
+    for (const n of nodes) {
+      if (!(n.interactive || n.scrollable)) continue;
+      const k = groupKey(n);
+      n.nth = nthCounter.get(k) ?? 0;
+      nthCounter.set(k, n.nth + 1);
+    }
   }
 
   // Assign refs to interactive + scrollable nodes, compute viewport band filter.
@@ -305,6 +466,12 @@ export async function captureSnapshot(page: Page, opts: SnapshotOptions = {}): P
     refMemory.delete(k);
   }
 
+  const sens = sensitiveFields.get(page);
+  if (sens) {
+    for (const n of nodes) {
+      if (n.value && (sens.ids.has(`${n.frameId}:${n.backendNodeId}`) || sens.keys.has(nodeKey(n)))) n.value = "•".repeat(Math.min(n.value.length, 8));
+    }
+  }
   timings.build = Date.now() - building;
   return {
     takenAt: Date.now(),
@@ -343,6 +510,14 @@ export function isCaptchaFrameUrl(url: string | undefined): boolean {
 }
 
 /** Structural identity of an element independent of backendNodeId: frame + role + name + tag + nth. */
+/** A key of `SnapNode.attrs` that is the capture's own metadata, not an attribute of the page. */
+export const isCaptureMeta = (key: string): boolean => key.startsWith("__");
+
+/** The element's attributes as the page has them: the capture's own metadata left out. */
+export function pageAttrs(n: SnapNode): [string, string][] {
+  return Object.entries(n.attrs).filter(([k]) => !isCaptureMeta(k));
+}
+
 export function nodeKey(n: SnapNode): string {
   return `${n.frameId}|${n.tag}|${n.role}|${n.name.slice(0, 80)}|${n.identity}|${n.nth}`;
 }
@@ -392,11 +567,17 @@ async function collectAX(frame: FrameSession): Promise<Map<number, AXInfo>> {
   for (const res of await Promise.all(calls)) {
     if (!res) continue;
     for (const ax of res.nodes) {
-      if (ax.ignored || ax.backendDOMNodeId === undefined) continue;
+      if (ax.backendDOMNodeId === undefined) continue;
+      if (ax.ignored) {
+        if (!map.has(ax.backendDOMNodeId) && (ax.ignoredReasons ?? []).some((r) => HIDDEN_BY_PAGE.has(String(r.name)))) {
+          map.set(ax.backendDOMNodeId, { role: "", name: "", props: {}, hidden: true });
+        }
+        continue;
+      }
       const props: Record<string, unknown> = {};
       for (const p of ax.properties ?? []) props[p.name] = p.value.value;
       const role = String(ax.role?.value ?? "");
-      if (!map.has(ax.backendDOMNodeId)) {
+      if (!map.has(ax.backendDOMNodeId) || map.get(ax.backendDOMNodeId)!.hidden) {
         map.set(ax.backendDOMNodeId, {
           role: role === "generic" || role === "none" || role === "presentation" || role === "LabelText" || role === "InlineTextBox" || role === "StaticText" ? "" : role,
           name: String(ax.name?.value ?? ""),
@@ -530,6 +711,8 @@ function buildDocument(
         const visibility = styleIdx(li, "visibility");
         const opacity = parseFloat(styleIdx(li, "opacity") || "1");
         if (display === "none" || visibility === "hidden" || visibility === "collapse") node.visible = false;
+        // A block-level box (capture metadata): with the box's position, where one element's text is stacked in parts.
+        if (/^(block|flex|grid|list-item|table|flow-root)/.test(display ?? "")) node.attrs["__block"] = "1";
         if (opacity === 0) {
           node.visible = false;
           hiddenSubtree[i] = true; // opacity hides descendants too
@@ -565,12 +748,28 @@ function buildDocument(
       const axi = ax.get(backendNodeId);
       node.role = axi?.role || tagRole(tag, node.attrs);
       node.name = axi?.name ?? "";
+      // Hidden by the page: Chromium says so, or leaves the element out of its tree (it lists few of the elements it
+      // hides: under a modal dialog only <html>) while the element is aria-hidden or inert itself or its parent is
+      // hidden. An element Chromium lists as not ignored (the open dialog and what is in it) is not hidden.
+      const hiddenByPage = axi ? !!axi.hidden : node.attrs["aria-hidden"] === "true" || node.attrs["inert"] !== undefined || !!parent?.axHidden;
+      if (!axi) node.axUnlisted = true;
+      if (hiddenByPage) node.axHidden = true;
+      if (hiddenByPage || !axi) {
+        // Chromium gives a hidden or unlisted element no states: its own aria-* attributes say them (native ones are read below).
+        const a = node.attrs;
+        if (a["aria-expanded"] !== undefined) node.expanded = a["aria-expanded"] === "true";
+        if (a["aria-selected"] !== undefined) node.selected = a["aria-selected"] === "true";
+        if (a["aria-checked"] !== undefined) node.checked = a["aria-checked"] === "true";
+        if (a["aria-disabled"] === "true") node.disabled = true;
+        if (a["aria-invalid"] !== undefined && a["aria-invalid"] !== "false") node.invalid = true;
+      }
       if (axi?.props) {
         const p = axi.props;
         if (p.checked !== undefined) node.checked = p.checked === true || p.checked === "true";
         if (p.selected !== undefined) node.selected = p.selected === true;
         if (p.expanded !== undefined) node.expanded = p.expanded === true;
         if (p.disabled !== undefined) node.disabled = p.disabled === true;
+        if (p.invalid !== undefined) node.invalid = p.invalid !== false && p.invalid !== "false";
         if (p.focused !== undefined) node.focused = p.focused === true;
         if (p.required !== undefined) node.required = p.required === true;
       }
@@ -695,6 +894,7 @@ function buildDocument(
       // Shadow root: transparent container, children keep flowing.
       node.tag = "#shadow-root";
       node.visible = parent?.visible ?? true;
+      if (parent?.axHidden) node.axHidden = true;
       (parent ?? mountParent).children.push(node);
       out.push(node);
       built[i] = node;
@@ -778,6 +978,104 @@ export function textOf(n: SnapNode, max = 200): string {
   };
   walk(n);
   return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+/** Roles whose accessible name comes from their content (WAI-ARIA "name from: contents"). */
+const NAME_FROM_CONTENT = new Set([
+  "button", "cell", "checkbox", "columnheader", "gridcell", "heading", "link", "menuitem", "menuitemcheckbox", "menuitemradio",
+  "option", "radio", "row", "rowheader", "switch", "tab", "tooltip", "treeitem",
+]);
+
+/**
+ * Role and name for elements the page hides from assistive tech (`axHidden`), which Chromium leaves unnamed. The same
+ * element (same frame and backend node) in `previous` gives them back, Chromium's own, when what names it is unchanged
+ * (its naming attributes, its labels' text and its own text); otherwise they are derived from the DOM in the order an
+ * accessible name is: aria-labelledby, aria-label, a <label>, alt or a button's value, the content for roles named by
+ * it, title, placeholder. aria-label comes before the content, so two elements told apart only by their aria-label stay
+ * apart. An element Chromium did not list at all (`axUnlisted`) is matched the same way: `previous` holds every element
+ * node of the last capture, listed or not, keyed by frame and backendNodeId, under the same unchanged-inputs guard. An
+ * interactive or scrollable one (Chromium lists every such element it does not hide, so being unlisted means hidden, or
+ * read before the tree caught up) falls back to the DOM-derived name as a hidden one does; any other unlisted element
+ * (a container Chromium finds uninteresting) only takes an earlier non-empty name and is otherwise left as read. An
+ * empty name from a capture that had none to give is never carried forward: it falls through to a fresh DOM-derived
+ * name. Naming only: visibility and interactivity are never touched. Returns whether any name or role changed.
+ */
+export function restoreHiddenNames(nodes: SnapNode[], previous: Snapshot | null): boolean {
+  /** Named as a hidden element is: hidden by the page, or unlisted while interactive or scrollable. */
+  const unnamedByChromium = (n: SnapNode) => !!n.axHidden || (!!n.axUnlisted && (n.interactive || n.scrollable));
+  if (!nodes.some((n) => unnamedByChromium(n) || (previous && n.axUnlisted))) return false;
+  // Ids and <label for> of one snapshot: a node is named from its own snapshot's page.
+  const indexOf = (all: SnapNode[]) => {
+    const byId = new Map<string, SnapNode>();
+    const labelFor = new Map<string, SnapNode[]>();
+    for (const n of all) {
+      if (n.nodeType !== 1) continue;
+      const id = n.attrs["id"];
+      if (id && !byId.has(`${n.frameId}\n${id}`)) byId.set(`${n.frameId}\n${id}`, n);
+      const f = n.tag === "label" ? n.attrs["for"] : undefined;
+      if (f) labelFor.set(`${n.frameId}\n${f}`, [...(labelFor.get(`${n.frameId}\n${f}`) ?? []), n]);
+    }
+    return { byId, labelFor };
+  };
+  const here = indexOf(nodes);
+  let there: ReturnType<typeof indexOf> | null = null;
+  // The text a name is made of: what is laid out and visible (no display:none, opacity:0 or [hidden] content, which is
+  // in no page text either). aria-labelledby is the exception, as in the accessible-name rules: it names by the
+  // referenced element's text whether or not that element is shown.
+  const txt = (n: SnapNode | undefined) => {
+    if (!n) return "";
+    const parts: string[] = [];
+    const walk = (c: SnapNode) => {
+      if (c.text) parts.push(c.text);
+      for (const ch of c.children) if (ch.nodeType !== 1 || ch.visible || ch.boxless) walk(ch);
+    };
+    walk(n);
+    return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 200);
+  };
+  const domName = (n: SnapNode, { byId, labelFor } = here): string => {
+    const a = n.attrs;
+    const by = (a["aria-labelledby"] ?? "").split(/\s+/).filter(Boolean).map((id) => { const r = byId.get(`${n.frameId}\n${id}`); return r ? textOf(r, 200) : ""; }).filter(Boolean).join(" ");
+    if (by) return by;
+    if (a["aria-label"]?.trim()) return a["aria-label"].trim();
+    if (["input", "select", "textarea"].includes(n.tag)) {
+      const type = (a["type"] ?? "").toLowerCase();
+      if (type === "image" && a["alt"]) return a["alt"];
+      if (["button", "submit", "reset"].includes(type) && a["value"]) return a["value"];
+      const labels = [...(a["id"] ? labelFor.get(`${n.frameId}\n${a["id"]}`) ?? [] : [])];
+      for (let p = n.parent; p; p = p.parent) if (p.tag === "label") labels.push(p);
+      const l = labels.map((x) => txt(x)).filter(Boolean).join(" ");
+      if (l) return l;
+    }
+    if (n.tag === "img" && a["alt"] !== undefined) return a["alt"];
+    if (NAME_FROM_CONTENT.has(n.role)) {
+      const t = txt(n);
+      if (t) return t;
+    }
+    return a["title"]?.trim() || a["placeholder"]?.trim() || "";
+  };
+  // What names an element, read from the DOM: unchanged means Chromium would name it as it did.
+  const inputs = (n: SnapNode, ix = here) => `${n.tag}|${n.attrs["role"] ?? ""}|${domName(n, ix)}|${txt(n)}|${n.attrs["title"] ?? ""}|${n.attrs["placeholder"] ?? ""}`;
+  const before = new Map<string, SnapNode>();
+  for (const p of previous?.nodes ?? []) if (p.nodeType === 1) before.set(`${p.frameId}:${p.backendNodeId}`, p);
+  let changed = false;
+  for (const n of nodes) {
+    if (!n.axHidden && !n.axUnlisted) continue;
+    const p = before.get(`${n.frameId}:${n.backendNodeId}`);
+    // The earlier name is taken only when it was Chromium's own (the node was listed then) or one restored for it, never
+    // an empty one from a capture that had none to give: an empty name must not be carried forward.
+    const candidate = !!p && p.tag === n.tag && !(p.name === "" && (p.axUnlisted || p.axHidden));
+    // Unlisted plain containers (not interactive or scrollable; most are ones Chromium finds uninteresting): only a
+    // named earlier node is worth comparing, and with nothing earlier to go by it stays as Chromium gave it (no name).
+    const derive = unnamedByChromium(n);
+    if (!derive && !(candidate && p!.name !== "")) continue;
+    const usable = candidate && inputs(p!, (there ??= indexOf(previous!.nodes))) === inputs(n);
+    if (!usable && !derive) continue;
+    const [role, name] = usable ? [p!.role, p!.name] : [n.role, domName(n)];
+    if (role !== n.role || name !== n.name) changed = true;
+    n.role = role;
+    n.name = name;
+  }
+  return changed;
 }
 
 function tagRole(tag: string, attrs: Record<string, string>): string {

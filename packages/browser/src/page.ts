@@ -502,6 +502,14 @@ export class Page {
    */
   lastDocumentAt = 0;
   /**
+   * The committed main-frame document: its loaderId (null until known), and a count of the changes to it seen here
+   * that only grows (event order, not time: two commits in one millisecond are two): every main-frame commit, and the
+   * first loaderId learned from the frame tree at start. A snapshot is bound to the document it read by these, and its
+   * response looked up by that loaderId; one whose capture spans a change, or taken while it is null, is bound to none.
+   */
+  documentId: string | null = null;
+  documentSeq = 0;
+  /**
    * The main frame started loading another document (Page.frameStartedNavigating: a load, a reload, a history
    * restore) that has neither committed nor stopped (a 204, a download, one replaced by the next). The browser
    * routes input to the new document from its commit, which Page.frameNavigated reports here only later, so
@@ -629,6 +637,8 @@ export class Page {
         this.main.url = e.frame.url;
         this.lastNavigationAt = Date.now();
         this.lastDocumentAt = Math.max(this.lastNavigationAt, this.lastDocumentAt + 1);
+        this.documentSeq++;
+        this.documentId = e.frame.loaderId;
         this.navigationPending = false;
         this.emitter.emit("navigated", e.frame.url);
       }
@@ -680,6 +690,12 @@ export class Page {
     (this.main as { frameId: string }).frameId = frameTree.frame.id;
     // A navigation seen meanwhile is at least as new as the tree.
     if (!navigated) this._url = frameTree.frame.url;
+    // A commit seen meanwhile is the newer document. Learning the document's identity is a change too: a capture
+    // that began before it is bound to none.
+    if (!this.documentSeq) {
+      this.documentId = frameTree.frame.loaderId;
+      this.documentSeq++;
+    }
     // The timezone and locale overrides went on with the browser's session initializers (every frame
     // session gets them, see the Browser constructor), before this tab's first document ran.
     // Headless pages are not "focused"; without this, focus() and key events may be dropped.
@@ -1200,7 +1216,7 @@ export class Page {
         .catch(() => false);
       let probing = true;
       void probe.finally(() => (probing = false));
-      while (probing && !busy()) await sleep(15);
+      while (probing && !busy()) await Promise.race([probe, sleep(15)]);
       if (!busy()) {
         if (!mutated) return { mutationsQuiet, networkIdle, elapsedMs: Date.now() - start, writes: [] };
         // Rendering without requests (a menu, a toggle, a client-side filter): let it finish.

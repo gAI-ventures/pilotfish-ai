@@ -19,6 +19,7 @@ import type { DownloadEvent, FrameSession, InputPhase, NavigateResult, Page } fr
 import { ActionError, blockPageWrites, describeToolInput, pageToolOutputText, siteOf, sleep, type PageTool, type PageToolResult } from "@pilotfish/browser";
 import {
   captureSnapshot,
+  markSensitiveField,
   diffSnapshots,
   diffObservation,
   findScored,
@@ -33,6 +34,7 @@ import {
   clip,
   controlStates,
   urlParams,
+  choiceOf,
   nodeKey,
   textOf,
   type Snapshot,
@@ -40,7 +42,7 @@ import {
   type ActionEvidence,
 } from "@pilotfish/perception";
 import { buildTools, DEFAULT_TOOLS, ToolInputs, type ToolName } from "./tools.js";
-import { SecretBroker, type SecretSpec } from "./secrets.js";
+import { guardedView, SecretBroker, scrubDeep, type SecretSpec } from "./secrets.js";
 import { DefaultPolicy, isReloadKey, isSubmitKey, parseMoney, totalFromText, type ActionPolicy, type Money, type PolicyDecision } from "./policy.js";
 import { NOT_NOW, payMethodNamed, payOptions, pickedOption } from "./pay-methods.js";
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_FAST } from "./prompt.js";
@@ -50,14 +52,16 @@ import { challengeHandler, type ChallengeCheck, type ChallengeDone, type Challen
 import type { Heard, RunControl } from "./run-control.js";
 import { fileText, pdfText } from "./files.js";
 import {
-  classifyPage,
   describeInterruption,
   isResolved,
   neverAutomate,
+  onDocumentOf,
   RATE_WAITS_MS,
   rateLimited,
+  readPage,
   responseTracker,
   retryAfterMs,
+  unreadNote,
   type InterruptionCleared,
   type InterventionContext,
   type InterventionRequest,
@@ -67,7 +71,7 @@ import {
 } from "./interventions.js";
 import { asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, signInOffers } from "./sign-in.js";
 import { failureLines, isRetryLabel, RepeatFailures, repeatFailureNudge } from "./repeat-failure.js";
-import type { InterruptInput, Interruption } from "@pilotfish/perception";
+import type { ElementHandle, InterruptInput, Interruption } from "@pilotfish/perception";
 
 export type { ChallengeSource } from "./challenges.js";
 
@@ -204,6 +208,24 @@ export interface AgentOptions {
    * direct tools and the orchestrator's agents turn it on.
    */
   compactSnapshots?: boolean;
+  /** With compactSnapshots: the serializer's `roleTags` markup on screens, evidence and find lines (the open MCP). */
+  roleTags?: boolean;
+  /**
+   * Action receipts for a client that reads its own pages (the open MCP, 17 Nov): an element found again after the
+   * page redrew it is said in the evidence, and the receipt lines of later stages (read-back, validation, facts,
+   * expectations) are on. Off everywhere else, so hosted runs print what they did before.
+   */
+  actionReceipts?: boolean;
+  /**
+   * The output guard (18 Nov; the open MCP only): the secret broker checks every string it scrubs, as given, for any
+   * form of any secret value (configured of any length, issued, retired, typed) and, on one, reports it
+   * (onSecretOutput) and marks it with TYPED_SECRET_MARK instead of a readable `{{name}}` placeholder, so the caller
+   * withholds that output whole (see SecretBroker.guardOutput). A field typed into from a placeholder is masked in
+   * later captures, like a password field. Off: as before (the hosted agent loop reads placeholders).
+   */
+  guardSecretOutput?: boolean;
+  /** Output guard: called once per scrubbed string that held a secret value. */
+  onSecretOutput?: () => void;
   /**
    * After an action that stayed on the same page, show the model only what changed since the last
    * full snapshot it was shown (when that is under half of it). Default true.
@@ -415,6 +437,21 @@ export interface TargetDesc {
 
 /** Outcome of a single tool call run through the executor (used by the router and skill replay). */
 /** What `Agent.obstacle()` found on the page: what kind of obstacle, who can deal with it, and words for the person. */
+/**
+ * What Agent.obstacle() reports when the page could not be verified (readPage "unknown", or no capture): not an
+ * obstacle, and not a page that needs nobody either. Its message says so plainly, naming a document change only when
+ * one was seen.
+ */
+export interface PageUnread {
+  unread: true;
+  /** A document change was seen while it was read (else it only could not be read as one document). */
+  changed: boolean;
+  /** For the person or the client, secrets masked. */
+  message: string;
+  host: string;
+  url: string;
+}
+
 export interface PageObstacle {
   category: string;
   vendor?: string;
@@ -433,15 +470,55 @@ export interface PageObstacle {
   displayNumber?: string;
 }
 
+/**
+ * What an action did that a caller must not lose (17 Nov, actionReceipts): structured, never parsed from the reply
+ * text. Messages and paths pass through the secret scrubber like the reply.
+ */
+export interface ActFacts {
+  /** JavaScript dialogs the action raised, and how they were answered. */
+  dialogs: Array<{ type: string; handled: string; message: string }>;
+  /** A new tab the action opened (the agent now works in it). */
+  newTab?: string;
+  /** The page loaded another document (not only a new address in the same document). */
+  newDocument: boolean;
+  /** Writes the server did not accept or did not answer: "METHOD /path outcome". */
+  failedWrites: string[];
+  /** Fields now marked invalid (refs), from the page's own validation state. */
+  invalid: string[];
+  /** The page's own loading indicator was still showing when the action's wait ended. */
+  stillLoading: boolean;
+  /** The receipt of the action's expectation, when one was given. */
+  expect?: { status: ExpectStatus; line: string };
+  /** The action's own receipt lines: Chose/Selected, field read-back. */
+  receipt: string[];
+}
+
 export interface ActOutcome {
   ok: boolean;
+  /** actionReceipts: what the action did that a batch must keep (see ActFacts). */
+  facts?: ActFacts;
   summary: string;
   text: string;
+  /**
+   * The action's timings in ms (`ActionTimings`), in two domains that must never be summed together: the top-level
+   * laps, one after another (act, settle, tabs, snapshot, dismiss, loading, check, expect, render: TOP_LAPS), and
+   * sub-timings inside a lap (the navigation's commit/dcl/content and the input phases inside `act`; the capture's
+   * snapWait/snapDom/snapAx/snapFrames/snapBuild inside `snapshot`, which overlap one another).
+   */
+  timings?: ActionTimings;
+  /** actionReceipts + escalate: the page was printed although snapshot:false was asked (show it whole). */
+  escalated?: boolean;
   evidence?: ActionEvidence;
   /** `text` without the page snapshot (the evidence and notes). */
   content?: string;
   /** The page snapshot in `text`, in parts, for a caller that shows only what changed since one it showed before. */
   page?: RenderedPage;
+  /**
+   * read_page as the plain read (no whole_page, interactive_only or root_ref): the page printed in `text`, in parts, so
+   * a caller that gave that reply whole can use it as the base of a later change list (C1a, 18 Nov). Its `view` says how
+   * it was printed; an action prints its page that way too only when asked (ActOptions.alsoView).
+   */
+  read?: RenderedPage;
 }
 
 /** A page snapshot as act() printed it (secrets scrubbed). */
@@ -457,13 +534,66 @@ export interface RenderedPage {
   liveRefs: ReadonlySet<string>;
   /** The body was cut at the character cap. */
   truncated: boolean;
+  /** The document it is of: the tab and its document generation (a reload or new page is another). */
+  doc: string;
+  /**
+   * How `body` was printed: the band of the page it covers and the character cap. Two bodies are comparable line for
+   * line only when printed the same way (a read_page's three screens against an action's visible screen are not).
+   */
+  view: string;
+  /** ActOptions.alsoView: the same capture printed that way too, when that is not `view` (scrubbed like `body`). */
+  alt?: { view: string; body: string; truncated: boolean };
+  /** The capture's scroll position, "x,y" in CSS px rounded (where the page was when it was printed). */
+  scroll?: string;
+  /**
+   * Loading indicators read in view just before this capture, when this action read them: `active` were waited
+   * for and still showed, `exempt` outlived a wait in this tab on this site before and were not waited for again;
+   * `unknown` when the read itself failed (a busy page): then nothing is known to be finished.
+   */
+  loading?: { active: string[]; exempt: string[]; unknown?: true };
 }
 
 /** What act() returns besides the evidence. */
 export interface ActOptions {
   /** false: no page snapshot after the action (the caller reads the page its own way); the evidence gives counts. */
   snapshot?: boolean;
+  /** actionReceipts: what the caller expects this action to bring about, checked before and after (see Expectation). */
+  expect?: Expectation;
+  /**
+   * With snapshot false: print the page anyway when the expectation is unmet or ambiguous, or the action did something
+   * unexpected (a dialog, a new tab, another document not expected, a refused write, an invalid field, a page still
+   * loading).
+   */
+  escalate?: boolean;
+  /**
+   * The caller's client was not given the last page this executor printed (that reply was withheld): print the page
+   * even when this action changed nothing, and do not call refs from an earlier snapshot valid.
+   */
+  unseen?: boolean;
+  /**
+   * The caller's base is a page printed this way (a RenderedPage's `view`, e.g. a read_page reply's): when the action's
+   * own printing differs and the executor can print the page that way, the page is printed that way too
+   * (RenderedPage.alt), from the same capture, so the caller can compare like with like. Nothing else changes.
+   */
+  alsoView?: string;
 }
+
+/**
+ * A small, closed postcondition (17 Nov, Stage C): no script. `text` shown / `gone` not shown, case-insensitive, in the
+ * element `in` (a ref) or the whole page; `url` a substring of the address after; `within` seconds to wait for it
+ * (default 3, at most 10). Checked before the action too: a condition that already held proves a state, not that the
+ * action caused it.
+ */
+export interface Expectation {
+  text?: string;
+  gone?: string;
+  in?: string;
+  url?: string;
+  within?: number;
+}
+
+/** The receipt for an Expectation. */
+export type ExpectStatus = "matched" | "unmet" | "already-held" | "ambiguous";
 
 export type StepEvent =
   | { type: "thinking"; text: string }
@@ -636,17 +766,23 @@ const SITE_WAIT_TEXT_JS = `
     if (t.length < 4 || t.length > 90 || !waitText.test(t)) continue;
     const el = n.parentElement;
     if (!el || el.closest("script,style,noscript,template,option,a,button,label,h1,h2,h3")) continue;
-    if (inView(el)) return t.slice(0, 60);
+    if (inView(el)) add(t.slice(0, 60));
   }`;
 
 /**
- * The label of a loading indicator in view, or "": an element with role=progressbar that is indeterminate (no
- * aria-valuenow) or labelled as loading, or aria-busy="true", with a box in the viewport and not hidden. A
- * determinate bar (a rating histogram's 65%, step 2 of 4) is not loading. Read in the isolated world.
+ * The labels of the loading indicators in view, one per line (up to 6), or "": an element with role=progressbar that
+ * is indeterminate (no aria-valuenow) or labelled as loading, or aria-busy="true", with a box in the viewport and not
+ * hidden, and the site's own wait line. A determinate bar (a rating histogram's 65%, step 2 of 4) is not loading.
+ * All of them, not the first: Google Flights keeps a "Loading results" spinner in view for good (16 Nov) beside the
+ * "Fetching results" bar that shows while fares still arrive; once the spinner had outlived one wait and was skipped
+ * as stuck, the bar behind it was never waited for, and a run read "Cheapest from Rs 9,584" mid-fetch (the settled
+ * figure was Rs 9,108). Read in the isolated world.
  */
 export const LOADING_INDICATOR_JS = `(() => {
   const words = /\\b(load|loading|fetching|searching|updating|refreshing|please wait|in progress)\\b/i;
   const vh = innerHeight, vw = innerWidth;
+  const found = [];
+  const add = (l) => { if (found.length < 6 && !found.includes(l)) found.push(l); };
   const inView = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0 || r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) return false;
@@ -656,11 +792,27 @@ export const LOADING_INDICATOR_JS = `(() => {
   for (const el of document.querySelectorAll('[role="progressbar"],[aria-busy="true"]')) {
     if (!inView(el)) continue;
     const label = (el.getAttribute("aria-label") || el.getAttribute("aria-valuetext") || el.textContent || "").replace(/\\s+/g, " ").trim();
-    if (el.getAttribute("aria-busy") === "true" || (el.getAttribute("role") === "progressbar" && !el.hasAttribute("aria-valuenow")) || words.test(label)) return label.slice(0, 60) || "loading";
+    if (el.getAttribute("aria-busy") === "true" || (el.getAttribute("role") === "progressbar" && !el.hasAttribute("aria-valuenow")) || words.test(label)) add(label.slice(0, 60) || "loading");
   }
   ${SITE_WAIT_TEXT_JS}
-  return "";
+  return found.join("\\n");
 })()`;
+
+/**
+ * What one read of the loading indicators means, given the exemptions held (`stuck`, keys `<prefix><label>`, the
+ * prefix naming this tab and site). `read` is LOADING_INDICATOR_JS's answer, or null when the read failed (the page's
+ * own script holding its thread): then nothing is known, no exemption ends and nothing counts as finished
+ * (`unknown`). Otherwise an exemption whose indicator is not in view ends (`retire`: it was not stuck after all, so
+ * the next search's indicator of that label is waited for again); one still in view, even a new operation behind the
+ * same label, stays exempt, and the caller says so on the result.
+ */
+export function loadingState(read: string | null, stuck: ReadonlySet<string>, prefix: string): { active: string[]; exempt: string[]; retire: string[]; unknown: boolean } {
+  if (read === null) return { active: [], exempt: [], retire: [], unknown: true };
+  const raw = read.split("\n").filter(Boolean);
+  const retire = [...stuck].filter((k) => k.startsWith(prefix) && !raw.includes(k.slice(prefix.length)));
+  const exempt = raw.filter((l) => stuck.has(prefix + l) && !retire.includes(prefix + l));
+  return { active: raw.filter((l) => !exempt.includes(l)), exempt, retire, unknown: false };
+}
 
 /**
  * A short line in view saying a search or filter found nothing ("No results found", "0 properties", "Your query
@@ -687,7 +839,77 @@ const EMPTY_RESULTS_JS = `(() => {
   return "";
 })()`;
 
-export type ActionTimings = Partial<Record<"act" | "commit" | "dcl" | "content" | "settle" | "tabs" | "snapshot" | "dismiss" | "check" | "render" | InputPhase | "snapWait" | "snapDom" | "snapAx" | "snapFrames" | "snapBuild", number>>;
+/** Case-insensitive count of a text in an element's rendered text; -1 when the element left the page. */
+const COUNT_IN_JS = `function (t) {
+  if (!this.isConnected) return -1;
+  // Visible text only: an element with no box or with visibility hidden reads as not visible (-2); innerText of a
+  // rendered element leaves out what is not rendered (display:none parts).
+  if (this.getClientRects().length === 0 || getComputedStyle(this).visibility === "hidden") return -2;
+  const s = (this.innerText || "").toLowerCase();
+  const q = String(t).toLowerCase();
+  if (!q) return 0;
+  let n = 0;
+  for (let i = s.indexOf(q); i >= 0; i = s.indexOf(q, i + q.length)) n++;
+  return n;
+}`;
+
+type ExpectState = { text?: number; gone?: number; url?: boolean; issue?: string };
+type BoundScope = { ref: string; node?: SnapNode; page: Page; doc: number };
+
+/**
+ * The receipt: each condition before and after. `matched`: it holds now and did not before; `already-held`: it held
+ * before too (a state, not the action's doing); `unmet`: it does not hold; `ambiguous`: the scope could not be read
+ * (named), or the page loaded another document with an expectation scoped to an element of the old one.
+ */
+export function judgeExpect(e: Expectation, before: ExpectState, after: ExpectState, newDocument: boolean): { status: ExpectStatus; line: string } {
+  const scope = e.in ? ` in ${e.in}` : "";
+  const nav = newDocument ? " The page loaded another document; this was checked on it." : "";
+  const note = " (A page state, not proof the task succeeded.)";
+  if (after.issue || before.issue) return { status: "ambiguous", line: `- expect: AMBIGUOUS — ${after.issue ?? before.issue}.${nav}${note}` };
+  const parts: Array<{ ok: boolean; held: boolean; say: string }> = [];
+  if (e.text) {
+    const n = after.text ?? 0;
+    parts.push({ ok: n > 0, held: (before.text ?? 0) > 0, say: n > 0 ? `"${e.text}" shown${scope}${n > 1 ? ` (${n} occurrences of the text)` : ""}` : `"${e.text}" not shown${scope}` });
+  }
+  if (e.gone) {
+    const n = after.gone ?? 0;
+    parts.push({ ok: n === 0, held: (before.gone ?? 0) === 0, say: n === 0 ? `"${e.gone}" not shown${scope}` : `"${e.gone}" still shown${scope}${n > 1 ? ` (${n} occurrences of the text)` : ""}` });
+  }
+  if (e.url !== undefined) parts.push({ ok: !!after.url, held: !!before.url, say: after.url ? `address contains "${e.url}"` : `address does not contain "${e.url}"` });
+  const status: ExpectStatus = parts.some((p) => !p.ok) ? "unmet" : parts.every((p) => p.held) ? "already-held" : "matched";
+  const head = status === "matched" ? "MATCHED" : status === "unmet" ? "UNMET" : "ALREADY HELD before the action";
+  return { status, line: `- expect: ${head} — ${parts.map((p) => p.say).join("; ")}.${nav}${note}` };
+}
+
+/** A request's path alone (no host, query or fragment), for a fact line. */
+const urlPath = (u: string): string => {
+  try {
+    return new URL(u).pathname;
+  } catch {
+    return "";
+  }
+};
+
+/** Reads an acted field in the isolated world (no page script runs): value, selection, validity. */
+const READ_BACK_JS = `function () {
+  const el = this;
+  if (!el.isConnected) return { gone: true };
+  const tag = el.tagName.toLowerCase();
+  const o = { type: (el.type || "").toLowerCase() };
+  if (tag === "select") o.sel = Array.from(el.selectedOptions).map((x) => (x.label || x.text || "").trim());
+  else if (tag === "input" || tag === "textarea") o.value = el.value;
+  else if (el.isContentEditable) o.value = el.innerText;
+  else if (el.getAttribute("aria-valuetext") != null) o.value = el.getAttribute("aria-valuetext");
+  else if (/^(combobox|textbox|searchbox|spinbutton)$/.test(el.getAttribute("role") || "")) o.value = (el.textContent || "").trim();
+  if (el.validity) { o.valid = el.validity.valid; o.msg = el.validationMessage || ""; }
+  o.ariaInvalid = el.getAttribute("aria-invalid");
+  return o;
+}`;
+
+/** The top-level laps of ActionTimings: sequential, so these alone may be added up. */
+export const TOP_LAPS = ["act", "settle", "tabs", "snapshot", "dismiss", "loading", "check", "expect", "render"] as const;
+
+export type ActionTimings = Partial<Record<"act" | "commit" | "dcl" | "content" | "settle" | "loading" | "tabs" | "snapshot" | "dismiss" | "check" | "expect" | "render" | InputPhase | "snapWait" | "snapDom" | "snapAx" | "snapFrames" | "snapBuild", number>>;
 
 interface ToolOutcome {
   content: Anthropic.ToolResultBlockParam["content"];
@@ -954,10 +1176,35 @@ export class Agent {
   private rendered: RenderedPage | null = null;
   /** act() was asked for no page snapshot (ActOptions.snapshot false). */
   private skipSnapshot = false;
+  /** Refs this act found again after the page redrew them (actionReceipts). */
+  private regrounded: string[] = [];
+  /** actionReceipts: read the acted field back after the action settled (type, select). */
+  private pendingReceipt: (() => Promise<string[]>) | null = null;
+  /** actionReceipts: this act's facts. */
+  private actFacts: ActFacts | null = null;
+  /** The tab an action opened (set in evidenceOf), for its facts. */
+  private openedTab: string | undefined;
+  /** This act's expectation and escalation (ActOptions). */
+  private expectation: Expectation | null = null;
+  private escalate = false;
+  /** This act's ActOptions.unseen. */
+  private unseen = false;
+  /** This act's ActOptions.alsoView. */
+  private alsoView: string | undefined;
+  /** The plain read_page this act printed, in parts (ActOutcome.read). */
+  private readRendered: RenderedPage | null = null;
+  /** The page's loading indicator outlasted this action's wait (for facts and escalation). */
+  private loadingStuck = false;
+  /** This act printed its page by escalation. */
+  private actEscalated = false;
+  /** Fields (by structural key) that were password fields when typed into: they stay sensitive if the page changes their type. */
+  private sensitiveFields = new Set<string>();
   /** An act() call is running (its result is shown on its own, with its own snapshot). */
   private inAct = false;
   /** Loading indicators ("site\nlabel") still showing after a whole awaitLoading wait: not waited for again. */
   private readonly stuckLoading = new Set<string>();
+  /** The loading indicators the last read saw (raw, split into waited-for and exempt), for the rendered page. */
+  private loadingSeen: { at: number; active: string[]; exempt: string[]; unknown?: true } | null = null;
   /** Addresses whose "no results" line the model has been told about (EMPTY_RESULTS_JS). */
   private readonly emptyNoted = new Set<string>();
   /**
@@ -1046,7 +1293,9 @@ export class Agent {
     if (opts.enableFill) this.enabled.add("fill");
     if (opts.enableNotes) this.enabled.add("note");
     if (opts.files && Object.keys(opts.files).length) this.enabled.add("upload_file");
-    this.secrets = opts.secretBroker ?? new SecretBroker(opts.secrets);
+    // Output guard: a view of its own over the broker (a shared one is never switched or given this agent's callback).
+    const broker = opts.secretBroker ?? new SecretBroker(opts.secrets);
+    this.secrets = opts.guardSecretOutput ? guardedView(broker, opts.onSecretOutput ?? null) : broker;
     this.repeatFailures = opts.repeatFailures ?? new RepeatFailures();
     // With secrets, a screenshot is refused page by page (pictureRisk), not for the whole run: before 1 Nov a saved
     // LinkedIn login took the screenshot tools from every task of that account, and a run asked the person what its
@@ -1572,6 +1821,15 @@ export class Agent {
     this.opts.onStep?.({ type: "tool_call", step, name, input: this.redact(input) });
     const started = Date.now();
     this.rendered = null;
+    this.regrounded = [];
+    this.pendingReceipt = null;
+    this.actFacts = null;
+    this.actEscalated = false;
+    this.expectation = this.opts.actionReceipts && actOpts.expect && Object.keys(actOpts.expect).length ? actOpts.expect : null;
+    this.escalate = !!(this.opts.actionReceipts && actOpts.escalate);
+    this.unseen = !!actOpts.unseen;
+    this.alsoView = actOpts.alsoView;
+    this.readRendered = null;
     this.skipSnapshot = actOpts.snapshot === false;
     this.inAct = true;
     let outcome: ToolOutcome;
@@ -1580,12 +1838,37 @@ export class Agent {
     } finally {
       this.skipSnapshot = false;
       this.inAct = false;
+      this.expectation = null;
+      this.escalate = false;
+      this.unseen = false;
+      this.alsoView = undefined;
     }
     this.opts.onStep?.({ type: "tool_result", step, name, ok: !outcome.isError, summary: outcome.summary, evidence: outcome.evidence, durationMs: Date.now() - started, ...(outcome.answered ? { answered: outcome.answered } : {}), ...(outcome.timings ? { timings: outcome.timings } : {}) });
     const flat = (c: ToolOutcome["content"]) => (typeof c === "string" ? c : (c ?? []).map((b) => (b.type === "text" ? b.text : "")).join("\n"));
     const text = flat(joinContent(outcome.content, outcome.snapshot ?? ""));
     const page = outcome.snapshot && this.rendered ? this.rendered : undefined;
-    return { ok: !outcome.isError, summary: outcome.summary, text, evidence: outcome.evidence, ...(page ? { content: flat(outcome.content), page } : {}) };
+    const facts = this.actFacts;
+    this.actFacts = null;
+    this.pendingReceipt = null;
+    const escalated = this.actEscalated;
+    this.actEscalated = false;
+    // Set by observe() during execute (a field TypeScript narrowed to null at the start of this method).
+    const read = !outcome.isError && name === "read_page" ? (this.readRendered as RenderedPage | null) : null;
+    this.readRendered = null;
+    // Every string value this act returns passes the session's scrubber (typed passwords included), value by value.
+    const scrub = (s: string) => this.secrets.scrub(s);
+    const pg = page ? (page as RenderedPage) : undefined;
+    return {
+      ok: !outcome.isError,
+      summary: scrub(outcome.summary),
+      text: scrub(text),
+      ...(outcome.evidence ? { evidence: scrubDeep(outcome.evidence, scrub) } : {}),
+      ...(facts ? { facts: scrubDeep(facts, scrub) } : {}),
+      ...(outcome.timings ? { timings: outcome.timings } : {}),
+      ...(escalated && pg ? { escalated: true } : {}),
+      ...(pg ? { content: scrub(flat(outcome.content)), page: { ...pg, url: scrub(pg.url), title: scrub(pg.title), note: scrub(pg.note), body: scrub(pg.body), ...(pg.alt ? { alt: { ...pg.alt, body: scrub(pg.alt.body) } } : {}) } } : {}),
+      ...(read ? { read: { ...read, url: scrub(read.url), title: scrub(read.title), tabs: scrub(read.tabs), note: scrub(read.note), body: scrub(read.body) } } : {}),
+    };
   }
 
   /**
@@ -1697,7 +1980,14 @@ export class Agent {
       // A bot check or a block page is never a popup to close, nor is anything else on a page showing one: HUMAN can draw
       // its Press & Hold in a dialog with a "Close dialog" button, and closing it is a failed check to HUMAN. The
       // interruption handling (checkInterruption, right after) deals with it instead.
-      if (await this.showsCheck(snap)) break;
+      const look = await this.checkLook(snap);
+      if (look.check) break;
+      // The check was read on another capture (the page's document changed under the look): the target picked from
+      // the old one is dropped and picked again from the snapshot read, as this round's.
+      if (look.snap !== snap) {
+        snap = look.snap;
+        continue;
+      }
       if (t.kind === "consent banner" && this.opts.consent && !waited) {
         // The consent rules know multi-step banners (settings, then reject all, then save): let them finish.
         waited = true;
@@ -1710,6 +2000,8 @@ export class Agent {
           continue;
         }
       }
+      // Clicked only while the page is still on the document the target and the check were read from.
+      if (!onDocumentOf(this.page, snap)) break;
       try {
         await this.page.click(t.node.frame, t.node.backendNodeId);
         done.push(`${t.kind}: ${describeNode(t.node).replace(/^\[[^\]]+\]/, "")}`);
@@ -1724,10 +2016,16 @@ export class Agent {
     return { done: done.join("; "), snap: done.length ? snap : undefined };
   }
 
-  /** Whether the page in `snap` shows a bot check, a CAPTCHA or a block page (the classifier's view; false if it cannot tell). */
-  private async showsCheck(snap: Snapshot): Promise<boolean> {
-    const c = (await classifyPage(this.page, snap).catch(() => null))?.result;
-    return !!c && (isChallenge(c.category) || c.category === "hard_block");
+  /**
+   * Whether the page shows a bot check, a CAPTCHA or a block page (the classifier's view), and the snapshot that was
+   * read: `snap` itself, or readPage's new capture when the document changed under the look. A caller acts only on what
+   * it picked from that same snapshot. A page that could not be read counts as a check: nothing on it is dismissed or
+   * closed.
+   */
+  private async checkLook(snap: Snapshot): Promise<{ check: boolean; snap: Snapshot }> {
+    const r = await readPage(this.page, snap);
+    if (r.state === "unknown") return { check: true, snap: r.snap };
+    return { check: isChallenge(r.result.category) || r.result.category === "hard_block", snap: r.snap };
   }
 
   /**
@@ -1739,6 +2037,9 @@ export class Agent {
   private async closeCover(e: ActionError, frame: FrameSession, target: number): Promise<string> {
     const cover = (e.details as { obscuredByBackendNodeId?: number } | undefined)?.obscuredByBackendNodeId;
     if (!cover) return "";
+    // The document the refused click and the cover's probe ran on: nothing below is done on another one.
+    const doc = { seq: this.page.documentSeq, id: this.page.documentId };
+    const sameDocument = () => this.page.documentSeq === doc.seq && this.page.documentId === doc.id;
     const info = await frame.callOnNodeWith<CoverInfo | null>(cover, COVER_PROBE, [target]).catch(() => null);
     // The target inside the popup means the model is working in it (a sticky footer covers a
     // field): nothing to close. A sign-in is never closed for the model; a panel with fields
@@ -1747,7 +2048,10 @@ export class Agent {
     // A bot check's own cover (HUMAN's Press & Hold modal, "covered by <iframe id=px-captcha-modal>") is never
     // closed: Escape or its close button is a failed check to the vendor (see dismissOverlays).
     const now = await captureSnapshot(this.page, { viewportBand: 1 }).catch(() => null);
-    if (now && (await this.showsCheck(now))) return "";
+    if (!now) return "";
+    const look = await this.checkLook(now);
+    // A check, a page that could not be verified, or a check read on another document than the cover's: nothing closed.
+    if (look.check || look.snap.documentSeq !== doc.seq || look.snap.document !== doc.id || !sameDocument()) return "";
     const clear = async (): Promise<boolean> => {
       await sleep(150);
       return this.page.locate(frame, target).then(
@@ -1757,6 +2061,7 @@ export class Agent {
     };
     // Escape in a focused text field clears it (type=search): only when no field has focus.
     if (!info.fieldFocused) {
+      if (!sameDocument()) return "";
       await this.page.press("Escape").catch(() => undefined);
       if (await clear()) return `popup closed with Escape${info.label ? ` ("${clip(info.label, 60)}")` : ""}`;
     }
@@ -1765,6 +2070,7 @@ export class Agent {
     const verdict = await this.policy.check({ tool: "click", input: {}, url: this.page.url, target: `<button>${info.close.label || "close"}</button>`, task: this.currentTask });
     if (verdict.kind !== "allow") return "";
     const offset = await frame.offsetInPage();
+    if (!sameDocument()) return "";
     await this.page.clickAt({ x: info.close.x + offset.x, y: info.close.y + offset.y });
     if (await clear()) return `popup closed with its ${info.close.how}${info.label ? ` ("${clip(info.label, 60)}")` : ""}`;
     return "";
@@ -1829,16 +2135,25 @@ export class Agent {
    * CAPTCHA, 3-D Secure), or one nobody can (a hard block), for a host that hands obstacles to the person itself: the
    * plain MCP's direct tools, where the client's own model talks to the person. Classifies the page the last action
    * left (no new capture when there is one), or, with `fresh` (looking again while a person deals with it), the page
-   * as it is now: the person moves it on without any action of ours. Null when the page needs nobody.
+   * as it is now: the person moves it on without any action of ours. Null only when the page was read and needs
+   * nobody; a page that could not be read (no capture, or readPage "unknown") is a PageUnread.
    */
-  async obstacle({ fresh = false }: { fresh?: boolean } = {}): Promise<PageObstacle | null> {
+  async obstacle({ fresh = false }: { fresh?: boolean } = {}): Promise<PageObstacle | PageUnread | null> {
+    const unread = (changed: boolean): PageUnread => {
+      const host = safeHost(this.page.url);
+      return { unread: true, changed, message: this.secrets.scrub(unreadNote(host, changed)), host, url: this.secrets.scrub(this.page.url) };
+    };
     const snap = (!fresh && this.lastSnapshot) || (await captureSnapshot(this.page, { viewportBand: 1 }).catch(() => null));
-    if (!snap) return null;
-    const c = (await classifyPage(this.page, snap).catch(() => null))?.result;
-    if (!c || c.category === "none" || c.category === "fedcm") return null;
+    if (!snap) return unread(false);
+    const read = await readPage(this.page, snap);
+    if (read.state === "unknown") return unread(read.changed);
+    const c = read.result;
+    if (c.category === "none" || c.category === "fedcm") return null;
     // A widget in a usable page (an embedded CAPTCHA) still stops what it guards; anything else must block the page.
     if (!c.blocking && !(c.inPage && (c.category === "captcha" || c.category === "bot_challenge"))) return null;
-    const host = safeHost(this.page.url);
+    // The address the reading was taken at (the same document), not the page's now.
+    const at = read.input.url || read.snap.url;
+    const host = safeHost(at);
     return {
       category: c.category,
       ...(c.vendor ? { vendor: c.vendor } : {}),
@@ -1873,17 +2188,36 @@ export class Agent {
    * before (`stuckLoading`) is not waited for again. Returns how long it waited.
    */
   private async loadingDone(limitMs: number): Promise<number> {
-    const loading = () => this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).catch(() => "");
-    let label = await loading();
     const site = siteOf(safeHost(this.page.url));
-    if (!label || this.stuckLoading.has(`${site}\n${label}`)) return 0;
+    let labels = await this.loadingLabels(site);
+    if (!labels?.length) return 0;
     const started = Date.now();
-    while (label && Date.now() - started < limitMs) {
+    while (labels?.length && Date.now() - started < limitMs) {
       await sleep(250);
-      label = await loading();
+      labels = await this.loadingLabels(site);
     }
-    if (label) this.stuckLoading.add(`${site}\n${label}`);
+    for (const l of labels ?? []) this.stuckLoading.add(this.stuckKey(site, l));
     return Date.now() - started;
+  }
+
+  /**
+   * The loading indicators in view on this tab, less those that outlived a whole wait on `site` before (a spinner
+   * that never stops): those are skipped, never the others beside them.
+   */
+  private async loadingLabels(site: string): Promise<string[] | null> {
+    const read = await this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).then(
+      (v) => v,
+      () => null,
+    );
+    const s = loadingState(read, this.stuckLoading, this.stuckKey(site, ""));
+    for (const k of s.retire) this.stuckLoading.delete(k);
+    this.loadingSeen = { at: Date.now(), active: s.active, exempt: s.exempt, ...(s.unknown ? { unknown: true as const } : {}) };
+    return s.unknown ? null : s.active;
+  }
+
+  /** An exemption's key: this tab, the site and the indicator's label. */
+  private stuckKey(site: string, label: string): string {
+    return `${this.page.targetId}\n${site}\n${label}`;
   }
 
     /** Usage accumulated by this agent instance (all of its model calls). */
@@ -2036,7 +2370,8 @@ export class Agent {
       dismiss = false,
       reuse,
       maxChars = this.opts.snapshotMaxChars ?? 24_000,
-    }: { wholePage?: boolean; interactiveOnly?: boolean; rootRef?: string; dismiss?: boolean; reuse?: Snapshot | null; maxChars?: number } = {},
+      record = false,
+    }: { wholePage?: boolean; interactiveOnly?: boolean; rootRef?: string; dismiss?: boolean; reuse?: Snapshot | null; maxChars?: number; record?: boolean } = {},
   ): Promise<string> {
     let snap = reuse ?? (await captureSnapshot(this.page, { viewportBand: wholePage ? Infinity : 1, previous }));
     if (dismiss) {
@@ -2045,9 +2380,39 @@ export class Agent {
     }
     this.lastSnapshot = snap;
     this.keepSeen(snap);
-    const text = serializeSnapshot(snap, { maxChars, previous, interactiveOnly, rootRef, ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}), ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true } : {}) });
+    const text = serializeSnapshot(snap, { maxChars, previous, interactiveOnly, rootRef, ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}), ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}) });
     if (!wholePage && !interactiveOnly && !rootRef) this.obsBase = { url: snap.url, text, uses: 0, fresh: true };
-    return this.secrets.scrub(`${this.tabHeader()}PAGE SNAPSHOT (${snap.url}${snap.title ? ` — "${snap.title}"` : ""}):\n${await this.withLoadNote(text)}`);
+    const tabs = this.tabHeader();
+    const noted = await this.withLoadNote(text);
+    // The plain read through act(), in parts (ActOutcome.read), printed as readView() says.
+    if (record && !wholePage && !interactiveOnly && !rootRef && maxChars === (this.opts.snapshotMaxChars ?? 24_000))
+      this.readRendered = {
+        url: this.secrets.scrub(snap.url),
+        title: this.secrets.scrub(snap.title),
+        tabs: this.secrets.scrub(tabs),
+        note: this.secrets.scrub(noted.slice(0, noted.length - text.length)),
+        body: this.secrets.scrub(text),
+        liveRefs: new Set(snap.byRef.keys()),
+        truncated: text.includes("(output truncated at "),
+        doc: `${this.page.targetId}:${this.page.lastDocumentAt}`,
+        view: this.readView(snap),
+        scroll: `${Math.round(snap.scroll.x)},${Math.round(snap.scroll.y)}`,
+      };
+    return this.secrets.scrub(`${tabs}PAGE SNAPSHOT (${snap.url}${snap.title ? ` — "${snap.title}"` : ""}):\n${noted}`);
+  }
+
+  /**
+   * How read_page prints a page (observe(), no whole_page): the capture's band around the viewport at this scroll
+   * position, at the snapshot cap (RenderedPage.view). The position is part of it: the same printing after a scroll
+   * covers another part of the page, and what is in view is part of what the client was told.
+   */
+  private readView(snap: Snapshot): string {
+    return `capture band at ${Math.round(snap.scroll.x)},${Math.round(snap.scroll.y)}, ${this.opts.snapshotMaxChars ?? 24_000} chars`;
+  }
+
+  /** How an action prints its page (renderSnapshot): actionSnapshotBand, else as read_page does (RenderedPage.view). */
+  private actionView(snap: Snapshot): string {
+    return this.opts.actionSnapshotBand !== undefined ? `band ${this.opts.actionSnapshotBand}, ${this.opts.snapshotMaxChars ?? 24_000} chars` : this.readView(snap);
   }
 
   /**
@@ -2059,7 +2424,7 @@ export class Agent {
     this.keepSeen(snap);
     const maxChars = this.opts.snapshotMaxChars ?? 24_000;
     // The same printing as observe(), so a change list compares like with like.
-    const body = serializeSnapshot(snap, { maxChars, previous, ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true } : {}) });
+    const body = serializeSnapshot(snap, { maxChars, previous, ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}) });
     const base = this.obsBase;
     // Context editing keeps the latest 6 tool results (3 after a model switch): the base must be one.
     const kept = this.switchedModel ? KEEP_AFTER_SWITCH : KEEP_TOOL_RESULTS;
@@ -2185,7 +2550,7 @@ export class Agent {
     // The open MCP's browser_wait takes until/gone (return once that text appears or goes). They are not in the
     // agent's own tool list, whose strict-tool budget is full (two more optional parameters would take strict from
     // drag), so they come through here as given.
-    if (name === "wait") for (const k of ["until", "gone"]) if (typeof rawInput[k] === "string" && rawInput[k]) input = { ...input, [k]: String(rawInput[k]).slice(0, 120) };
+    if (name === "wait") for (const k of ["until", "gone", "in"]) if (typeof rawInput[k] === "string" && rawInput[k]) input = { ...input, [k]: String(rawInput[k]).slice(0, 120) };
     await this.recallRefs(input);
 
     // A plain click on a link that opens a new tab (Amazon results: target=_blank) would leave this
@@ -2382,6 +2747,10 @@ export class Agent {
           const modifiers = mods.reduce((m, k) => m | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[k] ?? 0), 0);
           const clickOpts = { button: (input["button"] as "left" | "right" | "middle") ?? "left", clickCount: input["double"] ? 2 : 1, modifiers };
           if (input["on_dialog"]) this.nextDialog = { accept: input["on_dialog"] === "accept", promptText: typeof input["prompt_text"] === "string" ? input["prompt_text"] : undefined };
+          // An item picked out of a list (a suggestion, a menu item, a tab): which one, as the page labeled it in the snapshot
+          // the ref came from, said with the evidence, so a pick between look-alike entries is on record in the page's own
+          // words. A ref missing from that snapshot says nothing; the line is no proof beyond the click's own checks.
+          const chose = choiceOf(this.turnSnapshot ?? this.lastSnapshot, String(input["ref"]));
           try {
             return await this.withEvidence(
               async () => {
@@ -2390,7 +2759,7 @@ export class Agent {
                   // Redrawn after the ref was checked and before any press (a list that renders itself again, a page
                   // still hydrating: "Node is detached"): found again by the same key, once, as a ref is before acting.
                   if (e instanceof ActionError && e.code === "stale" && this.page.inputPhases.approach === undefined && this.page.inputPhases.press === undefined) {
-                    target = (await resolveHandle(this.page, h)).handle;
+                    target = (await resolveHandle(this.page, h, { previous: this.lastSnapshot ?? undefined })).handle;
                     return this.page.click(target.frame, target.backendNodeId, clickOpts);
                   }
                   throw e;
@@ -2402,7 +2771,7 @@ export class Agent {
                 });
               },
               `click ${input["ref"]}`,
-              () => (dismissed ? `Auto-dismissed (it covered the target): ${dismissed}` : ""),
+              () => [chose ? `Chose ${chose}` : "", dismissed ? `Auto-dismissed (it covered the target): ${dismissed}` : ""].filter(Boolean).join("\n"),
             );
           } finally {
             // A planned dialog response that never fired must not auto-answer a later, unrelated dialog.
@@ -2420,6 +2789,23 @@ export class Agent {
           const refused = await this.guardSecrets(used, h, host, tn);
           if (refused) return err(refused);
           this.expectAsync = !!tn && (tn.role === "combobox" || tn.role === "searchbox" || !!tn.attrs["aria-autocomplete"] || !!tn.attrs["list"] || !!tn.attrs["aria-haspopup"] || input["submit"] === true);
+          // Sensitive by what the field was before the action (a page may turn a password field into text).
+          const wasPassword = (tn?.attrs["type"] ?? "").toLowerCase() === "password" || (!!tn && this.sensitiveFields.has(nodeKey(tn)));
+          if (wasPassword && tn) this.sensitiveFields.add(nodeKey(tn));
+          const sensitive = used.length > 0 || wasPassword;
+          // Before the action: the typed password is masked for the rest of the session (every reply and read), and
+          // the field's value is masked in every later capture of this tab, whatever type the page gives it.
+          if (wasPassword && this.opts.actionReceipts && this.inAct) {
+            // 18 Nov: the value actually typed, whether given as is or substituted from secrets by placeholder (their
+            // names kept), so it stays guarded after a secret expires or is replaced, and under 3 characters too.
+            this.secrets.addTyped(text, used);
+            if (tn) markSensitiveField(this.page, tn);
+          } else if (used.length && this.opts.guardSecretOutput && this.inAct && tn) {
+            // Output guard: a field filled from a secret shows no value in later captures (as a password field does),
+            // so the page's own copy of it does not withhold every later reply.
+            markSensitiveField(this.page, tn);
+          }
+          if (this.opts.actionReceipts && this.inAct) this.pendingReceipt = () => this.readBack(h, { typed: text, append: input["clear"] === false, secret: sensitive });
           return await this.withEvidence(
             async () => {
               await this.page.type(h.frame, h.backendNodeId, text, { clear: input["clear"] !== false, perKey: input["per_key"] === true, submit: input["submit"] === true });
@@ -2436,6 +2822,7 @@ export class Agent {
         case "select_option": {
           const h = await this.handle(String(input["ref"]));
           let picked: string[] = [];
+          if (this.opts.actionReceipts && this.inAct) this.pendingReceipt = () => this.readBack(h, { select: true });
           return await this.withEvidence(
             async () => {
               picked = await this.page.selectOption(h.frame, h.backendNodeId, input["values"] as string[]);
@@ -2565,6 +2952,28 @@ export class Agent {
           const until = typeof input["until"] === "string" ? input["until"].trim() : "";
           const gone = typeof input["gone"] === "string" ? input["gone"].trim() : "";
           const s = Number(input["seconds"]) > 0 ? Number(input["seconds"]) : until || gone ? 10 : 2;
+          const scopeRef = typeof input["in"] === "string" && this.opts.actionReceipts ? input["in"] : "";
+          if ((until || gone) && scopeRef) {
+            // Scoped (actionReceipts): the same expectation as an action's, polled for `seconds`, with its receipt.
+            const exp: Expectation = { ...(until ? { text: until } : {}), ...(gone ? { gone } : {}), in: scopeRef };
+            const snap = this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 }));
+            const bound = this.bindScope(scopeRef, snap);
+            const was = await this.expectState(exp, bound);
+            let judged = judgeExpect(exp, was, was, false);
+            const t0 = Date.now();
+            return await this.withEvidence(
+              async () => {
+                for (;;) {
+                  judged = judgeExpect(exp, was, await this.expectState(exp, bound), false);
+                  if (judged.status !== "unmet" || Date.now() - t0 >= s * 1000) break;
+                  await sleep(200);
+                }
+              },
+              until ? `wait for "${until}" in ${scopeRef}` : `wait until "${gone}" is gone from ${scopeRef}`,
+              () => `${judged.line.replace(/^- /, "(")} after ${((Date.now() - t0) / 1000).toFixed(1)} s.)`,
+              { settle: false },
+            );
+          }
           if (until || gone) {
             // A condition the model names (the result's label, the site's "Calculating…"): ends the moment it holds.
             const t0 = Date.now();
@@ -2594,7 +3003,12 @@ export class Agent {
           let idle = false;
           let loadingLabel = "";
           if (this.opts.fastSettle) {
-            loadingLabel = await this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).catch(() => "");
+            const read = await this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).then(
+              (v) => v,
+              () => null,
+            );
+            // A failed read is not an idle page: the wait is not cut.
+            loadingLabel = read === null ? "(unread)" : (read.split("\n")[0] ?? "");
             idle = !loadingLabel && this.page.pendingData() === 0 && !this.page.socketBusy(1_000) && (await this.page.loadState()).readyState === "complete";
           }
           const ms = idle ? Math.min(s * 1000, 500) : s * 1000;
@@ -2606,7 +3020,8 @@ export class Agent {
               else {
                 while (Date.now() - t0 < ms) {
                   await sleep(250);
-                  if (!(await this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).catch(() => ""))) break;
+                  // A failed read is not "finished": the wait goes on.
+                  if (!(await this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).catch(() => "(unread)"))) break;
                 }
               }
               waitedMs = Date.now() - t0;
@@ -2626,6 +3041,7 @@ export class Agent {
             wholePage: input["whole_page"] === true,
             interactiveOnly: input["interactive_only"] === true,
             rootRef: typeof input["root_ref"] === "string" ? input["root_ref"] : undefined,
+            record: this.inAct,
           });
           this.note(readKey("read_page", input));
           return ok(text, "read_page");
@@ -2658,9 +3074,12 @@ export class Agent {
             const t = best ? textOf(best, 60) : "";
             return t ? ` in section "${t}"` : "";
           };
+          // A direct caller with compact screens (the open MCP): each hit written as its screen line writes it (the same
+          // hits, order, refs, sections and match labels; attributes as the screen prints them).
+          const compactFor = this.inAct && this.opts.compactSnapshots ? snap.url : undefined;
           const lines = hits.map((n) => {
             const where = n.rect ? (n.rect.y + snap.scroll.y > snap.scroll.y + snap.viewport.height ? " (below viewport)" : n.rect.y + snap.scroll.y + n.rect.height < snap.scroll.y ? " (above viewport)" : "") : "";
-            return `${describeNode(n)}${section(n)}${where}${partial.has(n) ? " (partial match)" : ""}`;
+            return `${describeNode(n, compactFor, compactFor !== undefined && this.opts.roleTags)}${section(n)}${where}${partial.has(n) ? " (partial match)" : ""}`;
           });
           const exactCount = hits.length - partial.size;
           const head = partial.size
@@ -2763,6 +3182,8 @@ export class Agent {
           // `location` cannot be locked: a query that loaded another page is told it must only read.
           if (this.page.lastDocumentAt !== since) return err("query must only read: it loaded another page. Use navigate, click or go_back to move between pages.");
           this.note(readKey("query", input));
+          // Every string value of the result passes the scrubber (typed passwords included), before it is printed.
+          value = scrubDeep(value, (s) => this.secrets.scrub(s));
           const text = typeof value === "string" ? value : JSON.stringify(value, null, 0) ?? "undefined";
           if (!text.trim() || text === "[]" || text === '""') {
             // An empty read: the labels nearest to the words the selector looked for, if any.
@@ -3039,8 +3460,11 @@ export class Agent {
     if (!node) {
       throw new ActionError("not_found", `No element with ref ${ref} in the latest snapshot. Refs: ${[...this.lastSnapshot!.byRef.keys()].slice(0, 12).join(", ")}${this.lastSnapshot!.byRef.size > 12 ? ", …" : ""}. Use read_page or find to get current refs.`);
     }
-    const resolved = await resolveHandle(this.page, handleFor(node));
+    // Re-grounded against the snapshot the ref came from, so the fresh capture keeps every held ref's number.
+    const from = seen.byRef.has(ref) ? seen : this.lastSnapshot!;
+    const resolved = await resolveHandle(this.page, handleFor(node), { previous: from });
     if (resolved.freshSnapshot) this.lastSnapshot = resolved.freshSnapshot;
+    if (resolved.how === "regrounded" && this.opts.actionReceipts) this.regrounded.push(ref);
     return resolved.handle;
   }
 
@@ -3055,6 +3479,14 @@ export class Agent {
     const acting = this.page;
     acting.inputPhases = {};
     this.navTimings = null;
+    // A site with an exempt loading indicator: look once before acting, so one that has gone since (the last
+    // search finished) is waited for again when this action brings it back. Only sites with an exemption pay
+    // this read (one isolated-world evaluation).
+    if (this.opts.awaitLoading && (opts.settle ?? true) === true) {
+      const site = siteOf(safeHost(acting.url));
+      if ([...this.stuckLoading].some((k) => k.startsWith(`${acting.targetId}\n${site}\n`))) await this.loadingLabels(site);
+      this.loadingSeen = null;
+    }
     try {
       return await this.evidenceOf(action, label, extraSummary, opts, timings, acting);
     } catch (e) {
@@ -3069,6 +3501,12 @@ export class Agent {
 
   private async evidenceOf(action: () => Promise<void>, label: string, extraSummary: (() => string) | undefined, { settle = true }: { settle?: boolean | "frames" }, timings: ActionTimings, acting: Page): Promise<ToolOutcome> {
     const before = this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 }));
+    const docBefore = this.page.lastDocumentAt;
+    this.loadingStuck = false;
+    const expectation = this.inAct ? this.expectation : null;
+    // The scope is bound to the element the ref named before the action, in this document: never re-bound by ref later.
+    const scope = expectation?.in ? this.bindScope(expectation.in, this.turnSnapshot ?? before) : null;
+    const expectBefore = expectation ? await this.expectState(expectation, scope) : null;
     let lapFrom = Date.now();
     const lap = (k: keyof ActionTimings) => {
       const now = Date.now();
@@ -3118,6 +3556,7 @@ export class Agent {
       await this.tabs.switchTo(tab);
       await tab.waitForContent(5_000).catch(() => false);
       tabNotes.push(`This opened a new tab ${this.tabs.idOf(tab)} (${tab.url}); now working in it (switch_tab goes back).`);
+      this.openedTab = this.tabs.idOf(tab);
     }
     const downloaded = await this.collectDownloads(since);
     if (downloaded) tabNotes.push(downloaded);
@@ -3148,24 +3587,41 @@ export class Agent {
     if (this.page === actedOn && /^https?:/.test(fromUrl) && siteOf(safeHost(this.page.url)) !== siteOf(safeHost(fromUrl))) this.cameFrom = { tab: this.page, site: siteOf(safeHost(fromUrl)) };
     lap("dismiss");
     if (this.opts.awaitLoading && settle === true) {
-      const loading = () => this.page.main.evaluate<string>(LOADING_INDICATOR_JS, { timeoutMs: 1_000 }).catch(() => "");
-      let label = await loading();
       // An indicator that outlived a whole wait on this site (a spinner that never stops, kept across its filter and
       // page URLs) is not waited for again: on 4 Nov clicks over 6 s rose from 20 to 33 in 258 when it was per URL.
+      // Only that indicator is skipped: another one in view beside it (fares still arriving) is still waited for.
       const site = siteOf(safeHost(this.page.url));
-      if (label && !this.stuckLoading.has(`${site}\n${label}`)) {
+      let labels = await this.loadingLabels(site);
+      if (labels === null) tabNotes.push("(Could not read whether the page is still loading: look again before reading values.)");
+      if (labels?.length) {
         const started = Date.now();
         // A countdown the site states ("Redirecting in 8 seconds") gets its time, up to 12 s; anything else 6 s.
-        const stated = Number(/\b(?:in|wait)\s+(\d{1,2})\s*(?:s|secs?|seconds?)\b/i.exec(label)?.[1] ?? 0);
+        const stated = Math.max(0, ...labels.map((l) => Number(/\b(?:in|wait)\s+(\d{1,2})\s*(?:s|secs?|seconds?)\b/i.exec(l)?.[1] ?? 0)));
         const limitMs = stated ? Math.min(12_000, Math.max(6_000, (stated + 1) * 1_000)) : 6_000;
-        while (label && Date.now() - started < limitMs) {
+        let failed = false;
+        while (labels?.length && Date.now() - started < limitMs) {
           await sleep(250);
-          label = await loading();
+          const next = await this.loadingLabels(site);
+          if (next === null) failed = true;
+          else labels = next;
+          if (failed) break;
         }
         const waited = ((Date.now() - started) / 1000).toFixed(1);
-        if (label) this.stuckLoading.add(`${site}\n${label}`);
-        tabNotes.push(label ? `(The page still shows "${label}" after ${waited} s: what it shows may change; wait, then look again before reading values.)` : `(Waited ${waited} s for the page's own loading indicator to finish.)`);
+        const label = labels?.[0] ?? "";
+        if (failed) tabNotes.push(`(Could not read whether "${label}" finished after ${waited} s: look again before reading values.)`);
+        else {
+          for (const l of labels ?? []) this.stuckLoading.add(this.stuckKey(site, l));
+          if (this.loadingSeen) this.loadingSeen = { ...this.loadingSeen, active: labels ?? [] };
+          if (label) this.loadingStuck = true;
+          tabNotes.push(label ? `(The page still shows "${label}" after ${waited} s: what it shows may change; wait, then look again before reading values.)` : `(Waited ${waited} s for the page's own loading indicator to finish.)`);
+        }
         after = await captureSnapshot(this.page, { viewportBand: 1, previous: before });
+      }
+      // An indicator not waited for (it outlived a wait in this tab) is still in view: said on every result it is in,
+      // since nothing tells a new operation behind the same label from the old one, so no value near it is final.
+      for (const l of this.loadingSeen && Date.now() - this.loadingSeen.at < 30_000 ? this.loadingSeen.exempt : []) {
+        tabNotes.push(`(Not waited for: "${l}", which outlasted an earlier wait here; values near it may still change.)`);
+        this.loadingStuck = true;
       }
       // A search or filter that found nothing: said once per address, beside the page (no call of its own).
       const empty = this.emptyNoted.has(this.page.url) ? "" : await this.page.main.evaluate<string>(EMPTY_RESULTS_JS, { timeoutMs: 1_000 }).catch(() => "");
@@ -3174,11 +3630,58 @@ export class Agent {
         tabNotes.push(`(The page says "${empty.slice(0, 100)}". A filter, date range or exact wording can be what leaves nothing: before reporting none, check with a broader search or fewer filters.)`);
       }
     }
-    lap("settle");
+    lap(this.opts.actionReceipts ? "loading" : "settle");
     const intr = await this.checkInterruption(after);
     if (intr.snap) after = intr.snap;
     if (intr.note) tabNotes.push(intr.note);
+    // actionReceipts: the acted field read back now the page has settled (field state, not the site's acceptance).
+    const receiptFn = this.opts.actionReceipts && this.inAct ? this.pendingReceipt : null;
+    let receiptLines = receiptFn ? await receiptFn().catch(() => [] as string[]) : [];
+    this.pendingReceipt = null;
+    let expectReceipt: { status: ExpectStatus; line: string } | null = null;
     lap("check");
+    if (expectation && expectBefore) {
+      const deadline = Date.now() + Math.min(10, Math.max(0, expectation.within ?? 3)) * 1000;
+      let now = await this.expectState(expectation, scope);
+      let polled = false;
+      while (judgeExpect(expectation, expectBefore, now, this.page.lastDocumentAt !== docBefore).status === "unmet" && Date.now() < deadline) {
+        await sleep(200);
+        polled = true;
+        now = await this.expectState(expectation, scope);
+      }
+      expectReceipt = judgeExpect(expectation, expectBefore, now, this.page.lastDocumentAt !== docBefore);
+      // The page changed while it was polled: the evidence and the page returned are captured again now, so they
+      // describe the page the receipt judged (one more capture, counted, in the `expect` lap).
+      if (polled) {
+        // What happened while it was polled is part of this action's evidence, not lost behind a MATCHED: the page
+        // as it is now, the field read again, writes since the action began (refused or unanswered ones included),
+        // a loading indicator still showing, a tab opened. Dialogs are read below from the action's start already.
+        // Nothing is acted again.
+        after = await captureSnapshot(this.page, { viewportBand: 1, previous: before });
+        if (receiptFn) receiptLines = await receiptFn().catch(() => receiptLines);
+        if (settled && label !== "navigate" && label !== "go_back") {
+          settled.writes = this.page.writesSince(since).map((w) => ({
+            method: w.method,
+            url: w.url,
+            status: w.status,
+            failed: w.failed,
+            ms: w.endedAt ? w.endedAt - since : undefined,
+            ok: !w.failed && w.status !== undefined && w.status >= 200 && w.status < 400,
+          }));
+        }
+        const lateLabels = this.opts.awaitLoading ? await this.loadingLabels(siteOf(safeHost(this.page.url))) : [];
+        if (lateLabels?.length) {
+          this.loadingStuck = true;
+          tabNotes.push(`(The page shows "${clip(lateLabels[0]!, 60)}" after the expectation was checked: what it shows may change.)`);
+        }
+        const lateTabs = this.tabs.openedSince(since).filter((p) => p !== this.page && this.tabs.idOf(p) !== this.openedTab);
+        if (lateTabs.length) {
+          this.openedTab = this.tabs.idOf(lateTabs[lateTabs.length - 1]!);
+          tabNotes.push(`(A new tab ${this.openedTab} opened while the expectation was checked; still working in this one: switch_tab goes there.)`);
+        }
+      }
+      lap("expect");
+    }
     const stats = this.page.main.network.stats();
     const evidence = this.scrubEvidence(
       diffSnapshots(before, after, {
@@ -3187,8 +3690,25 @@ export class Agent {
         settle: settled,
         // Requests a page makes while loading are not the agent's writes.
         writes: label === "navigate" || label === "go_back" ? undefined : settled?.writes,
+        // A direct caller with compact screens (the open MCP): elements described as its screen prints them.
+        ...(this.inAct && this.opts.compactSnapshots ? { compactFor: "", ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}),
+        ...(this.inAct && this.opts.actionReceipts ? { validation: true } : {}),
       }),
     );
+    if (this.opts.actionReceipts && this.inAct) {
+      const extraNow = extraSummary?.() ?? "";
+      this.actFacts = {
+        dialogs: evidence.dialogs.map((d) => ({ type: d.type, handled: `${d.handledWith}ed`, message: clip(d.message, 100) })),
+        ...(this.openedTab ? { newTab: this.openedTab } : {}),
+        newDocument: this.page.lastDocumentAt !== docBefore,
+        failedWrites: (evidence.writes ?? []).filter((w) => !w.ok).map((w) => this.secrets.scrub(`${w.method} ${urlPath(w.url)} ${w.failed ? `FAILED (${clip(w.failed, 40)})` : w.status ? String(w.status) : "no response"}`)),
+        invalid: [...after.byRef.entries()].filter(([, n]) => n.invalid).map(([r]) => r).slice(0, 5),
+        stillLoading: this.loadingStuck,
+        ...(expectReceipt ? { expect: { status: expectReceipt.status, line: this.secrets.scrub(expectReceipt.line) } } : {}),
+        receipt: [...(/^(Chose|Selected)\b/.test(extraNow) ? [extraNow] : []), ...receiptLines].map((l) => this.secrets.scrub(l)),
+      };
+    }
+    this.openedTab = undefined;
     this.lastSnapshot = after;
     this.evidenceSnapshot = after;
     // The page as it settled after this action: an executor that starts on it next (after the start navigation, or
@@ -3198,20 +3718,121 @@ export class Agent {
     this.keepSeen(after);
     // Recorded with the URL the page settled on, not the one at the moment the action returned.
     this.note(label, evidence.urlAfter || after.url, evidence);
-    const skip = this.skipSnapshot;
-    const snapshot = evidence.changed && !skip ? await this.renderSnapshot(after, before) : undefined;
+    // Escalation (opt-in, with snapshot false): the page is printed when the receipt or the action's facts call for a look.
+    const f = this.actFacts;
+    const escalated =
+      this.skipSnapshot &&
+      this.escalate &&
+      !!f &&
+      ((!!f.expect && (f.expect.status === "unmet" || f.expect.status === "ambiguous")) ||
+        f.dialogs.length > 0 ||
+        !!f.newTab ||
+        (f.newDocument && !expectation?.url) ||
+        f.failedWrites.length > 0 ||
+        f.invalid.length > 0 ||
+        f.stillLoading);
+    const skip = this.skipSnapshot && !escalated;
+    const snapshot = (evidence.changed || escalated || this.unseen) && !skip ? await this.renderSnapshot(after, before) : undefined;
+    if (escalated && snapshot) this.actEscalated = true;
     // compactSnapshots, through act(): what the snapshot below shows is counted in the evidence, not listed twice.
     // Not in the agent's own loop, which shows one snapshot after all of a turn's actions: an element one action
     // added and a later one removed is in no snapshot the model sees.
-    const parts = [formatEvidence(evidence, skip ? { lists: false } : snapshot && this.inAct && this.opts.compactSnapshots && this.rendered ? { shown: this.rendered.body } : {})];
+    // No snapshot asked for (ActOptions.snapshot false): only the printed page is left out. The evidence is the same as
+    // an action's without a page (its added, removed and new-text lists included), and the page's own notes the page
+    // would have carried (still loading, a PDF, a canvas) are kept; the loading read is not carried to a later page.
+    const compactUrls = this.inAct && !!this.opts.compactSnapshots;
+    const parts = [formatEvidence(evidence, { compactUrls, ...(!skip && snapshot && this.inAct && this.opts.compactSnapshots && this.rendered ? { shown: this.rendered.body } : {}) })];
+    if (skip) {
+      const notes = (await this.withLoadNote(".").catch(() => ".")).slice(0, -1).trim();
+      if (notes) parts.push(this.secrets.scrub(notes));
+      this.loadingSeen = null;
+    }
+    if (receiptLines.length) parts.splice(1, 0, receiptLines.join("\n"));
+    if (expectReceipt) parts.splice(1, 0, expectReceipt.line);
+    if (escalated) parts.push(`(Printed whole although snapshot:false was asked: the receipt or the action's effects call for a look${evidence.changed ? "" : "; the page did not change"}.)`);
     const extra = extraSummary?.();
     if (extra) parts.unshift(extra);
     if (lateDismissed) parts.unshift(`Auto-dismissed a popup that appeared: ${lateDismissed}`);
     if (tabNotes.length) parts.unshift(tabNotes.join(" "));
-    if (!evidence.changed) parts.push("(Page snapshot unchanged; refs from the previous snapshot are still valid.)");
+    if (this.regrounded.length) parts.unshift(`(${this.regrounded.join(", ")} found again after the page redrew ${this.regrounded.length === 1 ? "it" : "them"}: same role, name and position among look-alikes.)`);
+    if (!evidence.changed)
+      parts.push(
+        this.unseen
+          ? `(This action changed nothing on the page. The last reply that would have shown the page was withheld, so earlier refs may not match it: use only refs printed ${skip ? "by browser_snapshot" : "in this reply"}.)`
+          : "(Page snapshot unchanged; refs from the previous snapshot are still valid.)",
+      );
     else if (skip) parts.push("(No page snapshot, as asked.)");
     lap("render");
     return { isError: false, summary: `${label}: ${evidence.changed ? "changed" : "no change"}`, content: this.secrets.scrub(parts.join("\n\n")), evidence, snapshot, timings };
+  }
+
+  /**
+   * The Expectation's conditions as the page holds them now: match counts of `text` and `gone` in the scope element
+   * (`in`) or the whole page, `url` against the address, or why the scope cannot be read (a ref not on the page, an
+   * element replaced or removed, a frame gone). Read in the isolated world: no page script runs.
+   */
+  /**
+   * The element a scope ref names before the action, with the tab and document it is in. Kept for the whole action:
+   * after it, the ref is not looked up again (a new document may give the same ref to another element).
+   */
+  private bindScope(ref: string, snap: Snapshot): BoundScope {
+    const node = snap.byRef.get(ref) ?? this.lastSnapshot?.byRef.get(ref);
+    return node ? { ref, node, page: this.page, doc: this.page.lastDocumentAt } : { ref, page: this.page, doc: this.page.lastDocumentAt };
+  }
+
+  private async expectState(e: Expectation, scope: BoundScope | null): Promise<ExpectState> {
+    const out: ExpectState = {};
+    if (e.url !== undefined) out.url = this.page.url.includes(e.url);
+    const texts = (["text", "gone"] as const).filter((k) => e[k] !== undefined && e[k] !== "");
+    if (!texts.length) return out;
+    if (e.in) {
+      const node = scope?.node;
+      if (!scope || !node) return { ...out, issue: `${e.in} is not an element on the page (0 matches)` };
+      if (scope.page !== this.page) return { ...out, issue: `${e.in} was in another tab` };
+      if (this.page.lastDocumentAt !== scope.doc) return { ...out, issue: `the page loaded another document; ${e.in} belonged to the previous one` };
+      if (node.frame.session.closed) return { ...out, issue: `${e.in}'s frame is gone` };
+      for (const k of texts) {
+        const n = await node.frame.callOnNode<number>(node.backendNodeId, COUNT_IN_JS, [e[k]], { isolated: true }).catch(() => -1);
+        if (n === -2) return { ...out, issue: `${e.in} is not visible` };
+        if (n < 0) return { ...out, issue: `${e.in} was replaced or removed` };
+        out[k] = n;
+      }
+      return out;
+    }
+    for (const k of texts) out[k] = await this.page.main.evaluate<number>(`(${COUNT_IN_JS}).call(document.body || document.documentElement, ${JSON.stringify(e[k])})`, { timeoutMs: 1_500 }).catch(() => -1);
+    if (texts.some((k) => (out[k] ?? -1) < 0)) return { ...out, issue: "the page could not be read" };
+    return out;
+  }
+
+  /**
+   * The acted field read back after the action settled (actionReceipts, type and select). What the field holds now,
+   * said against what was typed (never the value itself for a password field or a secret), the selected options, and
+   * the field's own validity. A field the page replaced or removed is unknown, never taken as accepted. Field state is
+   * not the site accepting it: that takes the server's answer or the page saying so.
+   */
+  private async readBack(h: ElementHandle, want: { typed?: string; append?: boolean; secret?: boolean; select?: boolean }): Promise<string[]> {
+    type Read = { gone?: boolean; type?: string; value?: string; sel?: string[]; valid?: boolean; msg?: string; ariaInvalid?: string | null };
+    let r: Read;
+    try {
+      r = await h.frame.callOnNode<Read>(h.backendNodeId, READ_BACK_JS, [], { isolated: true });
+    } catch {
+      r = { gone: true };
+    }
+    if (r.gone) return [`- field ${h.ref}: replaced or removed by the page after the action; not read back (unknown).`];
+    const lines: string[] = [];
+    if (want.select) lines.push(`- field ${h.ref}: selected ${r.sel?.length ? r.sel.map((s) => `"${clip(s, 60)}"`).join(", ") : "nothing"}.`);
+    else if (r.value === undefined) lines.push(`- field ${h.ref}: its value cannot be read (unknown).`);
+    else {
+      const typed = want.typed ?? "";
+      const holds = want.append ? r.value.endsWith(typed) : r.value === typed;
+      if (r.type === "password" || want.secret) lines.push(`- field ${h.ref}: ${holds ? "holds what was typed" : r.value ? "holds something other than what was typed" : "is empty"} (value not shown).`);
+      else lines.push(holds ? `- field ${h.ref}: holds what was typed.` : `- field ${h.ref}: now "${clip(r.value, 80)}"${r.value ? "" : " (empty)"}, not what was typed ("${clip(typed, 80)}").`);
+    }
+    const invalid = r.valid === false || (r.ariaInvalid != null && r.ariaInvalid !== "false");
+    const sensitive = r.type === "password" || !!want.secret;
+    if (invalid) lines.push(`- validation ${h.ref}: invalid${r.msg && !sensitive ? ` ("${clip(r.msg, 120)}")` : sensitive && r.msg ? " (its message is not shown: it may repeat what was typed)" : ""}.`);
+    lines.push("(Field state only: not proof the site accepted it.)");
+    return lines;
   }
 
   /** Downloads this action started: wait (up to 20 s) for them to finish and describe them. */
@@ -3240,10 +3861,23 @@ export class Agent {
       previous,
       ...(this.opts.actionSnapshotBand !== undefined ? { band: this.opts.actionSnapshotBand } : {}),
       ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}),
-      ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true } : {}),
+      ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}),
     });
     const body = await this.withLoadNote(printed);
     const tabs = this.tabHeader();
+    // ActOptions.alsoView: the same capture as read_page prints it (the one other printing this executor repeats).
+    const view = this.actionView(snap);
+    // Only when the page is where the base was printed (the same scroll position): after a scroll the base covers
+    // another part of the page, and the action's own screen is what to show.
+    const alsoRead = this.inAct && this.alsoView !== undefined && this.alsoView !== view && this.alsoView === this.readView(snap);
+    const wide = alsoRead
+      ? serializeSnapshot(snap, {
+          maxChars,
+          previous,
+          ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}),
+          ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}),
+        })
+      : null;
     this.rendered = {
       url: this.secrets.scrub(snap.url),
       title: this.secrets.scrub(snap.title),
@@ -3252,7 +3886,15 @@ export class Agent {
       body: this.secrets.scrub(printed),
       liveRefs: new Set(snap.byRef.keys()),
       truncated: printed.includes("(output truncated at "),
+      doc: `${this.page.targetId}:${this.page.lastDocumentAt}`,
+      view,
+      scroll: `${Math.round(snap.scroll.x)},${Math.round(snap.scroll.y)}`,
+      ...(wide !== null ? { alt: { view: this.readView(snap), body: this.secrets.scrub(wide), truncated: wide.includes("(output truncated at ") } } : {}),
+      ...(this.loadingSeen && Date.now() - this.loadingSeen.at < 15_000
+        ? { loading: { active: this.loadingSeen.active, exempt: this.loadingSeen.exempt, ...(this.loadingSeen.unknown ? { unknown: true as const } : {}) } }
+        : {}),
     };
+    this.loadingSeen = null;
     return this.secrets.scrub(`${tabs}PAGE SNAPSHOT (${snap.url}${snap.title ? ` — "${snap.title}"` : ""}):\n${body}`);
   }
 
@@ -3262,11 +3904,24 @@ export class Agent {
   }
 
   /** Evidence is shown to the model and streamed to observers: no secret value may survive in it. */
+  /** Text passed through this session's scrubber (for a caller's own output: the open MCP's replies). */
+  /** Whether a password was typed into a password field in this session (its pixels may show it). */
+  hasTypedPasswords(): boolean {
+    return this.secrets.typedCount > 0;
+  }
+
+  scrubOutput(text: string): string {
+    return this.secrets.scrub(text);
+  }
+
+  /** Whether `text`, as given, holds a recognized form of any secret value of this session (no side effect). */
+  holdsSecretOutput(text: string): boolean {
+    return this.secrets.holdsSecret(text);
+  }
+
   private scrubEvidence(ev: ActionEvidence): ActionEvidence {
     if (!this.secrets.size) return ev;
-    const walk = (v: unknown): unknown =>
-      typeof v === "string" ? this.secrets.scrub(v) : Array.isArray(v) ? v.map(walk) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v;
-    return walk(ev) as ActionEvidence;
+    return scrubDeep(ev, (s) => this.secrets.scrub(s));
   }
 
   /**
@@ -3603,9 +4258,23 @@ export class Agent {
    * link or approval accepted on the way does not finish it by itself; a run that ends on the 2FA page
    * never does. Then the host hears of it, once (onSignedIn).
    */
-  private async signInCheck(snap: Snapshot): Promise<void> {
+  private async signInCheck(given: Snapshot): Promise<void> {
     const cb = this.opts.onSignedIn;
     if (!cb || !this.signingIn.size || this.stopRequest) return;
+    // One reading of one document: its classification, address, fields and password field together (a re-capture by
+    // readPage replaces the snapshot passed in). The first look's own reading stands while the page is still on it.
+    let c: Interruption;
+    let snap: Snapshot;
+    if (this.classified?.snap === given && onDocumentOf(this.page, given)) {
+      c = this.classified.result;
+      snap = given;
+    } else {
+      const read = await readPage(this.page, given);
+      // A look that could not be read finishes no sign-in.
+      if (read.state === "unknown") return;
+      c = read.result;
+      snap = read.snap;
+    }
     const host = safeHost(snap.url);
     const site = siteOf(host);
     const s = this.signingIn.get(site);
@@ -3615,15 +4284,25 @@ export class Agent {
     // A field still holding the login typed into it is a sign-in still on its way (an email typed, its code not yet
     // asked for): an email-then-code form counted as signed in before the code page came.
     if (s.typed && snap.nodes.some((n) => n.visible && n.tag === "input" && !!n.value && this.secrets.scrub(n.value) !== n.value)) return;
-    const c = this.classified?.snap === snap ? this.classified.result : (await classifyPage(this.page, snap).catch(() => null))?.result;
-    if (!c || !signInFinished({ category: c.category, url: snap.url, passwordField: hasPasswordField(snap) })) return;
-    this.signingIn.delete(site);
+    if (!signInFinished({ category: c.category, url: snap.url, passwordField: hasPasswordField(snap) })) return;
+    // The sign-in under way is kept until this reading's document is still the page's after every read below: a page
+    // that moves on meanwhile is decided on a later look, never with this one's address and another's cookies.
     if (s.cookies) {
       // Handed over (the live view, a passkey): past the form with no new or changed session cookie is a
       // form closed or a guest path taken, not a sign-in.
       const now = await this.sessionCookies(site);
-      if (now && ![...now].some((k) => !s.cookies!.has(k))) return;
+      if (!onDocumentOf(this.page, snap)) return;
+      // The cookies could not be read: unverified. Nothing is reported and the sign-in under way is kept for a later
+      // look (before, a failed read went on to report the sign-in).
+      if (!now) return;
+      if (![...now].some((k) => !s.cookies!.has(k))) {
+        this.signingIn.delete(site);
+        return;
+      }
     }
+    // Checked once more, then the entry goes and the host hears, with nothing awaited in between.
+    if (!onDocumentOf(this.page, snap) || this.signingIn.get(site) !== s) return;
+    this.signingIn.delete(site);
     const { clearedMs } = this.challenge.forSite(site);
     await Promise.race([Promise.resolve().then(() => cb({ site, host, url: this.secrets.scrub(snap.url), by: s.by })).catch(() => undefined), sleep(clearedMs)]);
   }
@@ -3631,30 +4310,40 @@ export class Agent {
   private async checkInterruptionInner(snap: Snapshot): Promise<{ note: string; snap?: Snapshot }> {
     if (!this.opts.interruptions || this.stopRequest) return { note: "" };
     let cur = snap;
-    let { result: c, input: before } = await classifyPage(this.page, cur).catch(() => ({ result: null, input: null }) as never);
-    if (!c) return { note: "" };
+    const first = await readPage(this.page, cur);
+    // Not read as one document: no interruption is claimed either way, and the model is told the page was not checked.
+    if (first.state === "unknown") return { note: unreadNote(safeHost(this.page.url), first.changed) + " Look at the page again before relying on it.", ...(first.snap !== snap ? { snap: first.snap } : {}) };
+    let { result: c, input: before } = first;
+    cur = first.snap;
     // HUMAN's block page reads as a hard block until captcha.js has drawn its Press & Hold: the widget gets its
     // time to be drawn before the run stops there (a first look 0.4 s after load ended the run with the widget
     // 2.5 s away).
-    if (c.category === "hard_block" && c.vendor === "human") ({ c, before, cur } = await this.awaitWidget(c, before, cur));
-    const out = await this.interruptionOn(c, before, cur);
+    let verified = true;
+    if (c.category === "hard_block" && c.vendor === "human") ({ c, before, cur, verified } = await this.awaitWidget(c, before, cur));
+    const out = await this.interruptionOn(c, before, cur, !verified);
     // The wait may have ended on another page (HUMAN's script sent its block page on to the results): every way out
     // shows the model the page it ended on, never the block page it left (else the first turn read "Access to this
     // page has been denied" while on the results).
     return cur !== snap && !out.snap ? { ...out, snap: cur } : out;
   }
 
-  /** The first look's interruption (`c`, classified on `cur`), handled: the ladder, the model, the person, or a stop. */
-  private async interruptionOn(c: Interruption, before: InterruptInput, cur: Snapshot): Promise<{ note: string; snap?: Snapshot }> {
+  /**
+   * The first look's interruption (`c`, classified on `cur`), handled: the ladder, the model, the person, or a stop.
+   * Its host and address are the reading's own (`before`, the same document). `asLastRead`: `c` is the last reading
+   * that could be verified, kept while later looks could not be: what is said of it says so, never that the page shows
+   * it now.
+   */
+  private async interruptionOn(c: Interruption, before: InterruptInput, cur: Snapshot, asLastRead = false): Promise<{ note: string; snap?: Snapshot }> {
     this.classified = { snap: cur, result: c };
     this.seenInterruption(c);
-    const host = safeHost(this.page.url);
+    const at = before.url || cur.url || this.page.url;
+    const host = safeHost(at);
     // A check belongs to a site, so that site's policy decides how long this one is watched.
     const policy = this.challenge.forSite(siteOf(host));
     // A check drawn in a page the model can still read (a HUMAN Press & Hold over results, an embedded
     // Turnstile) goes through the ladder too, once per page: left to the model, it was handed to the
     // person through ask_user.
-    const widget = `${siteOf(host)} ${this.page.url}`;
+    const widget = `${siteOf(host)} ${at}`;
     const inPage = !c.blocking && !!c.inPage && isChallenge(c.category) && !this.inPageTried.has(widget);
     const source: ChallengeSource = inPage ? "inpage" : "classifier";
     const event = (handled: InterruptionHandled, waitedMs?: number) =>
@@ -3690,6 +4379,7 @@ export class Agent {
       if (!c.blocking) return leftToModel("did not clear by itself");
     }
     let message = describeInterruption(c, host);
+    if (asLastRead) message += " (As the page read at its last look that could be verified; the looks after it could not be verified.)";
     if (solverTokenInjected && (c.category === "captcha" || c.category === "bot_challenge")) {
       // The solver already placed a valid token/cookie; the page just did not clear on its own. Tell the
       // person that, so they try submitting / continuing instead of solving a check that may already pass.
@@ -3716,12 +4406,15 @@ export class Agent {
         if (!this.opts.signal?.aborted) {
           await this.page.navigate(this.page.url, { waitUntil: "domcontentloaded", timeoutMs: 15_000 }).catch(() => undefined);
           const next = await captureSnapshot(this.page, { viewportBand: 1, previous: cur });
-          const again = await classifyPage(this.page, next).catch(() => null);
-          if (!again?.result.blocking) {
+          const again = await readPage(this.page, next);
+          // Cleared only on a page read with nothing blocking on it: one that could not be read is still the rate limit,
+          // kept on this reading's address so each re-look spends the same site's bounded waits.
+          if (again.state === "unknown") return this.interruptionOn(c, { ...before, url: at }, again.snap, true);
+          if (!again.result.blocking) {
             event("auto_cleared", ms);
-            return { note: `${host} limited the run's requests (rate limit); after waiting ${Math.round(ms / 1_000)} s the page loaded again.`, snap: next };
+            return { note: `${host} limited the run's requests (rate limit); after waiting ${Math.round(ms / 1_000)} s the page loaded again.`, snap: again.snap };
           }
-          return this.interruptionOn(again.result, again.input, next);
+          return this.interruptionOn(again.result, again.input, again.snap);
         }
       }
       event("stopped");
@@ -4018,14 +4711,16 @@ export class Agent {
       event("unresolved", out.waitedMs);
       // A code for a prompt with no field to fill: the model types it.
       if (personGave && !c.input?.fieldRefs?.length) return { note: `The person gave the code for ${host}. Type it as {{user_code}} (valid for 5 minutes, on ${host} only), then submit.` };
+      // What the last look verified: "still asks / still shows" only when it read the page; else that it could not.
+      const unverified = out.verified ? "" : " (the last look at the page could not be verified, so whether it still shows it is not known)";
       // Typed for them, and the prompt still shows: the code may not have gone in whole, or the page wants its button.
       // One code from the person is used fully before another is asked for (three codes were once asked for one
       // sign-in, each typed short).
       if (personGave)
         return {
-          note: `The person's code was typed into the code field on ${host}, but the page still asks for it. Look at the page: if the page says the code is wrong or has expired, call ask_user with kind "code" for a new one. Otherwise (a box empty, a Verify / Continue / Submit button not pressed) type {{user_code}} again (it stays valid for 5 minutes, on ${host} only) and press that button; do not ask the person for another code first.`,
+          note: `The person's code was typed into the code field on ${host}, but ${out.verified ? "the page still asks for it" : "the page did not move on"}${unverified}. Look at the page: if the page says the code is wrong or has expired, call ask_user with kind "code" for a new one. Otherwise (a box empty, a Verify / Continue / Submit button not pressed) type {{user_code}} again (it stays valid for 5 minutes, on ${host} only) and press that button; do not ask the person for another code first.`,
         };
-      return { note: `The person was asked to handle the ${c.category.replace("_", " ")} on ${host}, but the page still shows it. Check the page before continuing.` };
+      return { note: `The person was asked to handle the ${c.category.replace("_", " ")} on ${host}, but ${out.verified ? "the page still shows it" : "it was not seen to go"}${unverified}. Check the page before continuing.` };
     }
     if (out.kind === "skipped") return { note: "" }; // not offered here (acceptSkip is false)
     event("resolved", out.waitedMs);
@@ -4110,9 +4805,11 @@ export class Agent {
     if (!this.opts.interruptions) return null;
     const prev = this.lastSnapshot;
     const look = async () => {
-      const snap = await captureSnapshot(this.page, { viewportBand: 1, previous: prev }).catch(() => null);
-      const cls = snap ? await classifyPage(this.page, snap).catch(() => null) : null;
-      return { snap, cls, prompt: !!cls && (cls.result.category === "otp" || cls.result.category === "magic_link") };
+      const first = await captureSnapshot(this.page, { viewportBand: 1, previous: prev }).catch(() => null);
+      const read = first ? await readPage(this.page, first) : null;
+      // A look that could not be read is no code prompt: looked at again, then the question goes to the person as asked.
+      const cls = read?.state === "known" ? read : null;
+      return { snap: read?.snap ?? first, cls, prompt: !!cls && (cls.result.category === "otp" || cls.result.category === "magic_link") };
     };
     let seen = await look();
     // A code just requested: its screen may still be drawing. Waited for a moment (CODE_SCREEN_WAIT_MS), so the question
@@ -4124,7 +4821,7 @@ export class Agent {
     const { snap, cls } = seen;
     if (!snap || !cls || !seen.prompt) return null;
     const c = cls.result;
-    const host = safeHost(this.page.url);
+    const host = safeHost(cls.input.url || snap.url);
     this.lastSnapshot = snap;
     const event = (handled: InterruptionHandled, waitedMs?: number) =>
       this.opts.onStep?.({ type: "interruption", category: c.category, vendor: c.vendor, needs: c.needs, handled, host, ...(waitedMs !== undefined ? { waitedMs } : {}), signals: [clip(question, 120), ...c.signals.slice(0, 7)] });
@@ -4184,19 +4881,26 @@ export class Agent {
    * HUMAN's block page with no widget drawn on it yet, looked at again every pollMs for widgetAppearMs: the first
    * look that reads otherwise (the Press & Hold drawn, or the page moved on) is returned, else the last one.
    */
-  private async awaitWidget(c: Interruption, before: InterruptInput, cur: Snapshot): Promise<{ c: Interruption; before: InterruptInput; cur: Snapshot }> {
+  private async awaitWidget(c: Interruption, before: InterruptInput, cur: Snapshot): Promise<{ c: Interruption; before: InterruptInput; cur: Snapshot; verified: boolean }> {
     const { widgetAppearMs, pollMs } = this.challenge.forSite(siteOf(safeHost(this.page.url)));
     const until = Date.now() + widgetAppearMs;
+    // Whether the last look was read: false when the wait ends on looks that could not be (the reading kept is older).
+    let verified = true;
     while (Date.now() < until && !this.opts.signal?.aborted) {
       await sleep(pollMs);
       const next = await captureSnapshot(this.page, { viewportBand: 1, previous: cur }).catch(() => null);
-      const r = next ? await classifyPage(this.page, next).catch(() => null) : null;
-      if (!next || !r) continue;
+      const r = next ? await readPage(this.page, next) : null;
+      // Not read: the last reading (HUMAN's block page) stands, as the last verified one.
+      if (!r || r.state === "unknown") {
+        verified = false;
+        continue;
+      }
+      verified = true;
       ({ result: c, input: before } = r);
-      cur = next;
+      cur = r.snap;
       if (c.category !== "hard_block" || c.vendor !== "human") break;
     }
-    return { c, before, cur };
+    return { c, before, cur, verified };
   }
 
   /**
@@ -4205,8 +4909,8 @@ export class Agent {
    */
   private async passedOff(snap: Snapshot | undefined): Promise<boolean> {
     if (!snap || this.opts.signal?.aborted) return false;
-    const r = await classifyPage(this.page, snap).catch(() => null);
-    return !!r && !(r.result.inPage && isChallenge(r.result.category));
+    const r = await readPage(this.page, snap);
+    return r.state === "known" && !(r.result.inPage && isChallenge(r.result.category));
   }
 
   /** A challenge on a never-automate site ends the run: nothing is tried, nobody is asked. */
@@ -4293,14 +4997,16 @@ export class Agent {
     const see = async (): Promise<"clear" | "check" | "bare" | "unknown"> => {
       const next = await captureSnapshot(this.page, { viewportBand: 1, previous: x.cur }).catch(() => null);
       if (!next) return "unknown";
-      x.cur = next;
-      let r = await classifyPage(this.page, next).catch(() => null);
-      if (!r) return "unknown";
+      const read = await readPage(this.page, next);
+      x.cur = read.snap;
+      // Not read: x.c and x.before keep the last reading; never "clear".
+      if (read.state === "unknown") return "unknown";
+      let r: { result: Interruption; input: InterruptInput } = read;
       // HUMAN's block page after another vendor's check (a pass reloaded into it): its widget gets widgetAppearMs to be
       // drawn before the page counts as a hard block, as on the first look (else a Cloudflare click's reload into
       // HUMAN's page, its Press & Hold 2.5 s away, ended the run).
       if (r.result.category === "hard_block" && r.result.vendor === "human" && !bare(r.result)) {
-        const w = await this.awaitWidget(r.result, r.input, next);
+        const w = await this.awaitWidget(r.result, r.input, read.snap);
         x.cur = w.cur;
         r = { result: w.c, input: w.before };
       }
@@ -4377,7 +5083,7 @@ export class Agent {
     | { kind: "cleared"; snap: Snapshot; waitedMs: number; code: boolean }
     | { kind: "code_login"; identifier: string; channel: "sms" | "email"; waitedMs: number }
     | { kind: "declined"; reason?: string; waitedMs: number }
-    | { kind: "still_there"; waitedMs: number }
+    | { kind: "still_there"; waitedMs: number; verified: boolean }
     | { kind: "ended"; snap: Snapshot; result: Interruption; waitedMs: number }
     | { kind: "credentials"; username: string; password: string; waitedMs: number }
     | ({ kind: "signup"; waitedMs: number } & SignupDetails)
@@ -4411,20 +5117,25 @@ export class Agent {
     const end: { found: Ended | null; since: number } = { found: null, since: 0 };
     // The last look read HUMAN's block page with its widget off, HUMAN's check being handed over.
     let bare = false;
+    // Whether the last look was read as one document (still_there says "still shows it" only then).
+    let verified = true;
     const check = async (): Promise<Snapshot | null> => {
       const next = await captureSnapshot(this.page, { viewportBand: 1, previous: last }).catch(() => null);
-      if (!next) return null;
-      last = next;
-      const r = await classifyPage(this.page, next).catch(() => null);
-      if (!r) return null;
+      if (!next) return (verified = false), null;
+      const read = await readPage(this.page, next);
+      last = read.snap;
+      verified = read.state === "known";
+      // Not read: nothing is learned (bare, seen and the end keep the last reading), and nothing is passed.
+      if (read.state === "unknown") return null;
+      const r = read;
       bare = r.result.category === "hard_block" && r.result.vendor === "human" && req.vendor === "human";
       if (challenge) {
         const excluded = neverAutomate(safeHost(this.page.url), this.opts.neverHosts);
         if (excluded || (r.result.category === "hard_block" && !bare)) {
           end.since ||= Date.now();
           if (excluded || r.result.vendor !== "human" || Date.now() - end.since >= policy.widgetAppearMs) {
-            end.found = { snap: next, result: r.result };
-            return next;
+            end.found = { snap: read.snap, result: r.result };
+            return read.snap;
           }
           return null;
         }
@@ -4434,7 +5145,7 @@ export class Agent {
         seen = true;
         return null;
       }
-      return seen ? next : null;
+      return seen ? read.snap : null;
     };
     // Questions the system queued meanwhile (a held download, the traffic limit) are settled while the
     // person works, not after: started from the watch, never awaited by it, so the page is still watched.
@@ -4489,7 +5200,7 @@ export class Agent {
         await sleep(poll);
       }
       this.lastSnapshot = last;
-      return { kind: "still_there", waitedMs: Date.now() - t0 };
+      return { kind: "still_there", waitedMs: Date.now() - t0, verified };
     } finally {
       this.opts.signal?.removeEventListener("abort", stop);
       this.opts.resumeTraffic?.();
@@ -4543,9 +5254,13 @@ export class Agent {
     for (let waited = 0; waited < awaitGoneMs * stretch; waited += pollMs) {
       await sleep(waited ? pollMs : Math.min(300, pollMs));
       next = await captureSnapshot(this.page, { viewportBand: 1, previous: next }).catch(() => next);
-      const r = await classifyPage(this.page, next).catch(() => null);
-      if (r) last = r;
-      if (r && isResolved(category, before, r.input)) return { gone: true, snap: next, r };
+      const read = await readPage(this.page, next);
+      next = read.snap;
+      // Not read: not gone on this look; the last reading stands.
+      if (read.state === "unknown") continue;
+      const r = { result: read.result, input: read.input };
+      last = r;
+      if (isResolved(category, before, r.input)) return { gone: true, snap: next, r };
     }
     return { gone: false, snap: next, ...(last ? { r: last } : {}) };
   }
@@ -4580,20 +5295,29 @@ export class Agent {
    * their login on pilotfish's page instead), and the run goes on once the page shows it is done.
    */
   private async askLogin(reason: string, kind: "login" | "check" = "login"): Promise<ToolOutcome> {
-    const host = safeHost(this.page.url);
+    // The page's host now; replaced by a reading's own host once the page is read (the same document as the reading).
+    let host = safeHost(this.page.url);
     const category = kind === "login" ? "login" : "captcha";
     const needs = kind === "login" ? "login_in_live_view" : "solve_in_live_view";
     const label = `ask_user: ${kind}`;
     let tokenNote = "";
     // The vendor of a check the classifier sees: HUMAN's own block page stays its check in the person's watch.
     let vendor: string | undefined;
+    // The snapshot the vendor was read on: it goes into the question only if that is the question's document too.
+    let vendorFrom: Snapshot | null = null;
     if (kind === "check") {
       // A check the model raised goes through the same ladder as one the classifier found, and a
       // never-automate site ends the run here too: the person is never asked to pass a check there.
-      const seen = this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 }));
-      const cls = await classifyPage(this.page, seen).catch(() => null);
+      const read = await readPage(this.page, this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 })));
+      const seen = read.snap;
+      const cls = read.state === "known" ? read : null;
+      if (cls) host = safeHost(cls.input.url || seen.url);
       const found = cls && isChallenge(cls.result.category) ? cls.result : null;
-      vendor = found?.vendor;
+      // Not read: the vendor of the check last read stands only while the page is still on the document it was read
+      // on (HUMAN's block page stays its check); a reading of another document lends this one nothing.
+      const lastSeen = this.classified && isChallenge(this.classified.result.category) && this.classified.snap.documentSeq !== undefined && onDocumentOf(this.page, this.classified.snap) ? this.classified.result : null;
+      vendor = found?.vendor ?? (read.state === "unknown" ? lastSeen?.vendor : undefined);
+      vendorFrom = found ? seen : vendor && lastSeen ? this.classified!.snap : null;
       const c: Interruption = found ?? { category: "captcha", blocking: true, autoResolvable: false, signals: [clip(reason, 120)], needs: "solve_in_live_view" };
       const ev = (handled: InterruptionHandled, waitedMs?: number) =>
         this.opts.onStep?.({ type: "interruption", category: c.category, vendor: c.vendor, needs: c.needs, handled, host, ...(waitedMs !== undefined ? { waitedMs } : {}), signals: [clip(reason, 120), ...c.signals.slice(0, 7)], source: "ask_user" });
@@ -4603,7 +5327,7 @@ export class Agent {
       }
       // Only a check the classifier can see can be watched going away; one the in-page pass already
       // worked on goes straight to the person.
-      const widget = `${siteOf(host)} ${this.page.url}`;
+      const widget = `${siteOf(host)} ${cls?.input.url || this.page.url}`;
       if (found && cls && (found.blocking || !this.inPageTried.has(widget))) {
         if (found.inPage) this.inPageTried.add(widget);
         const r = await this.ladder({ c: found, before: cls.input, cur: seen, host, source: "ask_user" }, ev);
@@ -4617,25 +5341,44 @@ export class Agent {
       }
     }
     if (!this.opts.onIntervention) return err(`No person is available to ${kind === "login" ? "sign in" : "pass the check"} on ${host}. Finish with done(success=false) if the task needs it.`);
-    const before = this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 }));
+    const startRead = await readPage(this.page, this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 })));
+    // Not read: no auto-resume and no armed watch (the page must first be seen showing it), and never "none" below.
+    const start = startRead.state === "known" ? startRead : null;
+    // The whole question is of ONE document: the start reading's, else the page as it is now (its address only, nothing
+    // read from it). Host, site, vendor, the skip, title, sign-in ways, dial code, address and the cookie baseline all
+    // come from it, and the page must still be on it once the baseline is read; else nobody is asked.
+    const doc = { seq: this.page.documentSeq, id: this.page.documentId };
+    const onDoc = () => this.page.documentSeq === doc.seq && this.page.documentId === doc.id && (!start || onDocumentOf(this.page, start.snap));
+    const url = start ? start.input.url || start.snap.url : this.page.url;
+    host = safeHost(url);
+    const sameDoc = (a: Snapshot) => a.documentSeq !== undefined && a.documentSeq === doc.seq && a.document === doc.id;
+    if (vendor && !(vendorFrom && sameDoc(vendorFrom))) vendor = undefined;
+    const unverified = () =>
+      ok(
+        `Could not verify the page to ask the person ${kind === "login" ? "to sign in" : "to pass the check"} on ${host}: it loaded another document while it was read. Nobody was asked. Look at the page again, and ask again if it still needs it.`,
+        `${label} unverified`,
+      );
+    if (!onDoc()) return unverified();
+    // The site's session cookies before the person signs in: a sign-in sets or changes one; closing the form does not.
+    const baseline = kind === "login" ? await this.sessionCookies(siteOf(host)) : null;
+    if (!onDoc()) return unverified();
     const event = (handled: InterruptionHandled, waitedMs?: number) =>
       this.opts.onStep?.({ type: "interruption", category, needs, handled, host, ...(waitedMs !== undefined ? { waitedMs } : {}), signals: [clip(reason, 120)] });
     // Skipped earlier in this run, and asked again: the site will not go further as a guest. The host pauses the run
     // with the sign-in to fill in (afterSkip) rather than ask the same thing twice.
     const skipped = kind === "login" && this.skippedSignIn.has(siteOf(host));
     event("asked");
-    const start = await classifyPage(this.page, before).catch(() => null);
-    // The site's session cookies before the person signs in: a sign-in sets or changes one; closing the form does not.
-    const baseline = kind === "login" ? await this.sessionCookies(siteOf(host)) : null;
+    const before = start?.snap ?? startRead.snap;
+    const nodes = start ? start.snap.nodes : [];
     const out = await this.handOff(
       {
         id: `iv${++this.interventionSeq}`,
         category,
         ...(vendor ? { vendor } : {}),
         needs,
-        url: this.secrets.scrub(this.page.url),
+        url: this.secrets.scrub(url),
         host,
-        title: before.title,
+        title: start ? start.snap.title : "",
         message:
           kind === "login"
             ? `Please sign in to ${host} in the live view; the run continues by itself once you are signed in. ${clip(reason, 200)}`
@@ -4643,9 +5386,9 @@ export class Agent {
         autoResume: !!start,
         acceptsCredentials: true,
         ...(kind === "login" && this.opts.onSignup ? { acceptsSignup: true } : {}),
-        ...(kind === "login" ? { signInOffers: signInOffers(before.nodes) } : {}),
+        ...(kind === "login" ? { signInOffers: signInOffers(nodes) } : {}),
         ...(kind === "login" ? (skipped ? { afterSkip: true } : { acceptsSkip: true }) : {}),
-        ...(kind === "login" && pageDialCode(before.nodes) ? { dialCode: pageDialCode(before.nodes)! } : {}),
+        ...(kind === "login" && pageDialCode(nodes) ? { dialCode: pageDialCode(nodes)! } : {}),
       },
       start?.input ?? ({} as InterruptInput),
       before,
@@ -4721,7 +5464,7 @@ export class Agent {
       this.stopRequest = { category, message: `${kind === "login" ? "Sign-in" : "The security check"} on ${host} was declined${out.reason ? `: ${out.reason}` : ""}.` };
       return ok(`The person declined. ${this.stopRequest.message}`, `${label} declined`);
     }
-    if (out.kind === "still_there" && kind === "check" && (!start || start.result.category === "none")) {
+    if (out.kind === "still_there" && kind === "check" && start?.result.category === "none") {
       // A check the classifier never saw (only the model did): it cannot see it go either, so the
       // person's word stands and the model looks at the page itself.
       event("resolved", out.waitedMs);
@@ -4729,7 +5472,10 @@ export class Agent {
     }
     if (out.kind === "still_there") {
       event("unresolved", out.waitedMs);
-      return await this.withEvidence(async () => undefined, label, () => `The person was asked to ${kind === "login" ? "sign in" : "pass the check"} on ${host}, but ${kind === "login" ? "a sign-in form" : "the check"} is still shown. Check the page before continuing.`, { settle: false });
+      // "Still shown" only when the last look read the page; otherwise that it was not seen to go.
+      const what = kind === "login" ? "a sign-in form" : "the check";
+      const still = out.verified ? `${what} is still shown` : `${what} was not seen to go (the last look at the page could not be verified, so whether it still shows is not known)`;
+      return await this.withEvidence(async () => undefined, label, () => `The person was asked to ${kind === "login" ? "sign in" : "pass the check"} on ${host}, but ${still}. Check the page before continuing.`, { settle: false });
     }
     event("resolved", out.waitedMs);
     // Signed in in the live view: finished once a page of the site is past every auth step (the look
@@ -4778,7 +5524,8 @@ export class Agent {
     const event = (handled: InterruptionHandled, waitedMs?: number) =>
       this.opts.onStep?.({ type: "interruption", category: "payment_3ds", needs: "solve_in_live_view", handled, host, ...(waitedMs !== undefined ? { waitedMs } : {}), signals: [clip(reason, 120)], source: "ask_user" });
     event("asked");
-    const start = await classifyPage(this.page, before).catch(() => null);
+    const startRead = await readPage(this.page, before);
+    const start = startRead.state === "known" ? startRead : null;
     const out = await this.handOff(
       {
         id: `iv${++this.interventionSeq}`,

@@ -14,12 +14,23 @@ import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { ListToolsRequestSchema, type CallToolResult, type ServerNotification, type ServerRequest, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { ToolInputs, type ActOutcome, type ToolName } from "@pilotfish/agent";
-import { diffObservation } from "@pilotfish/perception";
+import { TOP_LAPS, ToolInputs, TYPED_SECRET_MARK, type ActOptions, type ActOutcome, type ToolName } from "@pilotfish/agent";
+import { currentCaptureStats, diffObservation, withCaptureStats } from "@pilotfish/perception";
+import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { configFromEnv, type McpConfig } from "./config.js";
 import { checkQueryText, InvalidSchemaError, schemaCheck } from "./query-schema.js";
-import { BrowserSession, type PageObstacle, type SessionOptions } from "./session.js";
+import { BrowserSession, type PageCheck, type PageObstacle, type PageUnread, type SessionOptions } from "./session.js";
 import { VERSION } from "./version.js";
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+};
+const shortHash = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 10);
 
 export interface PilotfishMcpOptions extends SessionOptions {
   /** Default: read from the environment (configFromEnv). */
@@ -45,6 +56,31 @@ type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 // in the parameter's. The instructions carry only this server's settings (serverInstructions).
 const Ref = ToolInputs.click.shape.ref.describe('From the latest snapshot, e.g. "e12" or "f1e3"');
 const Direction = z.enum(["down", "up", "left", "right"]);
+/** Stage C (17 Nov): a small, closed postcondition for an acting tool (no script), and opt-in escalation. */
+const Expect = z
+  .object({
+    text: z.string().min(1).max(120).optional(),
+    gone: z.string().min(1).max(120).optional(),
+    in: Ref.optional(),
+    url: z.string().min(1).max(200).optional(),
+    within: z.number().min(0).max(10).optional(),
+  })
+  .strict()
+  .refine((e) => !!(e.text || e.gone || e.url), { message: "give text, gone or url" })
+  .optional()
+  .describe(
+    "What this should bring about: text shown / gone (in element `in`, else the page), url containing a part; within seconds (default 3). The reply says MATCHED, UNMET, ALREADY HELD (true before too) or AMBIGUOUS (why): a page state, not proof the task succeeded.",
+  );
+const Escalate = z.boolean().optional().describe("With snapshot:false: print the page anyway if the expectation is unmet or ambiguous, or on a dialog, new tab, unexpected page, refused write, invalid field or page still loading.");
+/**
+ * `snapshot` on the acting tools: false leaves only the printed page out of the result (everything else still runs and
+ * is returned). The next printed page is a change list against the last page this client was shown, never against
+ * an unprinted one.
+ */
+const Quiet = z
+  .boolean()
+  .optional()
+  .describe("Default true. false: no page snapshot in the result, only the evidence (what changed, was added or removed) and notes; for a next step that reads with browser_query or browser_get_text, or more steps before one look. browser_snapshot shows the screen at any time.");
 
 /** The fields of each browser_actions step, its first ones required. */
 const STEP_FIELDS = {
@@ -85,24 +121,31 @@ export const Inputs = {
   browser_navigate: z
     .object({
       url: z.url({ protocol: /^https?$/ }).describe("Absolute http(s) URL"),
+      expect: Expect,
+      escalate: Escalate,
       snapshot: z
         .boolean()
         .optional()
-        .describe("Default true. false: no page snapshot, only what happened (title, counts). Only when this same reply also reads the page with browser_query and you will not act on it; keep it for a page you have not seen or whose tabs, sorts, filters or forms you may use."),
+        .describe(
+          "Default true. Choose by your next step on this page: false when you will only read it (browser_query, browser_get_text) or go on to another URL; keep true when you will click, type or choose on it (you need its refs). false still returns the evidence (where it landed, the title, what was added or removed), loading notes and anything that needs a person; browser_snapshot shows the screen at any time.",
+        ),
     })
     .strict(),
   browser_snapshot: z.object({ whole_page: z.boolean().optional() }).strict(),
-  browser_click: z.object({ ref: Ref }).strict(),
+  browser_click: z.object({ ref: Ref, snapshot: Quiet, expect: Expect, escalate: Escalate }).strict(),
   browser_type: z
     .object({
       ref: Ref,
-      text: z.string().max(20_000).describe('Full new text ("" empties it); dates as YYYY-MM-DD'),
-      submit: z.boolean().optional().describe("Press Enter after, e.g. to search or send"),
+      text: z.string().max(20_000),
+      submit: z.boolean().optional().describe("Press Enter afterwards"),
+      snapshot: Quiet,
+      expect: Expect,
+      escalate: Escalate,
     })
     .strict(),
-  browser_select: z.object({ ref: Ref, values: z.array(z.string()).min(1).max(50).describe("Exact labels or values; several only for a multi-select") }).strict(),
-  browser_press: z.object({ key: z.string().min(1).max(40).describe('Key or +-joined shortcut, e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a"') }).strict(),
-  browser_scroll: z.object({ direction: Direction.describe("down: the next screen; up: back") }).strict(),
+  browser_select: z.object({ ref: Ref, values: z.array(z.string()).min(1).max(50), snapshot: Quiet, expect: Expect, escalate: Escalate }).strict(),
+  browser_press: z.object({ key: z.string().min(1).max(40).describe('e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a"'), snapshot: Quiet, expect: Expect, escalate: Escalate }).strict(),
+  browser_scroll: z.object({ direction: Direction, snapshot: Quiet }).strict(),
   browser_screenshot: z.object({}).strict(),
   browser_get_text: z
     .object({
@@ -122,10 +165,12 @@ export const Inputs = {
       seconds: z.number().min(0.5).max(10),
       until: z.string().max(120).optional().describe("Return once the page shows this text"),
       gone: z.string().max(120).optional().describe("Return once this text is gone"),
+      in: Ref.optional().describe("Only within this element; the reply says whether it already held when the wait began"),
+      snapshot: Quiet,
     })
     .strict(),
   browser_resume: z.object({ timeout_s: z.number().int().min(5).max(900).optional().describe("Default 300") }).strict(),
-  browser_actions: z.object({ actions: z.array(Step).min(1).max(10) }).strict(),
+  browser_actions: z.object({ actions: z.array(Step).min(1).max(10), snapshot: Quiet }).strict(),
   browser_tabs: z.object({ switch_to: z.string().min(1).max(10).optional().describe('Tab id to work in from now on, e.g. "t2"') }).strict(),
   browser_close: z.object({}).strict(),
   browser_page_tool: z
@@ -195,7 +240,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
   const byHand = (o: PageObstacle) => o.needs === "solve_in_live_view" || o.needs === "login_in_live_view" || o.needs === "code" || o.needs === "credentials";
   const needsPerson = (o: PageObstacle, extraLine = ""): string =>
     [
-      `NEEDS A PERSON (${o.category}${o.vendor ? `, ${o.vendor}` : ""}): ${forWindow(o.message)}`,
+      `NEEDS A PERSON (${o.category}${o.vendor ? `, ${o.vendor}` : ""}): ${session.scrubReply(forWindow(o.message))}`,
       extraLine,
       byHand(o) && config.headless
         ? `This browser is headless, so it cannot be done by hand here: tell the user, and that the pilotfish server needs PILOTFISH_HEADLESS=0 (a visible window) for steps like this one. Docs: ${DOCS}/open-settings`
@@ -205,12 +250,24 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     ]
       .filter(Boolean)
       .join("\n");
+  /** A page that could not be verified: said plainly, never as a page that needs nobody, nor as an obstacle seen. */
+  const couldNotCheck = (u: PageUnread, extraLine = ""): string =>
+    [
+      `COULD NOT VERIFY THE PAGE: ${session.scrubReply(u.message)}`,
+      extraLine,
+      "Look at the page again (browser_snapshot, or browser_wait while it loads) before relying on it; if it shows a sign-in, a code or a check, tell the user.",
+    ]
+      .filter(Boolean)
+      .join("\n");
   const pageNow = async (): Promise<string> => {
     const r = await session.act("read_page", {}).catch(() => null);
     return r ? r.text || r.summary : "";
   };
-  /** Waits until the page needs nobody (or `ms` pass): the obstacle still there, or null when it is gone. */
-  const untilClear = async (ms: number, every = 1_000): Promise<PageObstacle | null> => {
+  /**
+   * Waits until the page is read and needs nobody (or `ms` pass): null then; else the last look, an obstacle still
+   * there or a page that could not be verified (`unread`), which never ends the wait as clear.
+   */
+  const untilClear = async (ms: number, every = 1_000): Promise<PageCheck | null> => {
     const until = Date.now() + ms;
     // The page as it is now each time: the person (or the check itself) moves it on without an action of ours.
     let o = await session.obstacle({ fresh: true });
@@ -222,25 +279,30 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
   };
   const withNote = (r: CallToolResult, note: string): CallToolResult => ({ ...r, content: [...r.content, { type: "text", text: note }] });
   const handOff = async (extra: Extra, r: CallToolResult): Promise<CallToolResult> => {
-    let o = await session.obstacle();
-    if (!o) return r;
+    const first = await session.obstacle();
+    if (!first) return r;
+    if ("unread" in first) return withNote(r, couldNotCheck(first));
+    let o: PageObstacle = first;
     // A browser check that clears by itself (a JS interstitial): its time before anyone is asked.
     if (o.autoResolvable && !o.neverAutomate) {
-      o = await untilClear(12_000);
-      if (!o) return withNote(r, `A browser check was showing and cleared by itself. The page now:\n${await pageNow()}`);
+      const after = await untilClear(12_000);
+      if (!after) return withNote(r, `A browser check was showing and cleared by itself. The page now:\n${await pageNow()}`);
+      if ("unread" in after) return withNote(r, couldNotCheck(after, "A browser check was showing; whether it cleared could not be verified."));
+      o = after;
     }
-    if (o.neverAutomate) return withNote(r, `STOP: ${o.host} shows a bot check, and this site is never automated past one (ticket sellers: the US BOTS Act; UIDAI: the Aadhaar Act). Do not continue on it; tell the user.`);
-    if (o.category === "hard_block" || o.needs === "none_possible") return withNote(r, `BLOCKED: ${forWindow(o.message)} A person cannot fix this from the browser window: try another way (another page or site), or tell the user.`);
+    if (o.neverAutomate) return withNote(r, `STOP: ${session.scrubReply(o.host)} shows a bot check, and this site is never automated past one (ticket sellers: the US BOTS Act; UIDAI: the Aadhaar Act). Do not continue on it; tell the user.`);
+    if (o.category === "hard_block" || o.needs === "none_possible") return withNote(r, `BLOCKED: ${session.scrubReply(forWindow(o.message))} A person cannot fix this from the browser window: try another way (another page or site), or tell the user.`);
     if (canElicit() && !(byHand(o) && config.headless)) {
       const answer = await mcp.server
         .elicitInput(
-          { message: `${forWindow(o.message)} (${o.url})`, requestedSchema: { type: "object", properties: { done: { type: "boolean", title: "I have done it in the pilotfish browser window" } }, required: ["done"] } },
+          { message: session.scrubReply(`${forWindow(o.message)} (${o.url})`), requestedSchema: { type: "object", properties: { done: { type: "boolean", title: "I have done it in the pilotfish browser window" } }, required: ["done"] } },
           { relatedRequestId: extra.requestId, timeout: config.interventionTimeoutMs },
         )
         .catch(() => null);
       if (answer?.action === "accept" && answer.content?.["done"] !== false) {
         const still = await untilClear(15_000);
         if (!still) return withNote(r, `The person handled it. The page now:\n${await pageNow()}`);
+        if ("unread" in still) return withNote(r, couldNotCheck(still, "The person said it is done; whether the page moved on could not be verified."));
         return withNote(r, needsPerson(still, "The person said it is done, but the page still shows it."));
       }
       return withNote(r, needsPerson(o, answer ? "The person was asked in this client and declined or dismissed it." : ""));
@@ -254,27 +316,167 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
   // filter, the same results sorted another way) returns only the lines that changed, against the last full
   // snapshot this client was given. Refs are stable across snapshots, so the lines not repeated still work. A
   // change of more than half of the screen, or a base more than SHOWN_KEEP results back, gets the full screen.
+  // A change list is only ever against the same document (the tab and its document generation: a reload or a new
+  // page is another) at the same address, fragment included (a hash-routed app's views): otherwise the full screen.
+  // The diff keeps page order (`ordered`): every change is printed between the unchanged lines around it, so a
+  // re-sorted list or two rows that swapped values is never "the same" nor a value read under the wrong row; a page
+  // cut by the character cap, or a change of more than half the screen, is the full screen.
+  // browser_snapshot's own result is always whole. C1a (18 Nov): a browser_snapshot reply given to the client whole (not
+  // withheld, not cut at the character cap, no hand-off note added, the plain read: not whole_page) is the base too, by
+  // the same commit on delivery as a printed page. It is printed another way than an action's screen (three screens
+  // against the visible one, at its scroll position: its `view`), so an action against it is compared with the same
+  // capture printed the snapshot's way (ActOptions.alsoView, RenderedPage.alt), never with its own screen, and only
+  // while the page is scrolled where the snapshot was (after a scroll the executor gives no alt: the screen whole). A
+  // change list against it of half the action's own screen or more is that screen whole instead: the whole screen
+  // becomes the base, where a change list does not, so a large one would be repeated by every later change list
+  // (18 Nov replay: a scroll's 5.3K change list against the snapshot came back in the next click's reply). Before, a
+  // snapshot left the base as it was, and an action after several snapshots got its whole screen as "base-old"
+  // (11,531 characters on 17 Nov's flights run).
   const SHOWN_KEEP = 8;
+  /** A whole screen's own line counting the interactive elements above or below it (perception's serializer). */
+  const SCREEN_COUNT = /^\(\d+ interactive elements (?:above|below) the viewport; scroll (?:up|down) to reveal\)$/;
   let results = 0;
-  let shown: { body: string; at: number } | null = null;
+  // C1a2 (18 Nov): a base also records what it is (an action's whole screen, or a browser_snapshot), where the page was
+  // scrolled when it was printed, whether it was cut at the cap, and whether its reply was an error.
+  type Base = { body: string; at: number; doc: string; gen: string; view: string; kind: "screen" | "read"; scroll?: string; truncated: boolean; ok: boolean };
+  let shown: Base | null = null;
+  // Sixth review (17 Nov): a page printed whole becomes the base only once its reply is given (the tool wrapper commits
+  // it); a withheld reply leaves no base, and until a page is given whole again every action prints its page
+  // (`unseen`), so no change list, "the same as" or "refs still valid" ever points at a page the client did not get.
+  let pendingShown: Base | null | undefined;
+  let unseen = false;
+  const docOf = (p: { url: string; doc: string }) => `${p.doc}\n${p.url}`;
+  /** What the last pageText call did, for the debug log (counts only: no page text). */
+  let obs: { mode: string; reason: string; ratio?: number; baseAge?: number; sameDocument?: boolean; againstRead?: boolean; readBase?: boolean; keptScreen?: boolean; pageChars: number; full: number; busy: boolean | null; exempt: number | null; host: string; doc: string } | null = null;
   const pageText = (r: ActOutcome): string => {
     results++;
     const p = r.page;
-    if (!p || r.content === undefined) return r.text || r.summary;
-    const full = () => {
-      shown = { body: p.body, at: results };
+    if (!p || r.content === undefined) {
+      const t = r.text || r.summary;
+      obs = { mode: "plain", reason: p ? "no-content" : "no-page", pageChars: t.length, full: t.length, busy: null, exempt: null, host: "", doc: "" };
+      return t;
+    }
+    const doc = docOf(p);
+    // busy: an indicator this action waited for was still in view (null: not read on this action).
+    const meta = {
+      full: r.text.length,
+      busy: p.loading && !p.loading.unknown ? p.loading.active.length > 0 : null,
+      exempt: p.loading && !p.loading.unknown ? p.loading.exempt.length : null,
+      host: hostOf(p.url),
+      doc: shortHash(doc),
+    };
+    const full = (reason: string, ratio?: number) => {
+      const baseAge = shown ? results - shown.at : undefined;
+      // Debug only (17 Nov): a full owed to a new document identity whose document generation is the base's (only the
+      // address changed: pushState, a hash), to size how many such fulls there are. It changes no reply.
+      const sameDocument = reason === "other-document" && shown ? shown.gen === p.doc : undefined;
+      pendingShown = { body: p.body, at: results, doc, gen: p.doc, view: p.view, kind: "screen", ...(p.scroll !== undefined ? { scroll: p.scroll } : {}), truncated: p.truncated, ok: r.ok };
+      obs = { mode: "full", reason, ratio, baseAge, ...(sameDocument !== undefined ? { sameDocument } : {}), pageChars: r.text.length, ...meta };
       return r.text;
     };
-    if (!shown || results - shown.at > SHOWN_KEEP) return full();
-    const d = diffObservation(shown.body, p.body, { liveRefs: p.liveRefs, truncated: p.truncated });
-    if (d && d.ratio > 0.5) return full();
+    if (r.escalated) return full("escalated");
+    if (!shown) return full("no-base");
+    if (results - shown.at > SHOWN_KEEP) return full("base-old");
+    if (shown.doc !== doc) return full("other-document");
+    // Like with like: the page printed as the base was (its own screen, or the same capture printed the snapshot's way).
+    const other = shown.view !== p.view;
+    const next = !other ? { body: p.body, truncated: p.truncated } : p.alt && p.alt.view === shown.view ? p.alt : null;
+    if (!next) return full("other-view");
+    const d = diffObservation(shown.body, next.body, { liveRefs: p.liveRefs, truncated: next.truncated, ordered: true });
+    if (d?.fullBecause) return full(d.fullBecause);
+    if (d && d.ratio > 0.5) return full("large-change", d.ratio);
+    if (other && d && d.text.length * 2 >= p.body.length) return full("half-screen-or-more", d.ratio);
     const back = results - shown.at;
     const head = `${p.tabs}PAGE SNAPSHOT (${p.url}${p.title ? ` — "${p.title}"` : ""}):`;
     const since = `the page snapshot ${back} browser result${back === 1 ? "" : "s"} back`;
+    // C1a' (18 Nov): against a browser_snapshot base the lines are that snapshot's printing (the viewport and a screen
+    // above and below it), so the reply says so, and ends its first line with this action's own visible-screen
+    // counts of what is above and below, from the same capture (its screen's own lines, as a whole screen would print
+    // them; none when nothing is above or below, as a whole screen prints none). They stay on the header line, never
+    // among the listed lines, so applying the change list to the snapshot gives the same page as before.
+    const framing = other
+      ? ` That base is browser_snapshot's printing (the viewport and a screen above and below); the visible screen's own above/below counts, if any, end this line.${p.body
+          .split("\n")
+          .filter((l) => SCREEN_COUNT.test(l))
+          .map((l) => ` ${l}`)
+          .join("")}`
+      : "";
     const body = d
-      ? `CHANGES ONLY since ${since}. Lines not listed are as shown there and their refs still work; "~ " marks an unchanged line shown for context. (browser_snapshot gives the whole screen again.)\n${p.note}${d.text}`
-      : `the same as ${since}; its refs still work.${p.note ? `\n${p.note.trimEnd()}` : ""}`;
-    return [r.content, `${head} ${body}`].filter(Boolean).join("\n\n");
+      ? `CHANGES ONLY since ${since}. Lines not listed are as shown there and their refs still work; "~ " marks an unchanged line shown for context. (browser_snapshot gives the whole screen again.)${framing}\n${p.note}${d.text}`
+      : `the same as ${since}; its refs still work.${framing}${p.note ? `\n${p.note.trimEnd()}` : ""}`;
+    const out = [r.content, `${head} ${body}`].filter(Boolean).join("\n\n");
+    obs = { mode: d ? "delta" : "same", reason: "", ratio: d?.ratio ?? 0, baseAge: back, ...(other ? { againstRead: true } : {}), pageChars: out.length, ...meta };
+    return out;
+  };
+  /**
+   * C1a: a browser_snapshot reply as the base, once the wrapper gives it (pendingShown): only the plain read, given
+   * whole and as printed (its page lines end the reply, not cut at the cap), with no note added after it.
+   */
+  const readBase = (r: ActOutcome, given: CallToolResult): void => {
+    const p = r.read;
+    const t = given.content.length === 1 && given.content[0]?.type === "text" ? given.content[0].text : "";
+    if (!r.ok || !p || p.truncated || !p.body.trim() || given.isError || !t.endsWith(`\n${p.body}`)) return;
+    // C1a2 (18 Nov): the client already holds a still-valid fresh screen base for this page: keep it, and the next action
+    // is exactly what it was before C1a (a change list against that screen, or the screen whole by the same rules).
+    // Valid means: an action's whole screen (not a snapshot), from a reply that was not an error and not cut at the cap,
+    // committed on delivery (a withheld reply leaves no base at all), on the same document and address, printed at the
+    // same scroll position as this snapshot, and still within SHOWN_KEEP for the next result. Anything else (no base,
+    // another document, address or scroll position, a clipped or error screen, one that would be too old, a snapshot
+    // base) and this snapshot is the base, as in C1a.
+    const s = shown;
+    if (s && s.kind === "screen" && s.ok && !s.truncated && s.doc === docOf(p) && s.scroll !== undefined && s.scroll === p.scroll && results + 1 - s.at <= SHOWN_KEEP) {
+      if (obs) obs.keptScreen = true;
+      return;
+    }
+    pendingShown = { body: p.body, at: results, doc: docOf(p), gen: p.doc, view: p.view, kind: "read", ...(p.scroll !== undefined ? { scroll: p.scroll } : {}), truncated: false, ok: true };
+    if (obs) obs.readBase = true;
+  };
+
+  /** A step's facts as lines (actionReceipts). */
+  const factLines = (f: ActOutcome["facts"]): string[] =>
+    !f
+      ? []
+      : [
+          ...f.dialogs.map((d) => `${d.type} dialog "${d.message}" was auto-${d.handled}`),
+          ...(f.newTab ? [`opened a new tab ${f.newTab}`] : []),
+          ...f.failedWrites.map((w) => `server did NOT accept: ${w}`),
+          ...(f.invalid.length ? [`invalid field(s): ${f.invalid.join(", ")}`] : []),
+          ...(f.stillLoading ? ["the page was still loading when this step's wait ended (what it shows may change)"] : []),
+          ...f.receipt.filter((l) => !l.startsWith("(Field state only")),
+        ];
+  /** Why a batch stops after a step that succeeded (actionReceipts facts), or null. */
+  const stopFor = (f: ActOutcome["facts"]): string | null =>
+    !f ? null : f.dialogs.length ? "it raised a dialog" : f.newTab ? `it opened a new tab (${f.newTab})` : f.failedWrites.length ? "the server did not accept or answer a write" : f.stillLoading ? "the page was still loading (later steps would act on a page still changing)" : null;
+
+  /** Timings split into the top-level laps (sequential: may be added) and sub-timings inside them (never added to them). */
+  const splitPhases = (t: Record<string, number>): { phases: Record<string, number>; subPhases: Record<string, number> } => {
+    const top = new Set<string>(TOP_LAPS);
+    return {
+      phases: Object.fromEntries(Object.entries(t).filter(([k]) => top.has(k))),
+      subPhases: Object.fromEntries(Object.entries(t).filter(([k]) => !top.has(k))),
+    };
+  };
+  /** A timings record with only finite numbers under known-safe keys (phase names), for the debug line. */
+  const numbersOnly = (t: Record<string, unknown>): Record<string, number> =>
+    Object.fromEntries(Object.entries(t).filter(([k, v]) => /^[a-zA-Z]{1,24}$/.test(k) && typeof v === "number" && Number.isFinite(v)).map(([k, v]) => [k, Math.round(v as number)]));
+
+  // Opt-in per-call diagnostics (PILOTFISH_MCP_DEBUG_LOG=<file>), off by default: one JSON line per tool call with
+  // rough counters only: tool, ms (the whole call: action, settle, capture and any hand-off, not split), inner
+  // actions, how the page came back (full/delta/same/plain) and why, chars of the page part and of the whole reply,
+  // the page's host, and loading indicators still active or exempt when this action read them (null when it did
+  // not). Never page text, typed values, URLs' paths or queries: a hash of the document only.
+  const debugFile = process.env["PILOTFISH_MCP_DEBUG_LOG"];
+  const debug = (tool: string, startedAt: number, extra: Record<string, unknown> = {}, reply?: CallToolResult) => {
+    if (!debugFile) return;
+    try {
+      const replyChars = reply ? reply.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0) : undefined;
+      // Captures this call made (all of them: the action's, re-captures, re-grounds, finds, reads), numbers only.
+      const cap = currentCaptureStats() ?? { count: 0, ms: 0 };
+      appendFileSync(debugFile, `${JSON.stringify({ t: new Date().toISOString(), tool, ms: Date.now() - startedAt, ...extra, replyChars, captures: cap.count, captureMs: cap.ms, ...(obs ?? {}) })}\n`);
+    } catch {
+      /* diagnostics never fail a call */
+    }
+    obs = null;
   };
 
   // ---- WebMCP: browser_page_tool joins the tool list (tools/list_changed) once a page offers tools of its own, so a
@@ -287,20 +489,137 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
   };
 
   /** A direct tool: one executor action. Acting tools then look for an obstacle. */
-  const direct = async (extra: Extra, name: ToolName, input: Record<string, unknown>, affecting = true, o: { snapshot?: boolean } = {}): Promise<CallToolResult> => {
-    session.asker = askerFor(extra);
-    const r = await session.act(name, input, o);
-    await offerPageTools();
-    const out = text(pageText(r), !r.ok);
-    return affecting || name === "wait" || name === "read_page" ? handOff(extra, out) : out;
-  };
+  /** An acting tool's options for the executor: snapshot, expectation, escalation (only what the client sent). */
+  const actOpts = (a: { snapshot?: boolean; expect?: ActOptions["expect"]; escalate?: boolean }): ActOptions => ({
+    ...(a.snapshot === false ? { snapshot: false } : {}),
+    ...(a.expect ? { expect: a.expect } : {}),
+    ...(a.escalate ? { escalate: true } : {}),
+  });
+  /** What every executor action is told about the client's base: unseen, or how the base was printed (alsoView). */
+  const baseOpts = (): ActOptions => (unseen ? { unseen: true } : shown ? { alsoView: shown.view } : {});
+  const direct = async (extra: Extra, name: ToolName, input: Record<string, unknown>, affecting = true, o: ActOptions = {}): Promise<CallToolResult> =>
+    session.run(askerFor(extra), async () => {
+      const startedAt = Date.now();
+      const r = await session.act(name, input, { ...o, ...baseOpts() });
+      await offerPageTools();
+      const out = text(pageText(r), !r.ok);
+      const reply = affecting || name === "wait" || name === "read_page" ? await handOff(extra, out) : out;
+      // A hand-off may have added to it (and waited on the page): only a reply given as printed is a base.
+      if (name === "read_page" && reply === out) readBase(r, out);
+      debug(name, startedAt, { inner: 1, ok: r.ok, ...(r.timings ? splitPhases(numbersOnly(r.timings)) : {}) }, reply);
+      return reply;
+    });
 
   /** Every tool registered, for the tool list (below). */
   const registered = new Map<string, RegisteredTool>();
   const tool: McpServer["registerTool"] = (name, config, cb) => {
-    const t = mcp.registerTool(name, config, cb);
+    // Keep the SDK's generic callback signature (it also permits schema-less tools).
+    const serialized = ((...args: Parameters<typeof cb>) => {
+      const extra = args[args.length - 1] as Extra;
+      // Captures are counted per tool call, in this call's own async context (never another client's). A reply that
+      // would carry a typed password (its place holds TYPED_SECRET_MARK) is withheld whole: UNSAFE_OUTPUT.
+      return withCaptureStats(() =>
+        session.run(askerFor(extra), async () => {
+          pendingShown = undefined;
+          // Output guard (18 Nov): a secret value met by the scrubber during this call, on any path (the executor's
+          // text, evidence, facts, a page read, an obstacle's message, an address this server names), withholds it.
+          const secretOutputsBefore = session.secretOutputs;
+          let r: CallToolResult;
+          try {
+            r = (await Reflect.apply(cb, undefined, args)) as CallToolResult;
+          } catch (e) {
+            pendingShown = undefined;
+            // A thrown error becomes a reply too (its message): withheld whole if it holds a secret value.
+            if (session.holdsSecret(e instanceof Error ? [e.message, e.stack ?? ""].join(" ") : String(e))) {
+              shown = null;
+              unseen = true;
+              return unsafeOutput(name, { content: [], isError: true });
+            }
+            throw e;
+          }
+          // The final boundary scan: the reply as it would go out (every text, structured keys and values), against the
+          // secret values themselves, whatever path built it; the counter besides, for values replaced before rendering.
+          if (session.secretOutputs !== secretOutputsBefore || carriesTyped(r.content) || carriesTyped(r.structuredContent) || leaksSecret(r)) {
+            // Nothing of it reaches the client: no base from it, and the next page is printed whole.
+            pendingShown = undefined;
+            shown = null;
+            unseen = true;
+            return unsafeOutput(name, r);
+          }
+          if (pendingShown) {
+            shown = pendingShown;
+            pendingShown = undefined;
+            unseen = false;
+          }
+          return r;
+        }),
+      );
+    }) as typeof cb;
+    const t = mcp.registerTool(name, config, serialized);
     registered.set(name, t);
     return t;
+  };
+
+  /**
+   * Whether an outgoing reply holds a recognized form of a secret value: every text content, and the structured
+   * content's keys and values (also as serialized). Image data is not scanned (pixels are another rule: screenshots).
+   */
+  const leaksSecret = (r: CallToolResult): boolean => {
+    for (const c of r.content) if (c.type === "text" && session.holdsSecret(c.text)) return true;
+    if (r.structuredContent === undefined) return false;
+    const strings: string[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === "string") strings.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object")
+        for (const [k, x] of Object.entries(v)) {
+          strings.push(k);
+          walk(x);
+        }
+    };
+    walk(r.structuredContent);
+    return strings.some((s) => session.holdsSecret(s)) || session.holdsSecret(JSON.stringify(r.structuredContent));
+  };
+
+  /** Whether any string in `v` holds the typed-password mark. */
+  const carriesTyped = (v: unknown): boolean =>
+    typeof v === "string" ? v.includes(TYPED_SECRET_MARK) : Array.isArray(v) ? v.some(carriesTyped) : !!v && typeof v === "object" && Object.values(v).some(carriesTyped);
+  /**
+   * Fail closed (17 Nov, fifth review): a reply that would show a password typed into a password field cannot be
+   * shown without altering its refs, numbers or wording, so none of it is given: no page text, no refs, no
+   * structured content. A stable first word for a client to detect, and what happened to the action said as it is.
+   */
+  /**
+   * How a client recovers (18 Nov, credential usability): one fixed text for every withheld reply, whatever value or
+   * kind of secret triggered it, so it says nothing about the value; only what clears each kind of guarded value
+   * (session.ts: the typed registry lives with the browser's executor, configured secrets with the server). No "q"
+   * or other fixture value of the e2e tests in it (they check every later output for those).
+   */
+  const RECOVERY =
+    "To recover: a value on this page only may be gone from a fresh page (browser_navigate). A password typed into a password field stays guarded until browser_close, which starts a fresh browser for every client of this server (cookies and sign-ins are lost). A configured secret is guarded for the server's life: if most replies are withheld, the value may be too short to guard without matching ordinary text. Do not pad or replace the configured value while the real credential is unchanged: that would remove its protection. Where the service allows it, tell the user to change the real credential to a longer one at its source, then update PILOTFISH_SECRETS to match and restart the server; if the credential cannot be changed, its protection stays and such replies stay withheld.";
+  const unsafeOutput = (tool: string, r: CallToolResult, why = "It would show a secret value (a configured secret, or a password typed into a password field earlier in this session) in some form, and it cannot be shown without that value or without altering its refs, numbers or wording."): CallToolResult => {
+    const verb: Record<string, string> = { browser_navigate: "navigate", browser_click: "click", browser_type: "type", browser_select: "select", browser_press: "key press", browser_scroll: "scroll", browser_wait: "wait" };
+    // What the executor did is said apart from what it brought about on the page, which this reply cannot say.
+    const noRepeat = "Do not repeat it blindly: a repeat can repeat its side effects (a second submit, order, payment or message); check the page another way first.";
+    const action =
+      tool === "browser_actions"
+        ? r.isError
+          ? `The batch reported an error: which of its steps were dispatched, and how each ended, are not known from this reply (withheld). ${noRepeat}`
+          : `The batch was dispatched and the executor finished with it (no step was undone): which of its steps ran, and the outcome of each on the page, are not known from this reply (withheld). ${noRepeat}`
+        : verb[tool]
+          ? r.isError
+            ? `The ${verb[tool]} reported an error: whether it was dispatched or took effect is not known from this reply. ${noRepeat}`
+            : `The ${verb[tool]} was dispatched and the executor finished it (it was not undone). Its outcome on the page (whether it did what was intended) is not known from this reply: that part is withheld. ${noRepeat}`
+          : "Nothing of what was read is given.";
+    return {
+      content: [
+        {
+          type: "text",
+          text: `UNSAFE_OUTPUT: this reply is withheld. ${why} ${action} No page text or refs are given; refs from earlier replies may not match the page now, and the next page shown is printed whole. Later replies that would show it are withheld the same way. ${RECOVERY}`,
+        },
+      ],
+      isError: true,
+    };
   };
 
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: true } as const;
@@ -311,18 +630,18 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     {
       title: "Open a URL",
       description:
-        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): apply it, then read the top. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first with your own search tool to pick the site, or answer from the search when that is enough; open a site when the task needs one (a price for dates, a form, an account).",
+        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false leaves the screen out for a page you will only read or leave. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first with your own search tool to pick the site, or answer from the search when that is enough; open a site when the task needs one (a price for dates, a form, an account).",
       inputSchema: Inputs.browser_navigate,
       annotations: acting,
     },
-    (args, extra) => direct(extra, "navigate", { url: args.url }, true, args.snapshot === false ? { snapshot: false } : {}),
+    (args, extra) => direct(extra, "navigate", { url: args.url }, true, actOpts(args)),
   );
 
   tool(
     "browser_snapshot",
     {
       title: "Read the page",
-      description: "The current page as a compact tree of headings, text and elements with refs (e12) to act on: three screens around the viewport, or everything with whole_page. Refs stay valid while their element is on the page.",
+      description: "The current page as a compact tree of headings, text and elements with refs (e12) to act on: three screens around the viewport, or everything with whole_page. Refs stay valid while their element is on the page. A tag marked @ is an element the page gave that ARIA role (<@button> is a div or span with role=button, not a native <button>).",
       inputSchema: Inputs.browser_snapshot,
       annotations: readOnly,
     },
@@ -332,54 +651,36 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
   tool(
     "browser_click",
     { title: "Click", description: "Click an element by ref. Refuses with a reason (obscured, stale, not visible) instead of clicking the wrong thing. Returns evidence of what changed.", inputSchema: Inputs.browser_click, annotations: acting },
-    (args, extra) => direct(extra, "click", { ref: args.ref }),
+    (args, extra) => direct(extra, "click", { ref: args.ref }, true, actOpts(args)),
   );
 
   tool(
     "browser_type",
     {
       title: "Type",
-      description: `Replace the text of an input, textarea or editable element by ref (never appends). In an autocomplete box the result shows its suggestions: browser_click one. For a <select>, browser_select. Returns what changed.${secretHint}`,
+      description: `Type into an input, textarea or editable element by ref, replacing its text. A text field is clicked first (or focused, when the click cannot reach it), so a browser_click on it just before is usually not needed; a native date, time, month, week, color or range input gets its value set directly, with no click. Returns evidence.${secretHint}`,
       inputSchema: Inputs.browser_type,
       annotations: acting,
     },
-    (args, extra) => direct(extra, "type", { ref: args.ref, text: args.text, ...(args.submit ? { submit: true } : {}) }),
+    (args, extra) => direct(extra, "type", { ref: args.ref, text: args.text, ...(args.submit ? { submit: true } : {}) }, true, actOpts(args)),
   );
 
   tool(
     "browser_select",
-    {
-      title: "Select options",
-      description:
-        "Choose options of a native <select> by label or value, replacing the current selection (unlisted options are unselected). Custom dropdown: browser_click it, then the option. Returns the values selected and what changed.",
-      inputSchema: Inputs.browser_select,
-      // Choosing an option is undone by choosing another, and the same values twice leave the same selection.
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    },
-    (args, extra) => direct(extra, "select_option", { ref: args.ref, values: args.values }),
+    { title: "Select options", description: "Choose option(s) of a <select> by label or value. Returns evidence.", inputSchema: Inputs.browser_select, annotations: { ...acting, destructiveHint: false, idempotentHint: true } },
+    (args, extra) => direct(extra, "select_option", { ref: args.ref, values: args.values }, true, actOpts(args)),
   );
 
   tool(
     "browser_press",
-    {
-      title: "Press a key",
-      description:
-        "Press a key or shortcut on whatever has focus (no ref; browser_click a field first). E.g. Escape closes a dialog, ArrowDown then Enter picks a suggestion; Enter may submit a form; reload keys are refused. For text, browser_type. Returns what changed.",
-      inputSchema: Inputs.browser_press,
-      annotations: acting,
-    },
-    (args, extra) => direct(extra, "press", { key: args.key }),
+    { title: "Press a key", description: "Press a key or shortcut on the focused element. Returns evidence.", inputSchema: Inputs.browser_press, annotations: acting },
+    (args, extra) => direct(extra, "press", { key: args.key }, true, actOpts(args)),
   );
 
   tool(
     "browser_scroll",
-    {
-      title: "Scroll",
-      description: "Scroll the page about one screen; returns the screen now in view, with refs. To reach a named element, browser_find; for text, browser_get_text.",
-      inputSchema: Inputs.browser_scroll,
-      annotations: { ...readOnly, readOnlyHint: false, destructiveHint: false },
-    },
-    (args, extra) => direct(extra, "scroll", { direction: args.direction }, false),
+    { title: "Scroll", description: "Scroll about one screen. Returns evidence and the newly visible elements.", inputSchema: Inputs.browser_scroll, annotations: { ...readOnly, readOnlyHint: false, destructiveHint: false } },
+    (args, extra) => direct(extra, "scroll", { direction: args.direction }, false, args.snapshot === false ? { snapshot: false } : {}),
   );
 
   tool(
@@ -389,9 +690,13 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       // The image would show typed secrets to the client's model: same rule as the agent's own screenshot tool.
       if (!config.allowScreenshots) return text(`Screenshots are off because secrets are configured (the image could show them). Set PILOTFISH_ALLOW_SCREENSHOTS=1 on the server to allow them. Docs: ${DOCS}/open-settings`, true);
       const page = await session.page();
+      // A password typed into a password field may be in the pixels (a field that turned to text, an echo, a reveal
+      // toggle), and pixels cannot be checked for it: no screenshot for the rest of this browser.
+      if (session.hasTypedPasswords())
+        return unsafeOutput("browser_screenshot", { content: [] }, "A screenshot could show the password typed into a password field earlier in this browser, and its pixels cannot be checked for it; no screenshot is given until browser_close starts a fresh browser.");
       const jpeg = await page.screenshot({ format: "jpeg", quality: 70 });
       const vp = page.browser.viewport;
-      return { content: [{ type: "image", data: jpeg.toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `Viewport ${vp.width}x${vp.height} CSS px. URL: ${page.url}` }] };
+      return { content: [{ type: "image", data: jpeg.toString("base64"), mimeType: "image/jpeg" }, { type: "text", text: `Viewport ${vp.width}x${vp.height} CSS px. URL: ${session.scrubReply(page.url)}` }] };
     },
   );
 
@@ -424,8 +729,12 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
         if (e instanceof InvalidSchemaError) return text(`ERROR invalid_schema: ${e.message}`, true);
         throw e;
       }
+      const secretOutputsBefore = session.secretOutputs;
       const out = await direct(extra, "query", { expression: args.expression }, false);
       const shown = out.content[0]?.type === "text" ? out.content[0].text : "";
+      // A value holding a secret (configured or typed) is withheld before validation: neither a mismatch caused by the
+      // mark nor a success with an altered value.
+      if (session.secretOutputs !== secretOutputsBefore || carriesTyped(shown) || session.holdsSecret(shown)) return unsafeOutput("browser_query", out);
       if (out.isError) return out;
       const r = checkQueryText(shown, check);
       if (!r.ok) return text(["ERROR schema_mismatch", ...r.lines, "Next: fix the expression and run browser_query again."].join("\n"), true);
@@ -450,14 +759,18 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     {
       title: "Several actions in one call",
       description:
-        "Several steps in order in one call, e.g. fill a form's fields and submit it; each gets the same checks as its own tool. Stops at the first that fails, or after one that moves the page to another address (later refs would belong to the old page). Returns a line per step and the evidence and visible screen after the last one run.",
+        "Several steps in order in one call, e.g. fill a form's fields and submit it; each gets the same checks as its own tool. Stops at the first that fails, after one that moves the page to another address (later refs would belong to the old page), and after one that raised a dialog, opened a new tab, had a server write refused or unanswered, left the page still loading, or left a check or sign-in on the page. Returns a line per step with what each earlier step did that must not be lost (dialogs, tab, refused writes, invalid fields, choices, field read-back), then the evidence and visible screen after the last one run (snapshot:false: the evidence only).",
       inputSchema: Inputs.browser_actions,
       annotations: acting,
     },
     async (args, extra) => {
-      session.asker = askerFor(extra);
+      const actionsStartedAt = Date.now();
+      let ran = 0;
       const lines: string[] = [];
       let last: ActOutcome | null = null;
+      const phases: Record<string, number> = {};
+      // Each run step's facts, printed under its line; the last step's are in its own evidence below.
+      const stepFacts: string[][] = [];
       let failed = false;
       for (const [i, a] of args.actions.entries()) {
         const before = (await session.page()).lastDocumentAt;
@@ -469,23 +782,47 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
           : a.action === "press" ? ["press", { key: a.key }]
           : a.action === "scroll" ? ["scroll", { direction: a.direction }]
           : ["wait", { seconds: a.seconds }];
-        const r = await session.act(name, input);
+        const r = await session.act(name, input, { ...(args.snapshot === false ? { snapshot: false } : {}), ...baseOpts() });
+        ran++;
+        for (const [k, v] of Object.entries(numbersOnly(r.timings ?? {}))) phases[k] = (phases[k] ?? 0) + v;
         lines.push(`${i + 1}. ${r.ok ? "" : "FAILED "}${r.summary}`);
+        stepFacts.push(factLines(r.facts));
         last = r;
+        const rest = i < args.actions.length - 1 ? `steps ${i + 2}-${args.actions.length} were not run` : "";
         if (!r.ok) {
           failed = true;
-          if (i < args.actions.length - 1) lines.push(`Stopped: steps ${i + 2}-${args.actions.length} were not run.`);
+          if (rest) lines.push(`Stopped: ${rest}.`);
+          break;
+        }
+        // Stopping (separate from what is said): a step whose result a later one could build on wrongly.
+        const factStop = stopFor(r.facts);
+        if (factStop && rest) {
+          lines.push(`Stopped after step ${i + 1}: ${factStop}; ${rest}.`);
           break;
         }
         const after = await session.page();
-        if (after.lastDocumentAt !== before && i < args.actions.length - 1) {
-          lines.push(`Stopped: the page moved to ${after.url}; steps ${i + 2}-${args.actions.length} were not run (their refs belong to the previous page).`);
+        if (after.lastDocumentAt !== before && rest) {
+          lines.push(`Stopped: the page moved to ${session.scrubReply(after.url)}; ${rest} (their refs belong to the previous page).`);
+          break;
+        }
+        // A page that could not be verified stops the batch too (the step already ran: it is never run again).
+        const seen = rest ? await session.obstacle() : null;
+        if (seen) {
+          lines.push(`Stopped after step ${i + 1}: ${"unread" in seen ? `the page could not be verified for a sign-in, a code or a check (${seen.changed ? "it loaded another document while it was read" : "it could not be read as one document"})` : "the page now needs a person or shows a check"}; ${rest}.`);
           break;
         }
       }
+      // Facts of every run step but the last (whose own evidence follows), under its line.
+      for (let k = stepFacts.length - 2; k >= 0; k--) {
+        const at = lines.findIndex((l) => l.startsWith(`${k + 1}. `));
+        if (at >= 0 && stepFacts[k]!.length) lines.splice(at + 1, 0, ...stepFacts[k]!.map((f) => `   ${f}`));
+      }
       await offerPageTools();
       // Only the last step's page reaches the client: it alone is shown (in full or as a change list).
-      return handOff(extra, text(`${lines.join("\n")}\n\n${last ? pageText(last) : ""}`, failed));
+      const shownText = last ? pageText(last) : "";
+      const reply = await handOff(extra, text(`${lines.join("\n")}\n\n${shownText}`, failed));
+      debug("actions", actionsStartedAt, { inner: ran, ok: !failed, ...splitPhases(phases) }, reply);
+      return reply;
     },
   );
 
@@ -502,7 +839,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       if (!session.launched) return text("No browser is open. Next: browser_navigate to open one.", true);
       const wait = args.timeout_s ?? 300;
       const still = await untilClear(wait * 1_000, 1_500);
-      if (still) return text(needsPerson(still, `Still waiting after ${wait} s.`));
+      if (still) return text("unread" in still ? couldNotCheck(still, `After ${wait} s the page still could not be verified.`) : needsPerson(still, `Still waiting after ${wait} s.`));
       return text(`The page needs nobody now. The page:\n${await pageNow()}`);
     },
   );
@@ -516,7 +853,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       inputSchema: Inputs.browser_wait,
       annotations: readOnly,
     },
-    (args, extra) => direct(extra, "wait", { seconds: args.seconds, ...(args.until ? { until: args.until } : {}), ...(args.gone ? { gone: args.gone } : {}) }, false),
+    (args, extra) => direct(extra, "wait", { seconds: args.seconds, ...(args.until ? { until: args.until } : {}), ...(args.gone ? { gone: args.gone } : {}), ...(args.in ? { in: args.in } : {}) }, false, args.snapshot === false ? { snapshot: false } : {}),
   );
 
   tool(
@@ -525,7 +862,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     async (args, extra) => {
       if (args.switch_to) return direct(extra, "switch_tab", { tab: args.switch_to });
       await session.page();
-      const list = session.tabTable?.describe() ?? "";
+      const list = session.scrubReply(session.tabTable?.describe() ?? "");
       return text(list ? list.split(" | ").join("\n") : "No open tabs.");
     },
   );

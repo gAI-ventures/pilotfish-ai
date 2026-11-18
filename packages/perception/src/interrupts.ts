@@ -1747,5 +1747,5 @@ export function isResolved(category: InterruptCategory, before: InterruptInput, 
   return explainResolution(category, before, after).resolved;
 }
 
-export { gatherInterruptInput, trackMainResponse, frameUrls } from "./interrupts-cdp.js";
+export { DocumentChangedError, gatherInterruptInput, trackMainResponse, frameUrls } from "./interrupts-cdp.js";
 export type { MainResponseTracker, GatherOptions } from "./interrupts-cdp.js";

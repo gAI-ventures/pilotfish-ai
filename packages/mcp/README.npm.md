@@ -28,8 +28,17 @@ with your saved logins, see "Local or managed?" below.
   gets only the lines that changed, and `browser_query` pulls out just the values it needs.
 - **You stay in charge.** Sign-ins, one-time codes and CAPTCHAs are handed to you in the browser window. Payments,
   orders, messages and deletions wait for your yes.
-- **Your passwords stay out of the model.** Secrets you configure are typed as `{{name}}` placeholders and masked
-  in every result.
+- **Your passwords stay out of the model.** Secrets you configure are typed as `{{name}}` placeholders; a field
+  filled from one shows no value afterwards. A result that would show a secret's value (a configured secret of any
+  length, or a password typed into a password field) in a form pilotfish recognizes (as is, URL-encoded either way,
+  base64, JSON-escaped) is withheld whole (`UNSAFE_OUTPUT`, an error):
+  it says the action was sent, never whether it worked, so check before repeating it. It also says how to
+  recover: a fresh page; `browser_close`, which clears a password typed into a password field and starts a fresh
+  browser for every connected client. A configured secret so short that it cannot be guarded without matching
+  ordinary text withholds most replies: never pad or replace the configured value while the real credential is
+  unchanged (that removes its protection). Where the service allows it, change the real credential to a longer one
+  at its source, then update `PILOTFISH_SECRETS` to match and restart; if it cannot be changed, its protection
+  stays and those replies stay withheld.
 - **It runs locally.** A fresh browser on your machine and your own internet connection, closed when your agent
   disconnects. Cookie banners are declined and ads and trackers blocked before the agent sees the page.
 
@@ -130,23 +139,27 @@ other address.
 
 | Tool | What it does |
 | --- | --- |
-| `browser_navigate` `{url, snapshot?}` | Open an http(s) URL and return what happened plus the visible screen, with counts of what is above and below. `snapshot: false` returns only what happened and the counts, for a page you will read with `browser_query` and not act on. |
-| `browser_snapshot` `{whole_page?}` | The page as a compact outline with refs (`[e12]<button>Search`): about three screens around the viewport, or all of it with `whole_page`. Every word and ref is kept; repeated text, closing tags and generated ids are left out. A plain table row is one line, its cells between `|`. |
-| `browser_click` `{ref}` | Click an element. Refused if it is covered, stale or not visible. |
-| `browser_type` `{ref, text, submit?}` | Replace a field's text (it never appends); `submit` presses Enter after it. `{{name}}` types a configured secret. |
-| `browser_select` `{ref, values}` | Pick options of a native `<select>` by label or value. The values replace the current selection. |
-| `browser_press` `{key}` | Press a key or shortcut (`Enter`, `Escape`, `Control+a`) on whatever has focus. |
-| `browser_scroll` `{direction}` | Scroll about one screen and return it, with refs. |
-| `browser_actions` `{actions}` | Up to 10 steps in one call, such as a form's fields and its submit button. Each step is `{action, …}`: `click`, `type`, `select`, `press`, `scroll` or `wait`, with the same fields as its own tool. A malformed step stops the batch before anything runs; otherwise it stops at the first step that fails or moves to another page. |
+| `browser_navigate` `{url, snapshot?, expect?, escalate?}` | Open an http(s) URL and return what happened plus the visible screen, with counts of what is above and below. `snapshot: false` leaves the screen out (still returning the evidence: where it landed, the title, what was added or removed, and the new tabs its list of new elements leaves out; loading notes and anything that needs a person): for a page you will only read with `browser_query` or `browser_get_text`, or leave for another URL; keep the default for a page you will click, type or choose on. For cheapest, latest, highest-rated and the like it asks for the site's own sort or tab to be opened (a label naming its best value is not the list), the answer to say which sort, tab and filters it came from, and ties broken only by what the task asks; when that order does not rank by the task's measure over everything inside its bounds, the answer says how much was read and calls its pick the best of those read, not the best. Search, sort and filter addresses may be built from the task's words or by changing a parameter the site has shown (`browser_query` gives a link's full href), its page number included; before their results are used, the page must show what was meant applied (heading, breadcrumb, selected sort or filter, the results themselves; never the address or a search box, which can repeat a value the site ignored), else the site's own form is used or the answer says what could not be applied. Sign-in, session, account, identity and tracking values are never written, only kept as the site gave them or left out. |
+| `browser_snapshot` `{whole_page?}` | The page as a compact outline with refs (`[e12]<button>Search`): about three screens around the viewport, or all of it with `whole_page`. Every word and ref is kept; repeated text, closing tags and generated ids are left out. A plain table row is one line, its cells between `|`. A tag marked `@` is an element the page gave that ARIA role (`<@button>` is a div or span with `role="button"`, not a native `<button>`); the same notation is used in every tool's screen, evidence and find lines. |
+| `browser_click` `{ref, snapshot?, expect?, escalate?}` | Click an element. Refused if it is covered, stale or not visible. |
+| `browser_type` `{ref, text, submit?, snapshot?, expect?, escalate?}` | Replace a field's text. A text field is clicked first (or focused when the click cannot reach it), so a click on it just before is usually not needed; a native date, time, month, week, color or range input gets its value set directly, with no click. `{{name}}` types a configured secret. |
+| `browser_select` `{ref, values, snapshot?, expect?, escalate?}` | Pick `<select>` options by label or value. |
+| `browser_press` `{key, snapshot?, expect?, escalate?}` | Press a key or shortcut (`Enter`, `Escape`, `Control+a`). |
+| `browser_scroll` `{direction, snapshot?}` | Scroll about one screen and return it. |
+| `browser_actions` `{actions, snapshot?}` | Up to 10 steps in one call, such as a form's fields and its submit button. Each step is `{action, …}`: `click`, `type`, `select`, `press`, `scroll` or `wait`, with the same fields as its own tool. A malformed step stops the batch before anything runs; otherwise it stops at the first step that fails or moves to another page, and after a step that raised a dialog, opened a new tab, had a server write refused or unanswered, left the page still loading, or left a check or sign-in on the page. Each earlier step's line keeps what it did that must not be lost (dialogs, new tab, refused writes, invalid fields, choices, field read-back). |
 | `browser_query` `{expression, schema?}` | Read values with a JavaScript expression that returns JSON (up to 4,000 characters): a list of results, prices, counts. It cannot click, type, submit or send data. The cheapest way to read a page. With `schema` (a JSON Schema), the result is checked against it: a match also comes back as `structuredContent: {value}`, a mismatch as an error starting `ERROR schema_mismatch` with up to 5 `path: message` lines. |
 | `browser_find` `{query}` | Find elements anywhere on the page by their words, best match first. Separate several targets with commas. |
 | `browser_get_text` `{max_chars?, selector?}` | The readable text of the page (PDFs too), or of one element (`main`, `#results`), with secrets masked. Up to `max_chars` (default 20,000). |
-| `browser_screenshot` `{}` | A JPEG of the viewport. Off when secrets are configured, since the image could show them. |
-| `browser_wait` `{seconds, until?, gone?}` | Wait up to 0.5 to 10 seconds, then return what changed. With `until` or `gone` it returns the moment that text appears on the page or goes (a result's label, the site's "Calculating…"). Actions already wait for the requests they start, for answers a page gets over its own WebSocket, and for a loading line or countdown the site shows. |
+| `browser_screenshot` `{}` | A JPEG of the viewport. Off when secrets are configured, since the image could show them, and withheld (`UNSAFE_OUTPUT`) once a password was typed into a password field in this browser, whose pixels cannot be checked for it. |
+| `browser_wait` `{seconds, until?, gone?, in?, snapshot?}` | Wait up to 0.5 to 10 seconds, then return what changed. With `until` or `gone` it returns the moment that text appears on the page or goes (a result's label, the site's "Calculating…"). Actions already wait for the requests they start, for answers a page gets over its own WebSocket, and for a loading line or countdown the site shows. |
 | `browser_resume` `{timeout_s?}` | After a result said `NEEDS A PERSON`: wait (default 300 s) until you have dealt with the page, then return it. |
 | `browser_page_tool` `{tool, arguments?}` | Call a tool the page itself offers through [WebMCP](https://webmachinelearning.github.io/webmcp/), as listed on the `PAGE TOOLS` line of its snapshot: the site's own way to do a step (a search, a booking step), often one call where clicks take several. Returns the tool's answer and what changed. In the tool list only once a page offers tools (your client is told the list changed). A form tool that only fills its form leaves the submit to `browser_click`. |
 | `browser_tabs` `{switch_to?}` | List open tabs, or switch with `switch_to: "t2"`. |
 | `browser_close` `{}` | Close the browser; the next call opens a fresh one. Not needed at the end: it closes when the client disconnects. |
+
+On the acting tools (`browser_click`, `browser_type`, `browser_select`, `browser_press`, `browser_scroll`, `browser_actions`) and `browser_wait`, `snapshot: false` leaves out only the printed page: the action, its checks, the evidence (what changed, was added or removed), loading notes and anything that needs a person are as with the default. Use it when the next step reads with `browser_query` or `browser_get_text`, or before more steps and one look. The next printed page is a change list against the last page the client was shown.
+
+`expect` on `browser_navigate`, `browser_click`, `browser_type`, `browser_select` and `browser_press` names what the action should bring about: `text` shown or `gone` (within the element `in`, else the page), `url` containing a part, waited for up to `within` seconds (default 3). It is checked before the action too. The reply says `MATCHED`, `UNMET`, `ALREADY HELD` (true before the action as well: a state, not the action's doing) or `AMBIGUOUS` (the element is not on the page, was replaced or removed, or its frame is gone). Only visible text counts (repeated text is counted as occurrences); `in` is the element that ref named before the action, never another element given the same ref later, so a new document makes a scoped expectation `AMBIGUOUS`. When the expectation is met only after the action settled, the evidence and page are captured again so they describe what was judged. It is a page state, never proof the task succeeded. `escalate: true` with `snapshot: false` prints the whole page anyway when the expectation is unmet or ambiguous, or the action raised a dialog, opened a tab, loaded a page not expected, had a write refused, left a field invalid or the page still loading (also when the page did not change). `browser_wait` with `in` waits within that element and says whether the text already held when the wait began. With `type` and `select`, the reply also says what the field holds now (never a password or secret value) and whether the field is invalid: field state, not the site accepting it.
 
 ## How it behaves
 
@@ -162,6 +175,9 @@ one-time code or two-factor prompt, a device approval, a sign-in link, a passkey
 pilotfish never tries to get past these pages itself: no guessed passwords or codes, no CAPTCHA solving. A client
 that supports elicitation asks you directly. A bot check that clears on its own is waited out first, for up to
 12 seconds. `BLOCKED:` means the site refused this browser, and `STOP:` marks a site that must not be automated.
+`COULD NOT VERIFY THE PAGE:` means the page could not be read as one document when it was checked (for example, it
+loaded another document meanwhile), so nothing is known about it either way: look at it again before relying on it. In
+`browser_actions` it stops the steps that are left.
 
 **Confirmations.** Actions that look irreversible (pay, place an order, send, delete) need your yes. A client with
 elicitation asks you; any other client gets the action refused, with the reason.
@@ -188,6 +204,7 @@ All optional.
 | `PILOTFISH_ALLOW_SCREENSHOTS` | on unless secrets are set | `1` allows screenshots even with secrets configured. |
 | `PILOTFISH_CHROME` | found automatically | Path to the browser executable. |
 | `PILOTFISH_MCP_TOKEN` | | HTTP mode: the bearer token clients must send. |
+| `PILOTFISH_MCP_DEBUG_LOG` | | A file path: one JSON line per tool call with timings and sizes (how long it took, whether the page came back whole or as changes and why, the site's host, whether a loading indicator was still in view). Never page text, typed values or full URLs. For diagnosing; off by default. |
 
 Example with a secret:
 

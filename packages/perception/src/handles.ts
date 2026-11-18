@@ -57,7 +57,11 @@ export interface ResolveResult {
  * Verify a handle is still live, or re-ground it. Throws ActionError("stale")
  * with a helpful message if the element cannot be found.
  */
-export async function resolveHandle(page: Page, h: ElementHandle, { allowReground = true } = {}): Promise<ResolveResult> {
+export async function resolveHandle(
+  page: Page,
+  h: ElementHandle,
+  { allowReground = true, previous }: { allowReground?: boolean; previous?: Snapshot } = {},
+): Promise<ResolveResult> {
   if (h.frame.session.closed) {
     throw new ActionError("frame_detached", `The frame containing ${h.ref} was detached; take a new snapshot.`);
   }
@@ -88,14 +92,18 @@ export async function resolveHandle(page: Page, h: ElementHandle, { allowRegroun
     // fall through to re-grounding
   }
   if (!allowReground) throw new ActionError("stale", `${h.ref} (${h.description}) is no longer in the page; take a new snapshot.`);
-  let fresh = await captureSnapshot(page, { viewportBand: Infinity });
+  // `previous`: the snapshot the ref came from. Its ref memory numbers the fresh capture, so every other ref the
+  // caller still holds names the same element as before (17 Nov: without it the capture numbered refs afresh and a
+  // second held ref clicked another element). Matching itself stays the exact nodeKey below, never a name alone.
+  const again = () => captureSnapshot(page, { viewportBand: Infinity, ...(previous ? { previous } : {}) });
+  let fresh = await again();
   let match = fresh.nodes.find((n) => n.nodeType === 1 && nodeKey(n) === h.key);
   if (!match) {
     // Caught mid-redraw: a list or tab bar the page draws again while results load is gone for a moment (Google
     // Flights' "Cheapest" tab, 4 Nov: the click failed and the same element was back for the next call, twice).
     // One more look after a pause, matched just as strictly.
     await new Promise((r) => setTimeout(r, 600));
-    fresh = await captureSnapshot(page, { viewportBand: Infinity });
+    fresh = await again();
     match = fresh.nodes.find((n) => n.nodeType === 1 && nodeKey(n) === h.key);
   }
   // Position is part of the key ("2nd 'Add' button"), and `n:`/`h:` identities (form name, href) are

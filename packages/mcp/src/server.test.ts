@@ -154,6 +154,54 @@ describe("MCP protocol (no browser)", () => {
     expect(client.getInstructions()).toContain("{{pw}}");
   });
 
+  it("says the same thing in the tool list and the README: the snapshot option, and the verified-effect address rule (17 Nov)", async () => {
+    const { tools } = await client.listTools();
+    const readme = readFileSync(new URL("../README.npm.md", import.meta.url), "utf8");
+    const row = (name: string) => readme.split(/\r?\n/).find((l) => l.startsWith(`| \`${name}\``)) ?? "";
+    // Every tool whose schema takes `snapshot` says so in its README row, and no other tool does.
+    for (const t of tools) {
+      const takes = Object.keys((t.inputSchema.properties ?? {}) as Record<string, unknown>).includes("snapshot");
+      expect(row(t.name).includes("snapshot?"), t.name).toBe(takes);
+    }
+    expect(tools.filter((t) => Object.keys((t.inputSchema.properties ?? {}) as Record<string, unknown>).includes("snapshot")).map((t) => t.name).sort()).toEqual(
+      ["browser_actions", "browser_click", "browser_navigate", "browser_press", "browser_scroll", "browser_select", "browser_type", "browser_wait"],
+    );
+    // The address rule, in both: built from the task's words or a shown parameter; the applied state checked on the
+    // page (never the address or a search box) before results are used; else the site's form or an honest limit;
+    // sign-in, session, identity and tracking values never written.
+    const nav = tools.find((t) => t.name === "browser_navigate")!.description ?? "";
+    for (const [desc, doc] of [
+      ["build one from the task's own words", "built from the task's words"],
+      ["change a parameter this site has shown you in an address or link", "changing a parameter the site has shown"],
+      ["its page number included", "its page number included"],
+      ["check on the page that what you meant was applied", "the page must show what was meant applied"],
+      ["the results themselves", "the results themselves"],
+      ["never the address or a search box, which can repeat a value the site ignored", "never the address or a search box, which can repeat a value the site ignored"],
+      ["use the site's own form, or say in the answer what could not be applied", "the site's own form is used or the answer says what could not be applied"],
+      ["Never write a sign-in, session, account, identity or tracking value yourself", "Sign-in, session, account, identity and tracking values are never written"],
+      // An extremum from a sort: the top answers it only when the order ranks by the task's measure over its bounds.
+      ["The top is the answer only when that order ranks by what the task asks over everything inside its bounds", "when that order does not rank by the task's measure over everything inside its bounds"],
+      ["say how much was read and call the pick the best of those read, not the best", "says how much was read and calls its pick the best of those read, not the best"],
+    ]) {
+      expect(nav, desc).toContain(desc);
+      expect(row("browser_navigate"), doc).toContain(doc);
+    }
+    // The @ notation for ARIA-role tags, in the snapshot description and its README row.
+    const snapDesc = tools.find((t) => t.name === "browser_snapshot")!.description ?? "";
+    expect(snapDesc).toContain("<@button> is a div or span with role=button, not a native <button>");
+    expect(row("browser_snapshot")).toContain("`<@button>` is a div or span with `role=\"button\"`, not a native `<button>`");
+    // Expectations (Stage C): exactly the acting tools that take `expect` say so in their README rows, with escalate.
+    const takesExpect = tools.filter((t) => Object.keys((t.inputSchema.properties ?? {}) as Record<string, unknown>).includes("expect")).map((t) => t.name).sort();
+    expect(takesExpect).toEqual(["browser_click", "browser_navigate", "browser_press", "browser_select", "browser_type"]);
+    for (const t of tools) expect(row(t.name).includes("expect?, escalate?"), t.name).toBe(takesExpect.includes(t.name));
+    expect(readme).toContain("`MATCHED`, `UNMET`, `ALREADY HELD`");
+    // The provenance-only wording is gone from both.
+    for (const old of ["from memory or guesswork", "made up"]) {
+      expect(nav).not.toContain(old);
+      expect(row("browser_navigate")).not.toContain(old);
+    }
+  });
+
   it("reports this package's version (a repository build: 0.0.0-dev; the npm package: its published version)", () => {
     expect(VERSION).toBe("0.0.0-dev");
     expect(client.getServerVersion()).toEqual({ name: "pilotfish", version: VERSION });
@@ -291,5 +339,121 @@ describe("browser_query schema (the query's result stubbed: no browser)", () => 
     const q = tools.find((t) => t.name === "browser_query")!;
     expect(q.inputSchema.required).toEqual(["expression"]);
     expect(JSON.stringify((q.inputSchema.properties as Record<string, unknown>)["schema"])).toBe('{"description":"JSON Schema the result must match","type":"object"}');
+  });
+});
+
+describe("output boundary scan (the executor stubbed: no browser; 18 Nov)", () => {
+  const SECRET = "hunter2-xyz";
+  let pf: PilotfishMcp;
+  let client: Client;
+  let next: ActOutcome | Error = { ok: true, summary: "", text: "" };
+  let ran = 0;
+  const say = (text: string): ActOutcome => ({ ok: true, summary: text.slice(0, 40), text });
+  const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as CallToolResult;
+  const textOf = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+  const unsafe = (r: CallToolResult) => r.isError === true && textOf(r).startsWith("UNSAFE_OUTPUT") && r.structuredContent === undefined;
+
+  beforeAll(async () => {
+    pf = createMcpServer({ config: { ...configFromEnv({}), secrets: { pw: { value: SECRET }, pin: { value: "Zx" } } } });
+    pf.session.act = async () => {
+      ran++;
+      if (next instanceof Error) throw next;
+      return next;
+    };
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await pf.server.connect(serverSide);
+    client = new Client({ name: "boundary", version: "1" });
+    await client.connect(clientSide);
+  });
+
+  afterAll(async () => {
+    await client?.close();
+    await pf?.close();
+  });
+
+  it("control: a reply with no secret value is given exactly", async () => {
+    next = say("plain page text");
+    const r = await call("browser_get_text", {});
+    expect(r.isError).toBeFalsy();
+    expect(textOf(r)).toBe("plain page text");
+  });
+
+  it("a secret value in text the executor returned unscrubbed is withheld whole", async () => {
+    next = say(`see ${SECRET} here`);
+    const r = await call("browser_get_text", {});
+    expect(unsafe(r), textOf(r)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+  });
+
+  it("a configured value under 3 characters is withheld whole (control: the same reply without it is given)", async () => {
+    next = say("hello world");
+    expect((await call("browser_get_text", {})).isError).toBeFalsy();
+    next = say("hello Zx");
+    const r = await call("browser_get_text", {});
+    expect(unsafe(r), textOf(r)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain("Zx");
+  });
+
+  it("a secret as a structuredContent key is withheld whole, with no structured content (control: another key is given)", async () => {
+    next = say('{"ok":1}');
+    const ok = await call("browser_query", { expression: "x", schema: { type: "object" } });
+    expect(ok.isError).toBeFalsy();
+    expect(ok.structuredContent).toEqual({ value: { ok: 1 } });
+    next = say(`{"${SECRET}":1}`);
+    const r = await call("browser_query", { expression: "x", schema: { type: "object" } });
+    expect(unsafe(r), textOf(r)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+  });
+
+  it("a secret in a schema-constrained result is withheld before validation, never schema_mismatch (control: a short clean value validates)", async () => {
+    next = say("abc");
+    expect((await call("browser_query", { expression: "x", schema: { type: "string", maxLength: 3 } })).structuredContent).toEqual({ value: "abc" });
+    next = say(SECRET);
+    const r = await call("browser_query", { expression: "x", schema: { type: "string", maxLength: 3 } });
+    expect(unsafe(r), textOf(r)).toBe(true);
+    expect(textOf(r)).not.toMatch(/schema_mismatch/);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+  });
+
+  it("KEY ONLY: a structured key holding the secret, where no text and no JSON value holds a recognized form of it, is withheld whole (control: a key without it is given)", async () => {
+    // The text escapes one character of the key (h = "h"): no recognized form of the secret is in it; the parsed
+    // value's only string holding the secret is its key.
+    const keyOnly = '{"\\u0068unter2-xyz":1}';
+    expect(keyOnly).not.toContain(SECRET);
+    expect(Object.keys(JSON.parse(keyOnly) as object)).toEqual([SECRET]);
+    expect(Object.values(JSON.parse(keyOnly) as object)).toEqual([1]);
+    next = say('{"\\u006fk":1}');
+    const ok = await call("browser_query", { expression: "x", schema: { type: "object" } });
+    expect(ok.isError, textOf(ok)).toBeFalsy();
+    expect(ok.structuredContent).toEqual({ value: { ok: 1 } });
+    next = say(keyOnly);
+    const r = await call("browser_query", { expression: "x", schema: { type: "object" } });
+    expect(unsafe(r), textOf(r)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+  });
+
+  it("an invalid schema while a secret is configured: a truthful ERROR invalid_schema without the secret, the query never run; one whose diagnostic would echo the secret is withheld whole", async () => {
+    const before = ran;
+    const plain = await call("browser_query", { expression: "x", schema: { type: "nonsense" } });
+    expect(plain.isError).toBe(true);
+    expect(textOf(plain)).toMatch(/^ERROR invalid_schema: \S/);
+    expect(JSON.stringify(plain)).not.toContain(SECRET);
+    const echoing = await call("browser_query", { expression: "x", schema: { $ref: `#/definitions/${SECRET}` } });
+    expect(echoing.isError).toBe(true);
+    expect(JSON.stringify(echoing)).not.toContain(SECRET);
+    expect(textOf(echoing)).toMatch(/^(UNSAFE_OUTPUT|ERROR invalid_schema)/);
+    expect(echoing.structuredContent).toBeUndefined();
+    expect(ran).toBe(before);
+  });
+
+  it("a thrown error holding a secret is withheld whole (control: a plain thrown error passes through as an error)", async () => {
+    next = new Error("plain failure");
+    const plain = await call("browser_click", { ref: "e1" });
+    expect(plain.isError).toBe(true);
+    expect(textOf(plain)).toContain("plain failure");
+    next = new Error(`failed at https://x.example/?k=${SECRET}`);
+    const r = await call("browser_click", { ref: "e1" });
+    expect(unsafe(r), textOf(r)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
   });
 });

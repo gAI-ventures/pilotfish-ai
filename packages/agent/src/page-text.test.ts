@@ -1,7 +1,7 @@
 // The words a site uses to say it is still working, and that a search found nothing (agent.ts: SITE_WAIT_TEXT in
 // LOADING_INDICATOR_JS, EMPTY_RESULTS_TEXT in EMPTY_RESULTS_JS). Lines from real pages, and look-alikes that are not.
 import { describe, expect, it } from "vitest";
-import { EMPTY_RESULTS_TEXT, SITE_WAIT_TEXT } from "./agent.js";
+import { EMPTY_RESULTS_TEXT, SITE_WAIT_TEXT, loadingState } from "./agent.js";
 
 describe("SITE_WAIT_TEXT: the site says it is still working", () => {
   it.each([
@@ -52,4 +52,28 @@ describe("EMPTY_RESULTS_TEXT: a search or filter that found nothing", () => {
     "Nothing beats a fresh pizza",
     "No reviews yet",
   ])("leaves %j alone", (t) => expect(EMPTY_RESULTS_TEXT.test(t)).toBe(false));
+});
+
+describe("loadingState: what one read of the loading indicators means (16 Nov)", () => {
+  const tab1 = "T1\nexample.com\n";
+  const tab2 = "T2\nexample.com\n";
+  it("a failed read is unknown: nothing finished, no exemption ends", () => {
+    const stuck = new Set([`${tab1}Loading results`]);
+    expect(loadingState(null, stuck, tab1)).toEqual({ active: [], exempt: [], retire: [], unknown: true });
+  });
+  it("a label still in view stays exempt, even behind a new operation; another indicator beside it is waited for", () => {
+    const stuck = new Set([`${tab1}Loading results`]);
+    expect(loadingState("Loading results\nFetching results", stuck, tab1)).toEqual({ active: ["Fetching results"], exempt: ["Loading results"], retire: [], unknown: false });
+  });
+  it("an exempt label seen gone is retired, so the next search's indicator of that label is waited for", () => {
+    const stuck = new Set([`${tab1}Fetching results`, `${tab1}Loading results`]);
+    const s = loadingState("Loading results", stuck, tab1);
+    expect(s.retire).toEqual([`${tab1}Fetching results`]);
+    expect(s.exempt).toEqual(["Loading results"]);
+  });
+  it("an exemption is its tab's: the same label in another tab is waited for, and that tab's read retires nothing of tab 1", () => {
+    const stuck = new Set([`${tab1}Loading results`]);
+    expect(loadingState("Loading results", stuck, tab2)).toEqual({ active: ["Loading results"], exempt: [], retire: [], unknown: false });
+    expect(loadingState("", stuck, tab2).retire).toEqual([]);
+  });
 });

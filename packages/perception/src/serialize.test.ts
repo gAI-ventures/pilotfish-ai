@@ -2,7 +2,7 @@
 // covers real snapshots).
 import { describe, expect, it } from "vitest";
 import type { FrameSession, Rect } from "@pilotfish/browser";
-import { controlStates, findInSnapshot, findScored, serializeSnapshot } from "./serialize.js";
+import { controlStates, describeNode, findInSnapshot, findScored, serializeSnapshot } from "./serialize.js";
 import { formatEvidence } from "./evidence.js";
 import { nodeKey, type SnapNode, type Snapshot } from "./snapshot.js";
 
@@ -425,6 +425,122 @@ describe("formatEvidence: shown", () => {
   });
 });
 
+describe("roleTags: shorter markup, the same facts (17 Nov)", () => {
+  const page = () =>
+    S([
+      I("div", { role: "button", "aria-haspopup": "true" }, ["Departure"], { role: "button", name: "Departure" }),
+      I("div", { role: "tab", "aria-haspopup": "dialog" }, ["Cheapest from ₹9,490"], { role: "tab", name: "Cheapest from ₹9,490", selected: true }),
+      I("a", { href: "/flights", role: "link" }, ["Flights"], { role: "link", name: "Flights" }),
+      I("input", { role: "combobox", type: "text", placeholder: "Where from?" }, [], { role: "combobox", name: "Where from?", value: "Delhi" }),
+      I("button", { role: "tab" }, ["Best"], { role: "tab", name: "Best" }),
+      I("td", { role: "gridcell" }, ["1"], { role: "gridcell", name: "Tuesday, December 1" }),
+    ]);
+  const opts = { compactAttrs: true, compactMarkup: true } as const;
+  it("a generic tag with a page role prints as the role; a role the tag has is dropped; haspopup is short", () => {
+    const out = serializeSnapshot(page(), { ...opts, roleTags: true });
+    expect(out).toMatch(/\[e\d+\]<@button haspopup>Departure/);
+    expect(out).toMatch(/\[e\d+\]<@tab haspopup=dialog selected>Cheapest from ₹9,490/);
+    expect(out).toMatch(/\[e\d+\]<a href="\/flights">Flights/);
+    // A native tag with another role keeps both; a table cell is not a generic tag.
+    expect(out).toMatch(/\[e\d+\]<input [^\n]*role="combobox"/);
+    expect(out).toMatch(/\[e\d+\]<button role="tab">Best/);
+    expect(out).toMatch(/\[e\d+\]<td role="gridcell"/);
+    expect(out).not.toContain('<div role=');
+    expect(out).not.toContain("aria-haspopup");
+  });
+  it("a native button and an element the page made a button print differently", () => {
+    const out = serializeSnapshot(
+      // Explicit rects: the builder's shared row counter (other tests' layouts) is left as it was.
+      S([
+        I("button", {}, ["Native"], { role: "button", name: "Native", rect: { x: 20, y: 20, width: 280, height: 24 } }),
+        I("div", { role: "button", tabindex: "0" }, ["Scripted"], { role: "button", name: "Scripted", rect: { x: 20, y: 50, width: 280, height: 24 } }),
+      ]),
+      { compactAttrs: true, compactMarkup: true, roleTags: true },
+    );
+    const lines = out.split("\n");
+    expect(lines.find((l) => l.includes("Native"))).toMatch(/\]<button>Native$/);
+    expect(lines.find((l) => l.includes("Scripted"))).toMatch(/\]<@button>Scripted$/);
+  });
+  it("ambiguous roles keep the old markup: custom, several, presentational; a native tag keeps its own word", () => {
+    const out = serializeSnapshot(
+      S([
+        I("div", { role: "fancybutton" }, ["Custom"], { name: "Custom" }),
+        I("div", { role: "button link" }, ["Two roles"], { name: "Two roles" }),
+        I("span", { role: "presentation", tabindex: "0" }, ["Presentational"], { name: "Presentational" }),
+        I("div", { role: "none", tabindex: "0" }, ["None"], { name: "None" }),
+        I("a", { href: "/x", role: "button" }, ["Link as button"], { role: "button", name: "Link as button" }),
+      ]),
+      { compactAttrs: true, compactMarkup: true, roleTags: true },
+    );
+    expect(out).toContain('<div role="fancybutton">Custom');
+    expect(out).toContain('<div role="button link">Two roles');
+    expect(out).toContain('<span role="presentation">Presentational');
+    expect(out).toContain('<div role="none">None');
+    expect(out).toContain('<a href="/x" role="button">Link as button');
+  });
+  it("the same refs, words, values and states in the same order; shorter; without the option nothing changes", () => {
+    const snap = page();
+    const before = serializeSnapshot(snap, opts);
+    const after = serializeSnapshot(snap, { ...opts, roleTags: true });
+    expect(before).toContain('<div role="button" aria-haspopup="true">Departure');
+    const facts = (s: string) => s.split("\n").map((l) => [l.match(/\[e\d+\]/)?.[0], l.replace(/<[^>]*>/, "").trim(), /selected/.test(l), l.match(/value="[^"]*"/)?.[0]]);
+    expect(facts(after)).toEqual(facts(before));
+    expect(after.length).toBeLessThan(before.length);
+    expect(serializeSnapshot(snap, { ...opts, roleTags: false })).toBe(before);
+  });
+  it("describeNode (evidence and find lines) uses the same markup only when asked", () => {
+    const snap = page();
+    const first = [...snap.byRef.values()][0]!;
+    expect(describeNode(first, "https://x.example/")).toContain('<div role="button" aria-haspopup="true">Departure</div>');
+    expect(describeNode(first, "https://x.example/", true)).toContain("<@button haspopup>Departure</@button>");
+  });
+});
+
+describe("formatEvidence: new tabs the list leaves out (17 Nov)", () => {
+  const filters = ["[e16]<button>1</button>", "[e777]<button>All filters</button>", "[e778]<button>Stops</button>", "[e779]<button>Airlines</button>", "[e780]<button>Bags</button>"];
+  const tabs = ['[e842]<div role="tab" selected>Best</div>', '[e843]<div role="tab">Cheapest from ₹9,584</div>', '[e850]<div role="tab">Fastest</div>', '[e851]<div role="tab">Greenest</div>', '[e852]<div role="tab">Earliest</div>'];
+  const ev = (over: Record<string, unknown>) => ({
+    changed: true, navigated: true, urlBefore: "https://flights.example/", urlAfter: "https://flights.example/search", titleBefore: "F", titleAfter: "Results",
+    dialogs: [], valueChanges: [], stateChanges: [], scrollDelta: { x: 0, y: 0 }, focusedBefore: null, focusedAfter: null,
+    added: [...filters, ...tabs].slice(0, 10), addedCount: 224, removed: [], removedCount: 0, newText: [], network: { requests: 3, failed: 0 },
+    ...over,
+  }) as unknown as Parameters<typeof formatEvidence>[0];
+  const without = (out: string) => out.split("\n").filter((l) => !l.startsWith("- ") || !l.includes("new tab(s) not listed above")).join("\n");
+
+  it("(a) more unlisted tabs than it names: the first three by description, the rest counted", () => {
+    const out = formatEvidence(ev({ addedTabs: tabs, addedTabCount: 7 }));
+    expect(out).toContain(`- 7 new tab(s) not listed above: ${tabs.slice(0, 3).join(" ; ")} (+4 more)`);
+    // The list of new elements is the same first five as before.
+    expect(out).toContain(`- 224 new interactive element(s): ${filters.join(" ; ")}\n`);
+  });
+  it("(b) no unlisted tabs: no line, even with unlisted elements of other roles", () => {
+    const none = ev({});
+    expect(formatEvidence(none)).not.toContain("new tab(s)");
+    const otherRoles = ev({ added: [...filters, '[e900]<select role="combobox">Sort by</select>', '[e901]<div role="option">Price</div>'] });
+    expect(formatEvidence(otherRoles)).not.toContain("new tab(s)");
+  });
+  it("(c) a tab already listed, or on the screen printed with the evidence, is not repeated", () => {
+    const listedTab = ev({ added: [tabs[1], ...filters.slice(0, 4), tabs[0]], addedTabs: [tabs[1], tabs[0]], addedTabCount: 2 });
+    const out = formatEvidence(listedTab);
+    expect(out).toContain(`- 1 new tab(s) not listed above: ${tabs[0]}`);
+    expect(out.split(tabs[1]!).length - 1).toBe(1);
+    const allListed = ev({ added: [tabs[1], ...filters.slice(0, 4)], addedTabs: [tabs[1]], addedTabCount: 1 });
+    expect(formatEvidence(allListed)).not.toContain("new tab(s)");
+    const onScreen = ev({ addedTabs: [tabs[0], tabs[1]], addedTabCount: 2 });
+    expect(formatEvidence(onScreen, { shown: "[e842]<div role=tab selected>Best\n[e843]<div role=tab>Cheapest from ₹9,584" })).not.toContain("new tab(s)");
+  });
+  it("(d) everything else is byte for byte what it was without the tabs; lists: false adds nothing", () => {
+    const withTabs = ev({ addedTabs: tabs, addedTabCount: 5 });
+    const before = ev({});
+    for (const opts of [{}, { compactUrls: true }, { shown: "[e16]<button>1" }]) {
+      const out = formatEvidence(withTabs, opts);
+      expect(out).toContain("new tab(s) not listed above");
+      expect(without(out)).toBe(formatEvidence(before, opts));
+    }
+    expect(formatEvidence(withTabs, { lists: false })).toBe(formatEvidence(before, { lists: false }));
+  });
+});
+
 describe("formatEvidence: server requests", () => {
   const base = {
     changed: true, navigated: false, urlBefore: "https://travel.example/", urlAfter: "https://travel.example/", titleBefore: "T", titleAfter: "T",
@@ -500,5 +616,59 @@ describe("serializeSnapshot: table rows on one line (9 Nov, BBC's league table)"
     expect(serializeSnapshot(snap)).toBe(`<h1>Shop</h1>
 Hello
 [${[...snap.byRef.keys()][0]}]<a href="/x">Go</a>`);
+  });
+});
+
+describe("a suggestion's stacked parts (16 Nov: Booking printed \"North Goa India\" for a name over its place)", () => {
+  const block = { __block: "1" };
+  const listbox = (...options: SnapNode[]) =>
+    S([E("div", {}, options, { role: "listbox", name: "Suggestions" })]);
+  const option = (children: Child[]) => I("li", {}, children, { role: "option" });
+  it("keeps a name and the place under it apart, and inline markup in one line together", () => {
+    const text = serializeSnapshot(
+      listbox(
+        option([E("div", block, ["North Ridge"]), E("div", block, ["Westland"])]),
+        option([E("div", block, ["North ridge"]), E("div", block, ["Lakes (North Ridge), Westland"])]),
+        option([E("div", block, [E("b", {}, ["North"]), " Ridge Inn"])]),
+      ),
+    );
+    expect(text).toContain("North Ridge · Westland");
+    expect(text).toContain("North ridge · Lakes (North Ridge), Westland");
+    expect(text).toContain("North Ridge Inn");
+    expect(text).not.toContain("North · Ridge Inn");
+  });
+  it("keeps parts side by side on one row (flex items) as one phrase: a line break is a layout fact, not a box kind", () => {
+    const row = (x: number) => ({ rect: { x, y: 300, width: 60, height: 20 } });
+    const text = serializeSnapshot(listbox(option([E("div", block, ["Blue"], row(20)), E("div", block, ["shirt"], row(90))])));
+    expect(text).toContain("Blue shirt");
+    expect(text).not.toContain("·");
+  });
+  it("sets no part apart where a box has no position", () => {
+    const text = serializeSnapshot(listbox(option([E("div", block, ["North Ridge"]), E("div", block, ["Westland"], { rect: undefined })])));
+    expect(text).toContain("North Ridge Westland");
+  });
+  it("cuts a long stacked option at the cap like any text, the separator counted in", () => {
+    const long = "Lakes district of the northern ridge, Westland province, far north coast region";
+    const text = serializeSnapshot(listbox(option([E("div", block, ["North Ridge"]), E("div", block, [long])])), { maxTextChars: 40 });
+    const line = text.split("\n").find((l) => /\[e\d+\]<li/.test(l))!;
+    const inner = line.slice(line.indexOf(">") + 1).replace(/<\/li>$/, "");
+    expect(inner, line).toMatch(/^North Ridge · Lakes/);
+    expect(inner.endsWith("…"), line).toBe(true);
+    expect([...inner].length).toBeLessThanOrEqual(40);
+  });
+  it("leaves other roles' text as it was", () => {
+    const text = serializeSnapshot(S([I("a", { href: "/x" }, [E("div", block, ["Hotel Aurora"]), E("div", block, ["9.1"])], { role: "link" })]));
+    expect(text).not.toContain("·");
+  });
+});
+
+describe("capture metadata is not page evidence (17 Nov review)", () => {
+  it("find never matches a node by the capture's own flags", () => {
+    const flagged = (label: string, meta: Record<string, string>) => I("button", { ...meta }, [label], { role: "button", name: label });
+    const s = S([flagged("Apply", { __block: "1", __clip: "1" }), flagged("Close", { __cursor: "pointer", __pe: "none" }), I("button", { "data-count": "1" }, ["Page"], { role: "button", name: "Page" })]);
+    const hits = (q: string) => findScored(s, q).map((h) => h.node.name);
+    expect(hits("1")).toEqual(["Page"]); // the page's own data-count="1" still matches; the capture's "1" does not
+    expect(hits("pointer")).toEqual([]);
+    expect(hits("none")).toEqual([]);
   });
 });

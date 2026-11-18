@@ -8,30 +8,73 @@ import { createHash } from "node:crypto";
 import type { Page } from "@pilotfish/browser";
 import type { Protocol } from "@pilotfish/cdp";
 import { CLEARANCE_COOKIES, type CookieInfo, type InterruptInput, type InterruptSnapshot, type MainResponse } from "./interrupts.js";
+import { committedLoader } from "./snapshot.js";
+
+/**
+ * gatherInterruptInput was asked to read for one document (`document`) and the page, by its own account, was not on it
+ * before or after the whole gather: what was read (address, frames, cookies) may be another document's. `seen`: the
+ * page named another document (else it could not say which it was on).
+ */
+export class DocumentChangedError extends Error {
+  constructor(readonly seen: boolean) {
+    super(seen ? "the page committed another document during the read" : "the page could not say which document it was on");
+    this.name = "DocumentChangedError";
+  }
+}
 
 export interface MainResponseTracker {
-  /** The last main-frame document response (after redirects), or null before the first one. */
+  /**
+   * The response (after redirects) of the last main-frame document whose commit the tracker saw. Null before it saw a
+   * commit (a response alone is a document still loading, or one that never commits: a 204, a download), and when it
+   * saw none for that document.
+   */
   readonly latest: MainResponse | null;
+  /**
+   * The response of the main-frame document with this loaderId (Page.documentId, Snapshot.document): what a look that
+   * read that document is classified with, whatever loaded since. Null when the tracker did not see it (attached after
+   * it, or no longer kept).
+   */
+  forDocument(loaderId: string): MainResponse | null;
   dispose(): void;
 }
 
+/** Document responses the tracker keeps (a look is a few seconds old at most). */
+const TRACKED_DOCS = 16;
+
 /**
- * Remember the main frame's latest document response. Attach before
- * navigating; the page's session already has Network enabled.
+ * Remember the main frame's document responses by the document they load (its loaderId). Attach before navigating; the
+ * page's session already has Network and Page enabled.
+ *
+ * A document's response comes in before its commit (3-10 ms locally, longer on a loaded machine), and a look reads the
+ * page's elements first and the response after: taken as "the last response", a look at HUMAN's block page as its
+ * script reloaded it after a passed hold paired the block page's words with the next document's 200, and read as a
+ * Press & Hold to press, with none drawn, instead of HUMAN's block page (fifth review, 17 Nov).
  */
 export function trackMainResponse(page: Page): MainResponseTracker {
-  let latest: MainResponse | null = null;
-  const off = page.session.on("Network.responseReceived", (e: Protocol.Network.ResponseReceivedEvent) => {
+  const responses = new Map<string, MainResponse>();
+  // The last main-frame document committed, by event order.
+  let committed: string | null = null;
+  const offResponse = page.session.on("Network.responseReceived", (e: Protocol.Network.ResponseReceivedEvent) => {
     if (e.type !== "Document" || e.frameId !== page.main.frameId) return;
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(e.response.headers ?? {})) headers[k.toLowerCase()] = String(v);
-    latest = { url: e.response.url, status: e.response.status, headers };
+    responses.delete(e.loaderId);
+    responses.set(e.loaderId, { url: e.response.url, status: e.response.status, headers });
+    if (responses.size > TRACKED_DOCS) responses.delete(responses.keys().next().value!);
   });
+  const offCommit = page.session.on("Page.frameNavigated", (e: Protocol.Page.FrameNavigatedEvent) => {
+    if (e.frame.id === page.main.frameId && !e.frame.parentId) committed = e.frame.loaderId;
+  });
+  const forDocument = (loaderId: string): MainResponse | null => responses.get(loaderId) ?? null;
   return {
     get latest() {
-      return latest;
+      return committed ? forDocument(committed) : null;
     },
-    dispose: off,
+    forDocument,
+    dispose: () => {
+      offResponse();
+      offCommit();
+    },
   };
 }
 
@@ -66,12 +109,26 @@ export interface GatherOptions {
   /** The main document response, or a tracker that has been watching the page. */
   response?: MainResponse | null;
   tracker?: MainResponseTracker;
+  /**
+   * The document the snapshot read (Snapshot.document's loaderId): the tracker's response is that document's. Null: the
+   * look is bound to no document, and no response is taken (never the last one by default).
+   */
+  document?: string | null;
   fedcmDialog?: InterruptInput["fedcmDialog"];
   httpAuthRequired?: InterruptInput["httpAuthRequired"];
 }
 
 /** Everything `classifyInterruption` reads, from a live page. Cookie values are reduced to short hashes (clearance cookies only). */
 export async function gatherInterruptInput(page: Page, opts: GatherOptions = {}): Promise<InterruptInput> {
+  // Read for one document: the page's own account of its committed document must name it before and after the whole
+  // read, else nothing read here is that document's for sure (fifth review, v6: Node may hear of a commit only after).
+  const bound = typeof opts.document === "string" ? opts.document : null;
+  const confirm = async () => {
+    if (bound === null) return;
+    const now = await committedLoader(page);
+    if (now !== bound) throw new DocumentChangedError(now !== undefined);
+  };
+  await confirm();
   const [frames, cookies] = await Promise.all([
     frameUrls(page).catch(() => [page.url]),
     page.session
@@ -84,8 +141,9 @@ export async function gatherInterruptInput(page: Page, opts: GatherOptions = {})
     frameUrls: frames,
     cookies,
     navigatedAt: page.lastNavigationAt,
-    response: opts.response ?? opts.tracker?.latest ?? null,
+    response: opts.response ?? (opts.document !== undefined ? (opts.document ? opts.tracker?.forDocument(opts.document) : null) : opts.tracker?.latest) ?? null,
   };
+  await confirm();
   if (opts.snapshot) input.snapshot = opts.snapshot;
   if (opts.fedcmDialog) input.fedcmDialog = opts.fedcmDialog;
   if (opts.httpAuthRequired) input.httpAuthRequired = opts.httpAuthRequired;

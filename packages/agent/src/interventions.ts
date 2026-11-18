@@ -7,7 +7,7 @@
 // never-automate host.
 
 import type { Page } from "@pilotfish/browser";
-import { classifyInterruption, gatherInterruptInput, isResolved, trackMainResponse, type InterruptInput, type Interruption, type MainResponseTracker, type Snapshot } from "@pilotfish/perception";
+import { captureSnapshot, classifyInterruption, DocumentChangedError, gatherInterruptInput, isResolved, trackMainResponse, type InterruptInput, type Interruption, type MainResponseTracker, type Snapshot } from "@pilotfish/perception";
 
 /** What the host shows the human. */
 export interface InterventionRequest {
@@ -169,10 +169,94 @@ export function responseTracker(page: Page): MainResponseTracker {
   return t;
 }
 
-/** Classify the current page of a tab. ~2-5 ms for the classifier plus two cheap CDP calls. */
+/**
+ * A look that cannot be bound to one document: its capture was unsettled (Snapshot.unsettled), the tab did not know
+ * its document yet (Snapshot.document null), or the page committed another document between the capture and the end
+ * of reading the rest (the response, the address, frames, cookies). It is not classified.
+ */
+export class UnboundLookError extends Error {
+  constructor(
+    url: string,
+    readonly why: "unsettled" | "unknown_document" | "changed" | "unconfirmed",
+  ) {
+    super(`${why === "unknown_document" ? "the tab's document was not known yet" : why === "unconfirmed" ? "the page could not confirm which document it was on" : "the page loaded another document while it was read"} (${url}); not classified`);
+    this.name = "UnboundLookError";
+  }
+}
+
+/**
+ * Whether the page is still on the document `snap` was bound to (Snapshot.documentSeq and document: an event count and
+ * a loaderId, never a time). State read from a snapshot (a target to click, a URL, a password field) is used only
+ * while this holds. Snapshots not made by captureSnapshot carry no binding and always pass.
+ */
+export function onDocumentOf(page: Page, snap: Snapshot): boolean {
+  return snap.documentSeq === undefined || (page.documentSeq === snap.documentSeq && page.documentId === snap.document);
+}
+
+/**
+ * Classify the current page of a tab. ~2-5 ms for the classifier plus two cheap CDP calls. Everything read is of the
+ * document the snapshot was bound to: the response is that document's (Snapshot.document), and the page must still be
+ * on it before and after the rest is read (address, frames, cookies), else UnboundLookError, as for a snapshot bound to
+ * no document. Callers use readPage, which takes that as "unknown" and never as a page with nothing on it.
+ */
 export async function classifyPage(page: Page, snap: Snapshot): Promise<{ result: Interruption; input: InterruptInput }> {
-  const input = await gatherInterruptInput(page, { snapshot: snap as unknown as InterruptInput["snapshot"], tracker: responseTracker(page) });
+  if (snap.unsettled) throw new UnboundLookError(snap.url, "unsettled");
+  if (snap.document === null) throw new UnboundLookError(snap.url, "unknown_document");
+  if (!onDocumentOf(page, snap)) throw new UnboundLookError(snap.url, "changed");
+  // The gather itself asks the page, before and after, whether it is still on the snapshot's document.
+  const input = await gatherInterruptInput(page, { snapshot: snap as unknown as InterruptInput["snapshot"], tracker: responseTracker(page), ...(snap.document !== undefined ? { document: snap.document } : {}) }).catch((e: unknown) => {
+    if (e instanceof DocumentChangedError) throw new UnboundLookError(snap.url, e.seen ? "changed" : "unconfirmed");
+    throw e;
+  });
+  if (!onDocumentOf(page, snap)) throw new UnboundLookError(snap.url, "changed");
   return { result: classifyInterruption(input), input };
+}
+
+/**
+ * What a look at the page found. `known`: the classifier's reading of one document; `snap` and `input` (its URL, frames,
+ * cookies, response) are of that same document, and `snap` may be a newer capture than the one passed: a caller takes
+ * everything it uses from this reading (never the snapshot it passed in). `unknown`: no single document could be read
+ * (`why`; `changed` when a document change was actually seen during the tries); it is no reading at all, never the
+ * category "none": a caller keeps what it knew before, and says the page could not be verified rather than that it
+ * needs nobody.
+ */
+export type PageRead =
+  | { state: "known"; result: Interruption; input: InterruptInput; snap: Snapshot }
+  | { state: "unknown"; why: string; changed: boolean; snap: Snapshot };
+
+/** Captures readPage takes again, at most, when the document changed under a look. */
+export const READ_TRIES = 3;
+
+/**
+ * Words for a look that could not be verified, for the model or a client: a document change is named only when one
+ * was seen (`changed`); otherwise only that the page could not be read as one document.
+ */
+export function unreadNote(host: string, changed: boolean): string {
+  return `Could not verify the page on ${host || "this tab"} for a sign-in, a code or a bot check: ${changed ? "it loaded another document while it was read" : "it could not be read as one document"}.`;
+}
+
+/**
+ * Classify the page in `snap`, as one document: a look the page's document changed under (UnboundLookError "changed")
+ * or bound to no document is captured again, up to READ_TRIES looks in all; then, or for any other failure, it is
+ * "unknown".
+ */
+export async function readPage(page: Page, snap: Snapshot): Promise<PageRead> {
+  let cur = snap;
+  // A document change seen on any try: the only case the words may name one.
+  let changed = false;
+  for (let n = 1; ; n++) {
+    try {
+      const { result, input } = await classifyPage(page, cur);
+      return { state: "known", result, input, snap: cur };
+    } catch (e) {
+      const why = e instanceof UnboundLookError ? e.why : e instanceof Error ? e.message : String(e);
+      if (e instanceof UnboundLookError && (e.why === "changed" || e.why === "unsettled")) changed = true;
+      if (!(e instanceof UnboundLookError) || n >= READ_TRIES || page.closed) return { state: "unknown", why, changed, snap: cur };
+    }
+    const next = await captureSnapshot(page, { viewportBand: 1, previous: cur }).catch(() => null);
+    if (!next) return { state: "unknown", why: "capture failed", changed, snap: cur };
+    cur = next;
+  }
 }
 
 export { isResolved };

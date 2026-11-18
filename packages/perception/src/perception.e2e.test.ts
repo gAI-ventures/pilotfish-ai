@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { launch, type Browser, type Page } from "@pilotfish/browser";
-import { captureSnapshot, serializeSnapshot, findInSnapshot, handleFor, resolveHandle, diffSnapshots, formatEvidence, pageText, textOf, describeNode, controlStates, urlParams } from "./index.js";
+import { captureSnapshot, serializeSnapshot, findInSnapshot, handleFor, resolveHandle, diffSnapshots, formatEvidence, pageText, textOf, describeNode, controlStates, urlParams, nodeKey, type Snapshot } from "./index.js";
 
 const E2E = process.env.PILOTFISH_E2E === "1";
 
@@ -50,6 +50,22 @@ describe.skipIf(!E2E)("perception e2e", () => {
 <div style="position:absolute;top:500px;height:0;overflow:hidden"><button>Collapsed item</button><p>Collapsed text</p></div>
 </body></html>`);
       // Single-character controls next to letter-by-letter animated text (one <span> per character).
+      // A page that hides its background from assistive tech while a listbox or a modal dialog is open (17 Nov), with two
+      // options told apart only by their aria-label, and (?modal) a page that loads with its modal already open.
+      if (req.url?.startsWith("/hidden")) return void res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Trips</title></head><body>
+<header><nav aria-label="Main"><a href="/" aria-label="Home">Logo</a><button>Sign in</button></nav></header>
+<main id="bg"><h1>Find a trip</h1>
+<div role="combobox" aria-haspopup="listbox" aria-expanded="false" tabindex="0" id="cb" aria-label="Ticket type. Round trip">Round trip</div>
+<input aria-label="Where from?" value="Delhi"><label for="to">Where to?</label><input id="to" value="">
+<ul role="listbox" aria-label="Places"><li role="option" tabindex="0" aria-label="North Goa, region">North Goa</li><li role="option" tabindex="0" aria-label="North Goa, city">North Goa</li></ul>
+<button id="search">Search</button><span id="lbl">Fare alerts</span><button aria-labelledby="lbl">🔔</button>
+<button id="mix">Book<span style="display:none"> hidden extra</span></button>
+<button id="g1" style="display:none">Ghost none</button><button id="g2" style="opacity:0">Ghost faded</button><button id="g3" hidden>Ghost attr</button>
+</main>
+<ul id="lb" role="listbox" aria-label="Ticket types" hidden><li role="option">Round trip</li><li role="option">One way</li></ul>
+<dialog id="dlg"><p>Save 10% when you sign in</p><button onclick="this.closest('dialog').close()">Dismiss</button></dialog>
+${req.url.includes("modal") ? "<script>document.getElementById('dlg').showModal()</script>" : ""}
+</body></html>`);
       if (req.url === "/letters") return void res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Dates</title></head><body>
 <div id="days">${Array.from({ length: 31 }, (_, i) => `<button type="button">${i + 1}</button>`).join("")}</div>
 <nav id="pager"><button>‹</button>${Array.from({ length: 6 }, (_, i) => `<button>${i + 1}</button>`).join("")}<button>›</button></nav>
@@ -373,6 +389,116 @@ describe.skipIf(!E2E)("perception e2e", () => {
     expect(text.match(/\[e\d+\]<a href="\/p\/lamp[^"]*"/g)).toEqual([expect.stringMatching(/href="\/p\/lamp"/)]);
     expect(text).toMatch(/\[e\d+\]<a href="\/p\/lamp">Blue desk lamp<\/a>/);
     expect(text).toMatch(/^\s*\(128 reviews\)$/m);
+  });
+
+  describe("elements the page hides from assistive tech (17 Nov)", () => {
+    // The tests after these read the shop page.
+    afterAll(async () => void (await page.navigate(origin + "/")));
+    const keysOf = (s: Snapshot) => new Map([...s.byRef].map(([r, n]) => [r, nodeKey(n)]));
+    const hide = `document.querySelector('header').setAttribute('aria-hidden','true'); document.getElementById('bg').setAttribute('aria-hidden','true');
+      document.getElementById('lb').hidden = false; document.getElementById('cb').setAttribute('aria-expanded','true')`;
+    const show = `document.querySelector('header').removeAttribute('aria-hidden'); document.getElementById('bg').removeAttribute('aria-hidden');
+      document.getElementById('lb').hidden = true; document.getElementById('cb').setAttribute('aria-expanded','false')`;
+
+    it("keeps refs, names and keys while a listbox hides the background, and reports only the real change", async () => {
+      await page.navigate(origin + "/hidden");
+      const a = await captureSnapshot(page, { viewportBand: 1 });
+      await page.main.evaluate(hide);
+      const b = await captureSnapshot(page, { viewportBand: 1, previous: a });
+      // Every element of the first capture keeps its ref and its structural key.
+      for (const [ref, key] of keysOf(a)) expect(nodeKey(b.byRef.get(ref)!), ref).toBe(key);
+      expect([...b.byRef.values()].filter((n) => !a.byRef.has(n.ref!)).map((n) => n.role)).toEqual(["listbox", "option", "option"]);
+      const ev = diffSnapshots(a, b);
+      expect(ev.removedCount).toBe(0);
+      expect(ev.addedCount).toBe(3);
+      expect(ev.stateChanges.some((s) => /expanded: false → true/.test(s))).toBe(true);
+      // The background prints as it did, but for the line whose state changed.
+      const strip = (t: string) => t.split("\n").map((l) => l.replace(/^(\t*)\*/, "$1"));
+      const before = strip(serializeSnapshot(a, { compactAttrs: true, compactMarkup: true }));
+      const after = new Set(strip(serializeSnapshot(b, { compactAttrs: true, compactMarkup: true })));
+      expect(before.filter((l) => !after.has(l)).map((l) => l.trim().slice(0, 4))).toEqual(["[e3]"]);
+      // And back.
+      await page.main.evaluate(show);
+      const c = await captureSnapshot(page, { viewportBand: 1, previous: b });
+      const back = diffSnapshots(b, c);
+      expect(back.addedCount).toBe(0);
+      expect(back.removedCount).toBe(3);
+      for (const [ref, key] of keysOf(a)) expect(nodeKey(c.byRef.get(ref)!), ref).toBe(key);
+    });
+
+    it("never merges two hidden options told apart only by their aria-label; each keeps its ref on its own node", async () => {
+      await page.navigate(origin + "/hidden");
+      const a = await captureSnapshot(page, { viewportBand: 1 });
+      await page.main.evaluate(hide);
+      const b = await captureSnapshot(page, { viewportBand: 1, previous: a });
+      await page.main.evaluate(show);
+      const c = await captureSnapshot(page, { viewportBand: 1, previous: b });
+      await page.main.evaluate(hide);
+      // Without a previous capture too (the names then come from the DOM).
+      const fresh = await captureSnapshot(page, { viewportBand: 1 });
+      const twins = (s: Snapshot) => [...s.byRef.values()].filter((n) => n.role === "option" && textOf(n) === "North Goa");
+      for (const s of [a, b, c, fresh]) {
+        expect(twins(s).map((n) => n.name)).toEqual(["North Goa, region", "North Goa, city"]);
+        expect(new Set(twins(s).map((n) => nodeKey(n))).size).toBe(2);
+      }
+      // The same ref on the same DOM node, by name, through open, hidden and shown again.
+      const assoc = (s: Snapshot) => twins(s).map((n) => `${n.name}=${n.ref}@${n.backendNodeId}`);
+      expect(assoc(b)).toEqual(assoc(a));
+      expect(assoc(c)).toEqual(assoc(a));
+      expect(new Set(twins(a).map((n) => n.ref)).size).toBe(2);
+      expect(fresh.nodes.filter((n) => n.axHidden).length).toBeGreaterThan(0);
+    });
+
+    it("keeps layout and the accessibility channel apart: hidden content never comes back, names use visible text only", async () => {
+      await page.navigate(origin + "/hidden");
+      const a = await captureSnapshot(page, { viewportBand: 1 });
+      await page.main.evaluate(hide);
+      const b = await captureSnapshot(page, { viewportBand: 1, previous: a });
+      const fresh = await captureSnapshot(page, { viewportBand: 1 });
+      for (const s of [a, b, fresh]) {
+        const byId = (id: string) => s.nodes.find((n) => n.attrs["id"] === id)!;
+        // display:none, opacity:0 and [hidden] stay invisible with no ref, whatever the accessibility channel says.
+        for (const g of ["g1", "g2", "g3"]) {
+          expect(byId(g).visible, `${g}`).toBe(false);
+          expect(byId(g).ref, `${g}`).toBeUndefined();
+        }
+        // aria-hidden is no visual state: the background stays visible and keeps its refs.
+        expect(byId("search").visible).toBe(true);
+        expect(byId("search").ref).toBeDefined();
+        // A name read from the DOM leaves out text that is not shown.
+        expect(byId("mix").name).toBe("Book");
+      }
+      expect(b.nodes.find((n) => n.attrs["id"] === "mix")!.axHidden).toBe(true);
+      expect(fresh.nodes.find((n) => n.attrs["id"] === "mix")!.axHidden).toBe(true);
+      expect(serializeSnapshot(fresh, {})).not.toContain("hidden extra");
+      expect(serializeSnapshot(fresh, {})).not.toContain("Ghost");
+    });
+
+    it("names a hidden element from its label as it is now, not as it was", async () => {
+      await page.navigate(origin + "/hidden");
+      const a = await captureSnapshot(page, { viewportBand: 1 });
+      await page.main.evaluate(`${hide}; document.getElementById('lbl').textContent = 'Price alerts'; document.getElementById('search').setAttribute('aria-label', 'Find flights')`);
+      const b = await captureSnapshot(page, { viewportBand: 1, previous: a });
+      const names = [...b.byRef.values()].map((n) => n.name);
+      expect(names).toContain("Price alerts");
+      expect(names).toContain("Find flights");
+      expect(names).not.toContain("Fare alerts");
+      // The <label for> name of a hidden input.
+      expect(names).toContain("Where to?");
+    });
+
+    it("a modal dialog open at load: closing it reports only the dialog's elements as gone", async () => {
+      await page.navigate(origin + "/hidden?modal");
+      const a = await captureSnapshot(page, { viewportBand: 1 });
+      expect(a.nodes.some((n) => n.axHidden && n.tag === "main")).toBe(true);
+      await page.main.evaluate(`document.querySelector('#dlg button').click()`);
+      const b = await captureSnapshot(page, { viewportBand: 1, previous: a });
+      const ev = diffSnapshots(a, b);
+      // The background named from the DOM while hidden matches what Chromium names it once shown.
+      expect(ev.added).toEqual([]);
+      expect(ev.removedCount).toBe(1);
+      expect(ev.removed[0]).toContain("Dismiss");
+    });
   });
 
   it("extracts readable page text", async () => {

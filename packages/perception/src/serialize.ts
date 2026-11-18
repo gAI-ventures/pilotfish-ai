@@ -11,7 +11,7 @@
 // interactive and scrollable elements carry refs; everything else is context
 // text, collapsed and capped so a typical page lands in the 2–8K token range.
 
-import { inBand, nodeKey, textOf, type SnapNode, type Snapshot } from "./snapshot.js";
+import { inBand, nodeKey, textOf, type SnapNode, type Snapshot, pageAttrs } from "./snapshot.js";
 
 export interface SerializeOptions {
   /** Hard cap on output characters. Default 24_000 (~6K tokens). */
@@ -47,6 +47,14 @@ export interface SerializeOptions {
    * tokens, no word or ref lost.
    */
   compactMarkup?: boolean;
+  /**
+   * Shorter markup for the same facts (17 Nov, the open MCP): an element of a generic tag whose page role says what it
+   * is prints as that role marked `@` (`<div role="button">` as `<@button>`, never as a native `<button>`), a page role
+   * its tag already has is not repeated (`<a role="link">` as `<a>`), and aria-haspopup prints as `haspopup` ("true")
+   * or `haspopup=<value>`. Refs, names, values, states, attributes and order are unchanged. On the saved MCP replies
+   * of 17 Nov (a character simulation): 10-15% fewer characters on Google Flights, under 1% on Amazon and Booking.
+   */
+  roleTags?: boolean;
 }
 
 /** A generated id (framework counters and hashes), not a name a person gave the element. */
@@ -196,14 +204,15 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
       const scroll = n.scrollable ? "|SCROLL|" : "";
       const own = n.tag === "select" ? { text: "", clipped: false } : inlineInfo(n, maxText);
       const inner = own.text;
-      const attrs = attrString(n, inner, opts.compactAttrs ? snap.url : undefined);
-      let line = `${ind}${star}${scroll}[${n.ref}]<${n.tag}${attrs}`;
+      const attrs = attrString(n, inner, opts.compactAttrs ? snap.url : undefined, opts.roleTags);
+      const tag = printedTag(n, opts.roleTags);
+      let line = `${ind}${star}${scroll}[${n.ref}]<${tag}${attrs}`;
       if (n.tag === "select" && n.options) {
         const shown = n.options.slice(0, 8).map((o) => `${o.selected ? "*" : ""}${clip(o.label, 30)}`);
         const more = n.options.length > 8 ? ` …+${n.options.length - 8}` : "";
         line += ` options=[${shown.join(" | ")}${more}]`;
       }
-      line += inner ? `>${inner}${close(n.tag)}` : compact ? ">" : " />";
+      line += inner ? `>${inner}${close(tag)}` : compact ? ">" : " />";
       const before = lines.length;
       push(line);
       if (lines.length > before) {
@@ -434,18 +443,48 @@ function inlineText(n: SnapNode, max: number): string {
   return inlineInfo(n, max).text;
 }
 
+/**
+ * Roles whose text is often drawn as stacked lines: an autocomplete suggestion's name on one line and more text under
+ * it ("Springfield" over "Illinois, United States"). Printed run together, two such lines read as one phrase.
+ */
+const STACKED_ROLES = new Set(["option"]);
+/**
+ * Between two parts of one element's text that the page draws as separate lines: text in another block box than the
+ * text before it, whose box starts at or below the bottom of that text's box. A layout fact only: it says where the
+ * page breaks the line, not what either part means. Boxes side by side (flex items on one row) and inline markup
+ * inside one box stay one phrase, and so does any part whose box has no position.
+ */
+const PART_SEP = "·";
+
 /** An element's own text (`inlineText`) and whether the cap cut it short. */
 function inlineInfo(n: SnapNode, max: number): { text: string; clipped: boolean } {
   // Text content excluding text that belongs to interactive descendants (they render themselves).
   const parts: string[] = [];
+  // In a stacked role, text in another block box than the text before it is another part ("North Goa" · "India"),
+  // never run into one phrase; inline markup inside one block (<b>North</b> Goa) stays one part.
+  const stacked = STACKED_ROLES.has(n.role);
+  const blockOf = (t: SnapNode) => {
+    let p = t.parent;
+    while (p && p !== n && !p.attrs["__block"]) p = p.parent;
+    return p;
+  };
+  const startsBelow = (box: SnapNode | null, prev: SnapNode | null | undefined) =>
+    !!box?.rect && !!prev?.rect && box.rect.y >= prev.rect.y + prev.rect.height - 1;
+  let lastBlock: SnapNode | null | undefined;
   // Collection stops once the raw text passes the cap: what is left out may not be at the end of `t`
   // (whitespace collapses), so a stop counts as cut short whatever the final length.
   let stopped = false;
   const walk = (c: SnapNode) => {
     for (const ch of c.children) {
       if (ch.ref) continue;
-      if (ch.text) parts.push(ch.text);
-      else walk(ch);
+      if (ch.text) {
+        if (stacked && ch.text.trim()) {
+          const block = blockOf(ch);
+          if (parts.length && block !== lastBlock && startsBelow(block, lastBlock)) parts.push(PART_SEP);
+          lastBlock = block;
+        }
+        parts.push(ch.text);
+      } else walk(ch);
       if (parts.join(" ").length > max) {
         stopped = true;
         return;
@@ -458,7 +497,36 @@ function inlineInfo(n: SnapNode, max: number): { text: string; clipped: boolean 
   return { text: clip(t, max), clipped: stopped || t.length > max };
 }
 
-function attrString(n: SnapNode, inner: string, compactFor?: string): string {
+/** Generic tags: the tag word says nothing a page role on it does not say better. */
+const ROLE_TAGGED = new Set(["div", "span", "li", "ul", "ol", "section", "article", "p", "label", "i", "b", "em", "strong", "svg", "g", "nav", "header", "footer", "main", "aside", "figure"]);
+
+/**
+ * WAI-ARIA role names that say what an element is. Only these replace a generic tag: a custom or misspelled role, a
+ * list of roles ("button link"), and presentation/none/generic (which say the element is nothing) keep
+ * `<div role="…">` as before.
+ */
+const ARIA_ROLE_TAGS = new Set([
+  "alert", "alertdialog", "application", "article", "banner", "button", "cell", "checkbox", "columnheader", "combobox",
+  "complementary", "contentinfo", "definition", "dialog", "document", "feed", "figure", "form", "grid", "gridcell",
+  "group", "heading", "img", "link", "list", "listbox", "listitem", "log", "main", "marquee", "math", "menu", "menubar",
+  "menuitem", "menuitemcheckbox", "menuitemradio", "meter", "navigation", "note", "option", "progressbar", "radio",
+  "radiogroup", "region", "row", "rowgroup", "rowheader", "scrollbar", "search", "searchbox", "separator", "slider",
+  "spinbutton", "status", "switch", "tab", "table", "tablist", "tabpanel", "term", "textbox", "timer", "toolbar",
+  "tooltip", "tree", "treegrid", "treeitem",
+]);
+
+/**
+ * The tag word printed for `n` (`roleTags`): a generic tag's page role, marked `@`, when it is one WAI-ARIA role name
+ * (`<@button>`: an element the page made a button, without a native button's behaviour, focus, keys or form role),
+ * else its own tag. A native tag whose role differs in meaning (`<input role="combobox">`, `<button role="tab">`) stays
+ * native and keeps its role attribute.
+ */
+export function printedTag(n: SnapNode, roleTags?: boolean): string {
+  const r = n.attrs["role"];
+  return roleTags && r && ROLE_TAGGED.has(n.tag) && ARIA_ROLE_TAGS.has(r) ? `@${r}` : n.tag;
+}
+
+function attrString(n: SnapNode, inner: string, compactFor?: string, roleTags?: boolean): string {
   const out: string[] = [];
   // A name the text does not say (a form control's, "October 5, 2026" on a calendar cell reading
   // "5", "Close dialog" on "×") is printed once: under the attribute it came from, else as label=""
@@ -468,6 +536,12 @@ function attrString(n: SnapNode, inner: string, compactFor?: string): string {
   for (const k of KEEP_ATTRS) {
     const v = n.attrs[k];
     if (v === undefined || v === "") continue;
+    // roleTags: a role printed as the tag word, or one the tag already has, is not repeated as an attribute.
+    if (roleTags && k === "role" && (printedTag(n, true) !== n.tag || v === tagDefaultRole(n.tag, n.attrs))) continue;
+    if (roleTags && k === "aria-haspopup") {
+      out.push(v === "true" ? "haspopup" : `haspopup=${clip(v, 20)}`);
+      continue;
+    }
     if (k === "id" && v.length > 24) continue; // generated ids are noise
     if (compactFor !== undefined && (k === "aria-controls" || (k === "id" && generatedId(v)))) continue;
     if (k === "href" && (v.trim().startsWith("javascript:") || v === "#")) continue;
@@ -782,7 +856,8 @@ export function findScored(snap: Snapshot, query: string, { limit = 20 } = {}): 
   const hayOf = (n: SnapNode) => {
     let h = hay.get(n);
     if (!h) {
-      const s = `${n.tag} ${n.role} ${n.name} ${textOf(n, 200)} ${Object.values(n.attrs).join(" ")}`.toLowerCase();
+      // The page's own attributes only: the capture's metadata ("1", "pointer", "none") is no evidence to match.
+      const s = `${n.tag} ${n.role} ${n.name} ${textOf(n, 200)} ${pageAttrs(n).map(([, v]) => v).join(" ")}`.toLowerCase();
       h = { tokens: findTokens(s), flat: ` ${findTokens(s).join(" ")} `, name: n.name.trim().toLowerCase() };
       hay.set(n, h);
     }
@@ -879,9 +954,48 @@ export function findScored(snap: Snapshot, query: string, { limit = 20 } = {}): 
 }
 
 /** Render a single node as a one-liner (used by find() results and evidence). */
-export function describeNode(n: SnapNode): string {
+/**
+ * One element as a line: its ref, tag, attributes and text. `compactFor` (the page's address): the attributes as the
+ * compact screen prints them (an href relative to the page with its query elided, no aria-controls or generated ids),
+ * so an element named in evidence reads as its line on the screen does.
+ */
+export function describeNode(n: SnapNode, compactFor?: string, roleTags?: boolean): string {
   const ref = n.ref ? `[${n.ref}]` : "";
   const inner = inlineText(n, 80);
-  const attrs = attrString(n, inner);
-  return `${ref}<${n.tag}${attrs}${inner ? `>${inner}</${n.tag}>` : " />"}`;
+  const attrs = attrString(n, inner, compactFor, roleTags);
+  const tag = printedTag(n, roleTags);
+  return `${ref}<${tag}${attrs}${inner ? `>${inner}</${tag}>` : " />"}`;
+}
+
+/** Roles of an item picked out of a list or a set of tabs, and the roles of what holds such items. */
+const CHOICE_ROLES = new Set(["option", "menuitem", "menuitemradio", "menuitemcheckbox", "tab", "treeitem"]);
+const CHOICE_HOLDERS = new Set(["listbox", "menu", "menubar", "tablist", "tree", "combobox", "grid", "radiogroup"]);
+
+/**
+ * For a ref that is an item of a list (an option, a menu item, a tab, a tree item): its label as the page gives it
+ * (accessible name, else its text), its position among the items of the same role in its list, and the list's name:
+ * `option 2 of 5 in "Suggestions": "North Ridge Lakes"`. Null for anything else, and null when the ref is not in
+ * `snap` (then no line is said). It describes what the ref named in that snapshot, the one taken before the action; it
+ * is no proof of what a click reached beyond the checks the click itself makes (the ref's staleness check, its hit
+ * test). Facts the page shows, nothing inferred about what the item stands for.
+ */
+export function choiceOf(snap: Snapshot | null | undefined, ref: string): string | null {
+  const n = snap?.byRef.get(ref);
+  if (!n || !CHOICE_ROLES.has(n.role)) return null;
+  let holder: SnapNode | null = n.parent;
+  while (holder && !CHOICE_HOLDERS.has(holder.role)) holder = holder.parent;
+  const label = clip((n.name || textOf(n, 300)).replace(/\s+/g, " ").trim(), 160);
+  if (!holder) return `${n.role}: "${label}"`;
+  const items: SnapNode[] = [];
+  const walk = (x: SnapNode) => {
+    for (const c of x.children) {
+      if (c.nodeType !== 1) continue;
+      if (c.role === n.role && c.visible) items.push(c);
+      else if (!CHOICE_HOLDERS.has(c.role)) walk(c);
+    }
+  };
+  walk(holder);
+  const at = items.indexOf(n);
+  const name = holder.name ? ` in "${clip(holder.name, 60)}"` : "";
+  return at >= 0 ? `${n.role} ${at + 1} of ${items.length}${name}: "${label}"` : `${n.role}${name}: "${label}"`;
 }

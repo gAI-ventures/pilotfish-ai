@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { InterruptInput, Interruption } from "@pilotfish/perception";
-import { rateLimited, retryAfterMs } from "./interventions.js";
+import type { Page } from "@pilotfish/browser";
+import type { InterruptInput, Interruption, Snapshot } from "@pilotfish/perception";
+import { classifyPage, rateLimited, retryAfterMs, UnboundLookError } from "./interventions.js";
 
 const hit = (category: Interruption["category"], signals: string[], vendor?: string): Interruption => ({ category, signals, blocking: true, needs: "none_possible", ...(vendor ? { vendor } : {}) }) as Interruption;
 const withHeaders = (headers: Record<string, string>): InterruptInput => ({ response: { url: "https://a.example/", status: 429, headers } }) as InterruptInput;
@@ -23,5 +24,13 @@ describe("rate limits (review of 3 Nov)", () => {
     expect(retryAfterMs(withHeaders({}))).toBeNull();
     expect(retryAfterMs(withHeaders({ "retry-after": "soon" }))).toBeNull();
     expect(retryAfterMs(null)).toBeNull();
+  });
+});
+
+describe("a look bound to no document (fifth review)", () => {
+  it("is not classified: a snapshot taken while the page kept committing other documents throws UnboundLookError", async () => {
+    // No CDP call is made for it: the fake page has no session.
+    const snap = { url: "http://x/block", unsettled: true, document: null } as unknown as Snapshot;
+    await expect(classifyPage({} as Page, snap)).rejects.toBeInstanceOf(UnboundLookError);
   });
 });

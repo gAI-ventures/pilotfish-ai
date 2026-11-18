@@ -7,13 +7,16 @@
 // Plain and local: the browser starts fresh on this machine's own IP and keeps nothing after it
 // closes (no site profiles, no saved logins); no proxy, bot-check handling or CAPTCHA solving.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { launch, type Browser, type LaunchOptions, type Page } from "@pilotfish/browser";
 import {
   Agent,
   DefaultPolicy,
+  SecretBroker,
   TabManager,
   type ActionContext,
   type ActionPolicy,
+  type ActOptions,
   type ActOutcome,
   type AgentOptions,
   type PolicyDecision,
@@ -22,8 +25,13 @@ import {
 import { attachInterrupts, type Interrupts } from "@pilotfish/interrupts";
 import type { McpConfig } from "./config.js";
 
-/** What Agent.obstacle() reports (kept structural: the agent package does not export the type by name). */
-export type PageObstacle = NonNullable<Awaited<ReturnType<Agent["obstacle"]>>>;
+/**
+ * What Agent.obstacle() reports (kept structural): an obstacle, or a page that could not be verified (`unread`; `changed`
+ * when a document change was seen while it was read), which is neither an obstacle nor a page that needs nobody.
+ */
+export type PageCheck = NonNullable<Awaited<ReturnType<Agent["obstacle"]>>>;
+export type PageObstacle = Exclude<PageCheck, { unread: true }>;
+export type PageUnread = Extract<PageCheck, { unread: true }>;
 
 export interface SessionOptions {
   /** Extra launch options (tests pin a viewport, a Chromium path...). headless comes from the config. */
@@ -67,16 +75,36 @@ export class BrowserSession {
   private tabs: TabManager | null = null;
   /** Executor for the direct tools, built on first use for the open browser. */
   private agent: Agent | null = null;
+  /**
+   * Output guard (18 Nov): how many scrubbed strings held a secret value in this server's life (every browser; it never
+   * goes down). A tool call during which it rose is withheld whole (server.ts), whichever path printed the value.
+   */
+  secretOutputs = 0;
+  /** The configured secrets, for the boundary scan while no browser (and so no executor) exists. */
+  private configSecrets: SecretBroker | null = null;
   /** Direct tool calls run one at a time, in arrival order. */
   private queue: Promise<unknown> = Promise.resolve();
   /** The configured allowlist and private-network rule, for every tool. */
   private readonly policy: ActionPolicy;
-  /**
-   * How the direct tools put a question to the person behind the MCP client (elicitation), set by
-   * the server for the connection making the current call. Undefined when the client cannot ask:
-   * policy confirmations are then refused.
-   */
-  asker: ((question: string) => Promise<string | null>) | undefined;
+  /** A request's confirmation channel must not be overwritten by another connection. */
+  private readonly callContext = new AsyncLocalStorage<{ asker: ((question: string) => Promise<string | null>) | undefined }>();
+
+  get asker(): ((question: string) => Promise<string | null>) | undefined {
+    return this.callContext.getStore()?.asker;
+  }
+
+  /** Serialize the complete MCP request, including all steps in a batch and its hand-off. */
+  run<T>(asker: ((question: string) => Promise<string | null>) | undefined, task: () => Promise<T>): Promise<T> {
+    return this.enqueue(() => this.callContext.run({ asker }, task));
+  }
+
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    // act/obstacle/close called inside a request already hold its place in the queue.
+    if (this.callContext.getStore()) return task();
+    const next = this.queue.then(task);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
 
   constructor(
     readonly config: McpConfig,
@@ -133,6 +161,26 @@ export class BrowserSession {
     this.browser = null;
   }
 
+  /** Whether a password was typed into a password field in this browser (browser_close starts a fresh one). */
+  hasTypedPasswords(): boolean {
+    return !!this.agent?.hasTypedPasswords();
+  }
+
+  /**
+   * Whether `text`, as given, holds a recognized form of a secret value (configured, issued, retired or typed in this
+   * browser): the server's final scan of every outgoing reply. No side effect.
+   */
+  holdsSecret(text: string): boolean {
+    if (this.agent) return this.agent.holdsSecretOutput(text);
+    this.configSecrets ??= new SecretBroker(this.config.secrets);
+    return this.configSecrets.holdsSecret(text);
+  }
+
+  /** A reply's text through the session's scrubber (secrets and typed passwords); as it is before a browser exists. */
+  scrubReply(text: string): string {
+    return this.agent ? this.agent.scrubOutput(text) : text;
+  }
+
   private executor(): Agent {
     this.agent ??= new Agent(this.tabs!.current, {
       tabs: this.tabs!,
@@ -152,6 +200,13 @@ export class BrowserSession {
       // The same elements and words in lighter markup (link targets as paths, no generated ids): 3-23% smaller
       // screens on the sites measured, nothing a reader acts on or quotes left out.
       compactSnapshots: true,
+      roleTags: true,
+      actionReceipts: true,
+      // Any secret value in output withholds the reply whole; never a readable placeholder in its grammar.
+      guardSecretOutput: true,
+      onSecretOutput: () => {
+        this.secretOutputs++;
+      },
       autoDismiss: true,
       // A page that says it is still loading is shown once it has finished (up to 6 s): a model answered from Google
       // Flights' Cheapest tab while it read "Fetching results" and an interim price (4 Nov).
@@ -170,32 +225,31 @@ export class BrowserSession {
    * One tool through the executor pipeline (policy gate, ref check, hit test, settle, evidence,
    * secret scrubbing), without a model call. Calls are serialized.
    */
-  async act(name: ToolName, input: Record<string, unknown>, o: { snapshot?: boolean } = {}): Promise<ActOutcome> {
-    const next = this.queue.then(async () => {
+  async act(name: ToolName, input: Record<string, unknown>, o: ActOptions = {}): Promise<ActOutcome> {
+    return this.enqueue(async () => {
       await this.ensure();
       return this.executor().act(name, input, "", o);
     });
-    this.queue = next.catch(() => undefined);
-    return next;
   }
 
   /**
    * What on the current page only a person can deal with (a sign-in, a code, a device approval, a CAPTCHA), or a
-   * block nobody can (see Agent.obstacle); null when nothing, or when no browser is open. Serialized with the actions.
+   * block nobody can (see Agent.obstacle); `unread` when the page could not be verified (a look that failed is one too:
+   * never taken for a page that needs nobody); null when the page was read and needs nobody, or when no browser is
+   * open. Serialized with the actions.
    */
-  async obstacle(o: { fresh?: boolean } = {}): Promise<PageObstacle | null> {
-    if (!this.launched) return null;
-    const next = this.queue.then(() => this.executor().obstacle(o));
-    this.queue = next.catch(() => undefined);
-    return next.catch(() => null);
+  async obstacle(o: { fresh?: boolean } = {}): Promise<PageCheck | null> {
+    return this.enqueue(async () => (this.launched ? this.executor().obstacle(o) : null)).catch((): PageUnread => ({ unread: true, changed: false, message: "Could not verify the page for a sign-in, a code or a bot check: the look at it failed.", host: "", url: "" }));
   }
 
   /** Close the browser. The next tool call launches a fresh one. */
   async close(): Promise<boolean> {
-    const browser = this.browser ?? (this.launching ? await this.launching.catch(() => null) : null);
-    if (!browser) return false;
-    this.reset();
-    await browser.close().catch(() => undefined);
-    return true;
+    return this.enqueue(async () => {
+      const browser = this.browser ?? (this.launching ? await this.launching.catch(() => null) : null);
+      if (!browser) return false;
+      this.reset();
+      await browser.close().catch(() => undefined);
+      return true;
+    });
   }
-}
+  }

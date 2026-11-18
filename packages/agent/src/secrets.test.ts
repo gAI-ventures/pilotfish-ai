@@ -83,3 +83,95 @@ describe("SecretBroker", () => {
     );
   });
 });
+
+describe("typed passwords (fifth review, 17 Nov): every form becomes the withholding mark", () => {
+  it("short values as substrings in raw, URL-encoded, JSON-escaped and base64 forms, inside other words too", async () => {
+    const { maskShortValue, TYPED_SECRET_MARK: M } = await import("./secrets.js");
+    expect(maskShortValue("Pinqok and query", "q", M)).toBe(`Pin${M}ok and ${M}uery`);
+    expect(maskShortValue("/glue?p=az%26b", "z&", M)).toBe(`/glue?p=a${M}b`);
+    expect(maskShortValue("B64:cQ==end", "q", M)).toBe(`B64:${M}end`);
+    expect(maskShortValue('{"v":"az&b"}', "z&", M)).toBe(`{"v":"a${M}b"}`);
+  });
+  it("the broker's scrub puts the mark for short and long typed passwords; configured secrets keep their placeholder", async () => {
+    const { TYPED_SECRET_MARK: M } = await import("./secrets.js");
+    const b = new SecretBroker({ api: "configured-key" });
+    b.addTyped("q");
+    b.addTyped("longer-secret");
+    expect(b.scrub("Hello q, longer-secret, configured-key")).toBe(`Hello ${M}, ${M}, {{api}}`);
+  });
+});
+
+describe("output guard (18 Nov: 9504402 and its corrections)", () => {
+  const SECRET = "hunter2-xyz";
+  const RESERVED = "p@ss/w%rd&x?#";
+
+  it("guard off (the hosted loop): input substitution, host refusal and readable placeholders as before; a short value is not rewritten", () => {
+    const b = new SecretBroker({ pw: { value: SECRET, allowedHosts: ["a.example"] }, pin: "Zx" });
+    expect(b.substitute("{{pw}}", "a.example").text).toBe(SECRET);
+    expect(() => b.substitute("{{pw}}", "evil.example")).toThrow(/not allowed/);
+    expect(b.scrub(`k=${SECRET}`)).toBe("k={{pw}}");
+    expect(b.scrub("Zx here")).toBe("Zx here");
+    b.addTyped("typedpw", ["pw"]);
+    expect(b.typedFrom("typedpw")).toEqual(["pw"]);
+    expect(b.typedFrom("other")).toBeUndefined();
+  });
+
+  it("guard on: clean text comes back exactly (no rewrite); any recognized form of any value, short included, is reported and marked, never a placeholder", async () => {
+    const { TYPED_SECRET_MARK: M } = await import("./secrets.js");
+    const b = new SecretBroker({ pw: SECRET, pin: "Zx", res: RESERVED });
+    let hits = 0;
+    b.guardOutput = true;
+    b.onOutputHit = () => hits++;
+    const clean = '[e12]<button>Save\n  "{{pw}}" typed literally';
+    expect(b.scrub(clean)).toBe(clean);
+    expect(hits).toBe(0);
+    const dirty = [`raw ${SECRET}`, `uri /landing/${encodeURI(RESERVED)}`, `component ${encodeURIComponent(RESERVED)}`, `b64 ${Buffer.from(SECRET).toString("base64")}`, `json ${JSON.stringify(RESERVED)}`, "short Zx"];
+    for (const t of dirty) {
+      const out = b.scrub(t);
+      expect(out, t).toContain(M);
+      expect(out, t).not.toMatch(/\{\{(pw|pin|res)\}\}/);
+      for (const v of [SECRET, RESERVED, encodeURI(RESERVED), encodeURIComponent(RESERVED), "Zx"]) expect(out, t).not.toContain(v);
+    }
+    expect(hits).toBe(dirty.length);
+  });
+
+  it("an issued authenticator code stays guarded after its 10-minute window ends (it is retired, not dropped)", () => {
+    const seed = "JBSWY3DPEHPK3PXP";
+    const b = new SecretBroker({ otp: { totp: seed, allowedHosts: ["a.example"] } });
+    b.guardOutput = true;
+    const t0 = Date.now();
+    const realNow = Date.now;
+    try {
+      const code = b.substitute("{{otp}}", "a.example").text;
+      // Issued only: never registered as a typed password, so only the issued/retired path can guard it.
+      expect(b.typedFrom(code)).toBeUndefined();
+      expect(b.typedCount).toBe(0);
+      expect(b.holdsSecret(`Echo ${code}`)).toBe(true);
+      Date.now = () => t0 + 11 * 60_000; // past the 10-minute removal
+      expect(b.holdsSecret(`Echo ${code}`)).toBe(true);
+      expect(b.scrub(`Echo ${code}`)).not.toContain(code);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("a shared broker: each guarded view reports only to its own owner; the shared broker and other users stay readable", async () => {
+    const { guardedView } = (await import("./secrets.js")) as unknown as { guardedView: (b: SecretBroker, onHit: (() => void) | null) => SecretBroker };
+    const shared = new SecretBroker({ pw: { value: SECRET, allowedHosts: ["a.example"] } });
+    let a = 0;
+    let c = 0;
+    const viewA = guardedView(shared, () => a++);
+    const viewC = guardedView(shared, () => c++);
+    viewA.scrub(`k=${SECRET}`);
+    expect([a, c]).toEqual([1, 0]);
+    viewC.scrub("nothing here");
+    expect([a, c]).toEqual([1, 0]);
+    // The shared broker itself (the hosted loop's) is unchanged: readable placeholder, no guard, no callback.
+    expect(shared.guardOutput).toBe(false);
+    expect(shared.scrub(`k=${SECRET}`)).toBe("k={{pw}}");
+    expect([a, c]).toEqual([1, 0]);
+    // Input through a view: the same substitution and refusal.
+    expect(viewA.substitute("{{pw}}", "a.example").text).toBe(SECRET);
+    expect(() => viewA.substitute("{{pw}}", "evil.example")).toThrow(/not allowed/);
+  });
+});
