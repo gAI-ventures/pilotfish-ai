@@ -3103,7 +3103,9 @@ export class Agent {
             this.keepRead("get_text", this.secrets.scrub(r.text));
             // Viewed, not downloaded: the host may keep it for the person (a failure only loses the copy).
             const kept = this.opts.onDocumentRead ? await this.opts.onDocumentRead({ url: this.page.url, name: pdfNameOf(this.page.url), bytes }).catch(() => null) : null;
-            return ok(this.secrets.scrub(`PDF TEXT (${this.page.url}, ${r.pages} page(s)${r.truncated ? ", truncated" : ""})${kept ? `. ${kept}` : ""}:\n${r.text}`), `get_text: pdf ${r.pages} pages`);
+            // The action log the end check reads carries the keep too: "opened, but not downloaded" failed a run that
+            // kept it (18 Nov).
+            return ok(this.secrets.scrub(`PDF TEXT (${this.page.url}, ${r.pages} page(s)${r.truncated ? ", truncated" : ""})${kept ? `. ${kept}` : ""}:\n${r.text}`), `get_text: pdf ${r.pages} pages${kept ? ` (${kept})` : ""}`);
           }
           const maxChars = Number(input["max_chars"] ?? 20_000);
           if (typeof input["selector"] === "string" && input["selector"].trim()) {
