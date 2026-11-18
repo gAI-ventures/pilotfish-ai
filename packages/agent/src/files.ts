@@ -27,6 +27,19 @@ export async function pdfText(data: Uint8Array, maxChars = 30_000): Promise<{ pa
   return { pages, text: text.length > maxChars ? text.slice(0, maxChars) : text, truncated: truncated || text.length > maxChars };
 }
 
+/** A file name for a PDF shown at `url`: the last part of its path, ".pdf" added when missing; "document.pdf" else. */
+export function pdfNameOf(url: string): string {
+  let last = "";
+  try {
+    last = decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).at(-1) ?? "");
+  } catch {
+    last = "";
+  }
+  const name = last.replace(/[^\w.\- ]+/g, "_").slice(0, 120);
+  if (!name || name === "_") return "document.pdf";
+  return /\.pdf$/i.test(name) ? name : `${name}.pdf`;
+}
+
 /** A downloaded file as text: PDFs extracted, text formats read as UTF-8, other binaries described. */
 export async function fileText(path: string, name: string, maxChars = 30_000): Promise<string> {
   const size = (await stat(path)).size;

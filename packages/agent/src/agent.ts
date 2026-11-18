@@ -50,7 +50,7 @@ import { TabManager } from "./tabs.js";
 import { challengePolicy, MIN_POLL_MS, vendorClearMs, type ChallengePolicyOptions } from "./challenge-policy.js";
 import { challengeHandler, type ChallengeCheck, type ChallengeDone, type ChallengeHandler, type ChallengeResult, type ChallengeSource } from "./challenges.js";
 import type { Heard, RunControl } from "./run-control.js";
-import { fileText, pdfText } from "./files.js";
+import { fileText, pdfNameOf, pdfText } from "./files.js";
 import {
   describeInterruption,
   isResolved,
@@ -386,6 +386,12 @@ export interface AgentOptions {
    * ("saved"), the person ("person": typed on our page or in the live view), or a saved passkey.
    */
   onSignedIn?: (e: { site: string; host: string; url: string; by: "saved" | "person" | "passkey" }) => void | Promise<void>;
+  /**
+   * The agent read a PDF a tab shows in Chrome's viewer (get_text): no download happened, so the host may keep
+   * the document as a file of its own (18 Nov: "download the PDF" of an inline irs.gov form left only a link).
+   * Returns a line for the agent ("Kept … as a session file"), or null when nothing was kept.
+   */
+  onDocumentRead?: (d: { url: string; name: string; bytes: Uint8Array }) => Promise<string | null>;
   /**
    * How the saved login for `site` signs in, when its placeholders alone do not say: "This login signs in with a
    * phone number and a code sent by text..." for a login saved with no password. Added to the note that names them.
@@ -3090,10 +3096,14 @@ export class Agent {
         case "get_text": {
           // A PDF in Chrome's viewer has no text in the DOM: read the document itself.
           if ((await this.page.loadState()).contentType === "application/pdf") {
-            const r = await pdfText(new Uint8Array(await this.page.documentBytes()), Number(input["max_chars"] ?? 20_000));
+            const bytes = new Uint8Array(await this.page.documentBytes());
+            // pdf.js detaches the buffer it is given: it reads a copy, and `bytes` stays whole for the host.
+            const r = await pdfText(bytes.slice(), Number(input["max_chars"] ?? 20_000));
             this.note("get_text");
             this.keepRead("get_text", this.secrets.scrub(r.text));
-            return ok(this.secrets.scrub(`PDF TEXT (${this.page.url}, ${r.pages} page(s)${r.truncated ? ", truncated" : ""}):\n${r.text}`), `get_text: pdf ${r.pages} pages`);
+            // Viewed, not downloaded: the host may keep it for the person (a failure only loses the copy).
+            const kept = this.opts.onDocumentRead ? await this.opts.onDocumentRead({ url: this.page.url, name: pdfNameOf(this.page.url), bytes }).catch(() => null) : null;
+            return ok(this.secrets.scrub(`PDF TEXT (${this.page.url}, ${r.pages} page(s)${r.truncated ? ", truncated" : ""})${kept ? `. ${kept}` : ""}:\n${r.text}`), `get_text: pdf ${r.pages} pages`);
           }
           const maxChars = Number(input["max_chars"] ?? 20_000);
           if (typeof input["selector"] === "string" && input["selector"].trim()) {
