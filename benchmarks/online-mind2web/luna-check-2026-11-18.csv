@@ -1,0 +1,11 @@
+task_id,pass,blocked,seconds,model_calls,cost_usd,stop
+05483c50cc9b04c8ac44c574758fb2bd,no,no,167.1,28,0.0138,max_failures
+0b51b4fa0295ae80ccd176ebdad6fff6,yes,no,305.5,22,0.0114,done
+1fc28d91d25ccd1c6ba268101326a654,yes,no,18.5,5,0.0015,done
+502e864440283214e0180645015f568b,no,no,52.4,8,0.003,done
+62f1626ce249c31098854f8b38bdd6cf,yes,no,45.9,7,0.0032,done
+9b5dfe54a1c14c5c6336bae7374c3bb5,yes,no,79.1,24,0.0056,done
+ba2a469af584f16da93ce6a7430cf7e5,no,no,144.4,28,0.0155,max_failures
+c7c07ec10c668625a21ba64165d719bb,yes,no,156.8,22,0.0086,done
+cf757a775fa1224acfc7998489e199a8,no,no,118.6,31,0.0093,max_failures
+fe33894188d20d7469f37a9fd855e7ff,yes,no,105.8,22,0.0117,done
