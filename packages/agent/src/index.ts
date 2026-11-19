@@ -7,7 +7,7 @@ export { buildTools, DEFAULT_TOOLS, ToolInputs } from "./tools.js";
 export type { ToolName, ToolInput } from "./tools.js";
 export { SecretBroker } from "./secrets.js";
 export type { SecretSpec } from "./secrets.js";
-export { DefaultPolicy, isPrivateHost, parseMoney, totalFromText } from "./policy.js";
+export { asksForWrite, DefaultPolicy, isPrivateHost, namedFor, namedObject, objectShown, objectWords, parseMoney, totalFromText } from "./policy.js";
 export type { ActionPolicy, ActionContext, PolicyDecision, DefaultPolicyOptions, PreApproval, WriteKind, Money } from "./policy.js";
 export { SYSTEM_PROMPT, SYSTEM_PROMPT_FAST } from "./prompt.js";
 export { TabManager } from "./tabs.js";

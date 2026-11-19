@@ -2690,6 +2690,7 @@ export class Agent {
         if (form) target = `${target ?? "Enter"}; ${form}`;
       }
       const pageTotal = () => this.pageTotal();
+      const pageText = () => this.bodyText();
       const policyInput = submitRef
         ? { ref: submitRef }
         : name === "type"
@@ -2697,11 +2698,11 @@ export class Agent {
           : pageTool
             ? { tool: pageTool.name, consequential: pageTool.annotations?.consequential === true, fillsOnly: pageTool.backendNodeId !== undefined && !pageTool.annotations?.autosubmit, readOnly: pageTool.annotations?.readOnly === true }
             : input;
-      let decision = await this.policy.check({ tool: submitRef || name === "click_xy" ? "click" : name, input: policyInput, url: this.page.url, target, task, pageTotal });
+      let decision = await this.policy.check({ tool: submitRef || name === "click_xy" ? "click" : name, input: policyInput, url: this.page.url, target, task, pageTotal, pageText });
       // Buttons and links that choose, type or fill would click are checked like clicks on them.
       if (decision.kind === "allow") {
         for (const r of this.clickedRefs(name, input)) {
-          const d = await this.policy.check({ tool: "click", input: { ref: r }, url: this.page.url, target: describeRef(this.turnSnapshot ?? this.lastSnapshot, r), task, pageTotal });
+          const d = await this.policy.check({ tool: "click", input: { ref: r }, url: this.page.url, target: describeRef(this.turnSnapshot ?? this.lastSnapshot, r), task, pageTotal, pageText });
           if (d.kind !== "allow") {
             decision = d;
             break;
@@ -3582,8 +3583,12 @@ export class Agent {
 
   /** The total the current page asks for (a checkout's order total), for a pre-approved payment limit. */
   private async pageTotal(): Promise<Money | null> {
-    const text = await this.page.main.evaluate<string>("document.body ? document.body.innerText.slice(0, 200000) : ''", { timeoutMs: 2_000 }).catch(() => "");
-    return totalFromText(text);
+    return totalFromText(await this.bodyText());
+  }
+
+  /** The current page's text (its main frame), for the policy: a total to bound, what a pay step is for. */
+  private async bodyText(): Promise<string> {
+    return this.page.main.evaluate<string>("document.body ? document.body.innerText.slice(0, 200000) : ''", { timeoutMs: 2_000 }).catch(() => "");
   }
 
   /** Record an action for the stall rules: where it ended (`url`, from its evidence) and what it changed. */
@@ -4319,7 +4324,7 @@ export class Agent {
           if (best) {
             // The chosen option is a click in its own right ("Delete account" in a menu): gate it.
             const label = clip(best.n.name || textOf(best.n, 120), 80);
-            const d = await this.policy.check({ tool: "click", input: best.n.ref ? { ref: best.n.ref } : {}, url: this.page.url, target: best.n.ref ? describeRef(snap, best.n.ref) ?? label : label, task: this.currentTask, pageTotal: () => this.pageTotal() });
+            const d = await this.policy.check({ tool: "click", input: best.n.ref ? { ref: best.n.ref } : {}, url: this.page.url, target: best.n.ref ? describeRef(snap, best.n.ref) ?? label : label, task: this.currentTask, pageTotal: () => this.pageTotal(), pageText: () => this.bodyText() });
             this.opts.onStep?.({ type: "policy", decision: d, name: "choose" });
             if (d.kind !== "allow") {
               let ok = false;

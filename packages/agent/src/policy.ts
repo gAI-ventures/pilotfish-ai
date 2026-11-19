@@ -20,6 +20,8 @@ export interface ActionContext {
   task: string;
   /** The amount the page asks for (its order total), read on demand for a pre-approved payment limit. */
   pageTotal?: () => Promise<Money | null>;
+  /** The page's text, read on demand at a pay step when the person named what it is for (`DefaultPolicy.expect`). */
+  pageText?: () => Promise<string>;
 }
 
 /** Kinds of irreversible step: what a confirmation is about, and what a task can pre-approve. */
@@ -112,6 +114,10 @@ const DEFAULT_IRREVERSIBLE: Array<{ kind?: WriteKind; re: RegExp; intl?: boolean
   // Going to the checkout page ("Proceed to Checkout") commits nothing: the pay step on it does (approvals were once
   // asked twice for "Proceed to Checkout" before the one for "Pay & Confirm Booking").
   { kind: "pay", re: /\b(pay|purchase|buy now|place order|(?<!\b(?:proceed|go|continue|move|head|ready) to )checkout|confirm (order|payment|purchase)|complete (order|purchase))\b/i },
+  // A booking is a final step whatever pays for it (a membership's credits, a day pass): "Book now", "Confirm booking"
+  // and a bare "Book" or "Reserve" button committed with no gate at all (19 Nov). "Book a day
+  // pass" and "Select <venue>" only choose: they stay out.
+  { kind: "pay", re: /\b(book now|book (?:it|this)|confirm (?:(?:the|your|my) )?(?:booking|reservation)|complete (?:(?:the|your|my) )?(?:booking|reservation)|reserve now|confirm (?:and|&) book|book (?:and|&) pay|place (?:the |your )?booking)\b|>\s*(?:book|reserve)\s*<|^\s*(?:book|reserve)\s*$/i },
   { kind: "delete", re: /\b(delete|remove|erase|destroy|wipe)\b/i },
   { kind: "send", re: /\b(send|post|publish|tweet|share)\b/i },
   { kind: "transfer", re: /\b(transfer|withdraw|wire)\b/i },
@@ -198,6 +204,19 @@ export class DefaultPolicy implements ActionPolicy {
     const max = cur.maxAmount !== undefined && extra.maxAmount !== undefined ? Math.min(cur.maxAmount, extra.maxAmount) : (cur.maxAmount ?? extra.maxAmount);
     const currency = cur.maxAmount !== undefined ? cur.currency : (extra.currency ?? cur.currency);
     this.opts = { ...this.opts, preApproved: { ...cur, kinds: [...new Set([...cur.kinds, ...extra.kinds])], ...(max !== undefined ? { maxAmount: max } : {}), ...(currency ? { currency } : {}) } };
+  }
+
+  /** The words the person named the pay step's object by ("rmz", "full cream milk"), from `namedObject`. */
+  private named: string[] = [];
+
+  /**
+   * What the person's words say the pay step (book, order, buy) is for: its distinctive words (`namedObject`). A pay
+   * step on a page that shows none of them as a whole (the person said "book rmz", the page books Ganganagar) is asked
+   * about whatever approved it, with the mismatch in the question: an approval is for what the person named, never for
+   * another thing (19 Nov). [] clears it.
+   */
+  expect(words: readonly string[]): void {
+    this.named = [...new Set(words.map((w) => w.toLowerCase()).filter(Boolean))];
   }
 
   check(ctx: ActionContext): PolicyDecision | Promise<PolicyDecision> {
@@ -287,8 +306,20 @@ export class DefaultPolicy implements ActionPolicy {
     return { kind: "allow" };
   }
 
-  /** A confirmation the task's pre-approval covers becomes an allow, with a note saying so. */
+  /**
+   * A confirmation the task's pre-approval covers becomes an allow, with a note saying so. A pay step on a page that
+   * does not show what the person named is never covered: it is asked about, the mismatch said (`expect`).
+   */
   private preApproval(d: PolicyDecision & { kind: "confirm" }, ctx: ActionContext, text: string): PolicyDecision | Promise<PolicyDecision> {
+    const named = this.named;
+    if (d.write !== "pay" || !named.length || objectShown(named, text)) return this.covered(d, ctx, text);
+    const read = ctx.pageText ? ctx.pageText().catch(() => "") : Promise.resolve("");
+    return read.then((page) =>
+      objectShown(named, `${text}\n${page}`) ? this.covered(d, ctx, text) : { ...d, reason: `${d.reason} (the person asked for ${named.join(" ")}, which this page does not show: their approval is for that, not for this)` },
+    );
+  }
+
+  private covered(d: PolicyDecision & { kind: "confirm" }, ctx: ActionContext, text: string): PolicyDecision | Promise<PolicyDecision> {
     const pre = this.opts.preApproved;
     if (!pre || !d.write || !pre.kinds.includes(d.write)) return d;
     let host = "";
@@ -369,6 +400,103 @@ export function approvedByWords(text: string): WriteKind[] {
   return out;
 }
 
+/** A request to book, order or buy something: what it is for follows the verb. */
+const OBJECT_VERB = /\b(?:book(?:ing)?|order|buy|purchase|reserve|get me|pay for)\b/gi;
+/** Where the words of what is asked for end: a sentence, a dash, how it is paid for, the next step. */
+const OBJECT_END = /[,.;:!?\n(]|\s[-–—]\s|\b(?:with|using|via|on|from|paying|then|under|below|within|around|upto|up to|less than|and (?:then|pay|apply|use|check ?out|proceed|confirm|book|order))\b/i;
+/**
+ * Words with no name of their own in what a final step acts on: articles, pronouns and prepositions, times and dates,
+ * the kinds of thing booked or ordered (a desk, a seat, a slot), and words of the request itself. What is left names
+ * the thing ("rmz", "ganganagar", "full cream milk").
+ */
+const GENERIC = new Set(
+  (
+    "a an the my our your his her their me us him them it its this that these those same one ones another other others any some each " +
+    "for to of in at on by from into onto near around about as is be are was and or but so if it's its i you we he she they please pls kindly also again just only too " +
+    "now today tonight tomorrow yesterday day days daily every each weekday weekdays weekends week weekly weekend month monthly morning afternoon evening night noon am pm hr hrs hour hours " +
+    "monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun next this coming " +
+    "january february march april may june july august september october november december jan feb mar apr jun jul aug sep sept oct nov dec " +
+    "desk desks seat seats room rooms table tables slot slots spot spots ticket tickets pass passes booking bookings reservation reservations " +
+    "order orders item items thing things stuff place places venue venues location office space workspace coworking cowork center centre " +
+    "dedicated hot flexi flexible day-pass meeting conference cabin private open plan membership " +
+    "book reserve buy purchase get pay ordering booked bought same usual favourite favorite regular " +
+    "cheapest cheaper cheap best better top latest newest new highest lowest rated popular good nice great any first second last nearest closest " +
+    "quantity qty pack packs piece pieces pcs unit units size sizes person people pax adult adults guest guests"
+  ).split(" "),
+);
+
+/**
+ * The words the person's request names its final step's object by: after its first book, order or buy that names one, up to where that
+ * ends ("with my credits", "and apply the coupon", a comma), with generic words, numbers and times left out. "book rmz
+ * for me today" → ["rmz"]; "book a desk at RMZ Latitude tomorrow" → ["rmz", "latitude"]; "book the same one" → [].
+ */
+export function namedObject(text: string): string[] {
+  // The first request that names something: "order amul gold milk and place the order with cod" is the milk.
+  for (const v of text.matchAll(OBJECT_VERB)) {
+    const after = text.slice(v.index! + v[0].length);
+    const end = OBJECT_END.exec(after);
+    const words = objectWords(end ? after.slice(0, end.index) : after);
+    if (words.length) return words;
+  }
+  return [];
+}
+
+/** The distinctive words of a name: lowercased, generic words, numbers and times (9am, 10th, 2l) left out. */
+export function objectWords(text: string): string[] {
+  const out: string[] = [];
+  for (const w of text.toLowerCase().match(/[\p{L}\p{N}]+(?:'[\p{L}]+)?/gu) ?? []) {
+    if (w.length < 2 || GENERIC.has(w) || /^\d/.test(w) || out.includes(w)) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+/** Cities known by two names: either one on the page shows the other. */
+const ALSO_KNOWN: Record<string, string> = { bangalore: "bengaluru", bengaluru: "bangalore", gurgaon: "gurugram", gurugram: "gurgaon", bombay: "mumbai", mumbai: "bombay", calcutta: "kolkata", kolkata: "calcutta", madras: "chennai", chennai: "madras", poona: "pune", pune: "poona" };
+
+/** At most one letter changed, added or dropped. */
+function oneEdit(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+}
+
+/**
+ * The page (or a control) shows every one of the named words: as a word, or a word it begins (a plural, "RMZ" in
+ * "RMZLatitude"), a long one with a typo of one letter, or a city by its other name. A word missing means the step is
+ * on something else, or on something the page does not name, and either way not on what the person said.
+ */
+export function objectShown(named: readonly string[], text: string): boolean {
+  const seen = new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+  const has = (w: string): boolean => {
+    const stem = w.length > 5 ? w.slice(0, w.length - 2) : w;
+    for (const s of seen) if (s === w || s.startsWith(stem) || (w.length >= 6 && oneEdit(s, w))) return true;
+    return false;
+  };
+  return named.every((w) => has(w) || (!!ALSO_KNOWN[w] && has(ALSO_KNOWN[w])));
+}
+
+/** A correction that moves the earlier request's place ("it's in Bangalore", "it is at Koramangala"), not its object. */
+const SCOPE_ONLY = /^\W*(?:no[,.]?\s+)?(?:it'?s|it is|it|its|that'?s|that is|is|located|the place is|the venue is)\s+(?:in|at|near)\b/i;
+
+/**
+ * What a run's pay step must be for, from the person's words: their newest message's request ("book rmz" → rmz), else,
+ * when it continues an unfinished request, the new name it gives ("rmz" alone, "the RMZ one"), else that request's own
+ * ("book ganganagar…" corrected by "it's in Bangalore" → ganganagar). [] when they name nothing ("book the same one").
+ */
+export function namedFor(newest: string, carried = ""): string[] {
+  const own = namedObject(newest);
+  if (own.length || asksForWrite(newest)) return own;
+  if (!carried.trim()) return [];
+  if (SCOPE_ONLY.test(newest)) return namedObject(carried);
+  const fresh = objectWords(newest).filter((w) => !objectWords(carried).includes(w) && !STOP_WORDS.test(w));
+  return fresh.length ? fresh : namedObject(carried);
+}
+
+/** Words of a correction that are no name: what it says about the earlier turn ("no", "wrong", "checking"). */
+const STOP_WORDS = /^(?:no|nope|yes|ok|okay|wrong|not|instead|actually|rather|correct|checking|chekcing|check|looking|searching|showing|you|are|were|did|do|done|said|meant|mean|want|wanted|need|like|go|ahead|proceed|try|that|right|one|other|new|old|first|second|last|from|there|here|go|with|and|or|but|so|then|still|yet|already)$/i;
 
 /** A control whose words complete something: what a trial run stops before. */
 const TRIAL_COMMIT = /\b(confirm|complete|place|submit|finish|finali[sz]e|pay|purchase|buy now|check ?out|proceed to (pay|payment|checkout)|send|post|publish|delete|book now|reserve now|cancel (my |the )?(subscription|membership|account|order|booking|plan))\b/i;
