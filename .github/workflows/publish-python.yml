@@ -1,13 +1,13 @@
 name: Publish Python SDK
 
-# Releases the Python SDK (sdks/python, `pilotfish` on PyPI; docs/PUBLISHING.md):
+# Releases the Python SDK (sdks/python, `pilotfish-ai` on PyPI, imported as `pilotfish`; docs/PUBLISHING.md):
 # 1. its unit tests, and its local client against a real Chrome through the MCP built here;
 # 2. the sdist and wheel (python -m build), checked with twine;
 # 3. published to PyPI with trusted publishing (this run's OIDC token, no stored token), only when the package's
 #    version (src/pilotfish/_version.py) is not on PyPI yet and the repository variable PYPI_PUBLISH_ENABLED is
 #    true. Without it every run is a dry run that uploads the built files as an artifact.
 #
-# PyPI's side, once: a trusted publisher for project `pilotfish`, owner gAI-ventures, repository pilotfish-ai,
+# PyPI's side, once: a trusted publisher for project `pilotfish-ai`, owner gAI-ventures, repository pilotfish-ai,
 # workflow publish-python.yml, environment pypi (a pending publisher before the first release).
 
 on:
@@ -71,10 +71,10 @@ jobs:
         run: |
           # The version is the package's own (pyproject.toml reads it from src/pilotfish/_version.py).
           v=$(python -c "import pilotfish; print(pilotfish.__version__)")
-          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/pilotfish/$v/json")
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/pilotfish-ai/$v/json")
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "on_pypi=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "pilotfish $v: $([ "$code" = 200 ] && echo 'already on PyPI, nothing to publish' || echo 'not on PyPI yet')" >> "$GITHUB_STEP_SUMMARY"
+          echo "pilotfish-ai $v: $([ "$code" = 200 ] && echo 'already on PyPI, nothing to publish' || echo 'not on PyPI yet')" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: python-dist

@@ -7,7 +7,7 @@ Three npm packages and one Python package are built from this repository:
 | [`@gaiventures/pilotfish-mcp`](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp) | `packages/mcp` | `io.github.gAI-ventures/pilotfish` |
 | [`@gaiventures/pilotfish-mcp-managed`](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp-managed) | `packages/mcp-managed` | `io.github.gAI-ventures/pilotfish-managed` |
 | [`@gaiventures/pilotfish`](https://www.npmjs.com/package/@gaiventures/pilotfish) (the TypeScript SDK) | `packages/sdk` | |
-| [`pilotfish`](https://pypi.org/project/pilotfish/) on PyPI (the Python SDK) | `sdks/python` | |
+| [`pilotfish-ai`](https://pypi.org/project/pilotfish-ai/) on PyPI (the Python SDK, imported as `pilotfish`) | `sdks/python` | |
 
 `.github/workflows/publish.yml` runs on every push to `main` (each sync from the maintainers' repository is one):
 

@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pilotfish"
+name = "pilotfish-ai"
 dynamic = ["version"]
 description = "Run browser tasks in pilotfish's cloud from Python, or drive Chrome on your own machine."
 readme = "README.md"

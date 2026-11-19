@@ -15,10 +15,11 @@ Two clients in one package:
   browser tools. No account, no API key, no model calls.
 
 ```bash
-pip install pilotfish
+pip install pilotfish-ai
 ```
 
-Python 3.9 or newer. The only dependency is [httpx](https://www.python-httpx.org/).
+Installed as `pilotfish-ai`, imported as `pilotfish`. Python 3.9 or newer. The only dependency is
+[httpx](https://www.python-httpx.org/).
 
 ## Hosted quickstart
 

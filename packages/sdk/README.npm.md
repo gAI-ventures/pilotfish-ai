@@ -1,6 +1,6 @@
 # pilotfish SDK for TypeScript and JavaScript
 
-Browser tasks from code, two ways, with the same names in TypeScript and [Python](https://github.com/gAI-ventures/pilotfish-ai/tree/main/sdks/python):
+Browser tasks from code, two ways, with the same names in TypeScript and [Python](https://pypi.org/project/pilotfish-ai/) (`pip install pilotfish-ai`):
 
 - **Hosted** (`Pilotfish`): send a whole web task to pilotfish's cloud browser and get the answer back. pilotfish
   plans it, signs in with your saved logins, clears bot checks, and checks the result before it says done. Paid from

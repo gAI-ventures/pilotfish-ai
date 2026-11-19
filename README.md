@@ -13,12 +13,12 @@ outlines with refs, and after the first look only what changed, so an agent pays
   your own computer. Free, no account, no API key: your agent's own model reads each page and decides every step through
   the `browser_*` tools, and this server makes no model calls. A page that offers its own tools through
   [WebMCP](https://webmachinelearning.github.io/webmcp/) gets them listed with its snapshot, callable with `browser_page_tool`.
-- **SDKs for TypeScript** (`@gaiventures/pilotfish` on npm) **and Python** (`pilotfish`, installed from this repository): drive Chrome on your machine from
+- **SDKs for TypeScript** (`@gaiventures/pilotfish` on npm) **and Python** (`pilotfish-ai` on PyPI, imported as `pilotfish`): drive Chrome on your machine from
   code with the same tools, or send whole tasks to pilotfish's cloud browser over its REST API (tasks, batches,
   identities, saved tasks and schedules, webhooks), with the same names in both languages.
 
 - **Install the MCP:** `npx -y @gaiventures/pilotfish-mcp` ([npm](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp))
-- **Install an SDK:** `npm install @gaiventures/pilotfish` · `pip install "pilotfish @ git+https://github.com/gAI-ventures/pilotfish-ai#subdirectory=sdks/python"`
+- **Install an SDK:** `npm install @gaiventures/pilotfish` · `pip install pilotfish-ai`
 - **Docs:** <https://pilotfish.gai.ventures/docs/open> (the MCP), <https://pilotfish.gai.ventures/docs/sdk> (the SDKs),
   <https://pilotfish.gai.ventures/docs/api> (the REST API)
 - **MCP Registry:** `io.github.gAI-ventures/pilotfish` ([listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish))
@@ -100,7 +100,7 @@ Docs: <https://pilotfish.gai.ventures/docs/sdk>. Sources: `packages/sdk` (TypeSc
 | `packages/mcp` | The local MCP server (stdio, or Streamable HTTP with `--http`): the tools, settings and the hand-off to a person. Published as `@gaiventures/pilotfish-mcp`. |
 | `packages/mcp-managed` | A stdio relay to pilotfish's hosted MCP, for clients that only speak stdio. Published as `@gaiventures/pilotfish-mcp-managed`. |
 | `packages/sdk` | The TypeScript SDK: `Pilotfish` (the hosted REST API) and `LocalBrowser` (this repository's MCP over stdio). Published as `@gaiventures/pilotfish`. |
-| `sdks/python` | The Python SDK, the same clients with the same names, sync and async (`pilotfish`). |
+| `sdks/python` | The Python SDK, the same clients with the same names, sync and async. Published as `pilotfish-ai` on PyPI. |
 | `packages/cdp` | A thin, typed Chrome DevTools Protocol client. |
 | `packages/browser` | Launching Chrome and driving pages over raw CDP: frames, hit-tested input, settling after an action. |
 | `packages/perception` | Structure-first page snapshots, element handles, and the evidence diff after each action. |
