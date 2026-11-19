@@ -10,6 +10,7 @@
 // are cleared server-side with context editing (clear_tool_uses) so the client
 // never edits earlier turns (preserved-thinking safe).
 
+import { ACCEPT_ALL_REFUSAL, askModeNote, type AskMode } from "./ask-mode.js";
 import { createHash } from "node:crypto";
 import Anthropic, { type Middleware } from "@anthropic-ai/sdk";
 import { BudgetExceededError, defaultClient } from "./budget.js";
@@ -178,6 +179,14 @@ export interface AgentOptions {
    * asks the person; a run cancelled meanwhile asks nobody.
    */
   sortQuestion?: (question: string, signal: AbortSignal) => QuestionLabel | Promise<QuestionLabel>;
+  /**
+   * How much the run asks the person (19 Nov; the app's Auto / Manual / Accept all): "auto" (default) asks only what
+   * it cannot do without them; "manual" also asks every choice the task leaves open (the executor's brief says so);
+   * "accept_all" decides every open choice itself: a free-form question, or a form field with options to pick from,
+   * goes back to the model to decide (`ACCEPT_ALL_REFUSAL`). Sign-ins, codes, checks, payment details, a value only the
+   * person has (a form field with no options) and final steps their words do not approve still reach them in every mode.
+   */
+  askMode?: AskMode;
   /** Enable run_js. Default false. */
   allowJavaScript?: boolean;
   /**
@@ -1058,6 +1067,8 @@ const QUESTION_SORT_MS = 8_000;
  * 'Continue' buttons to press) and one note ending "okay?". About 0.9 s (p90 1.4 s, the slowest 3.9 s), and about
  * $0.00025 a question as sent: some 2,250 input tokens and 51 output, thinking included (87 of 1,711 calls thought).
  */
+export { ACCEPT_ALL_REFUSAL, askModeNote, type AskMode };
+
 export const QUESTION_SYSTEM = `A browser agent is about to send the person it works for a message. The agent does the task in its own browser, with its own tools. The person reads the message in a box on their own device and types a reply there; they need not be watching the agent's browser. The message is the agent's, written to the person: in it, "I", "me", "my" and "we" are the agent, and "you" and "your" are the person.
 
 First list what the message asks the person to do, or says the agent will do, then answer two yes/no questions.
@@ -3452,6 +3463,15 @@ export class Agent {
           if (input["kind"] === "code" || CODE_QUESTION.test(String(input["question"]))) {
             const via = await this.askCodeOnPage(String(input["question"]));
             if (via) return via;
+          }
+          // Accept all (askMode): a choice is the run's to make. A free-form question, or a form with a field to pick from,
+          // goes back to the model; a form of values only the person has (no options) still reaches them.
+          if (this.opts.askMode === "accept_all" && (!input["kind"] || input["kind"] === "question")) {
+            const fields = Array.isArray(input["questions"]) ? (input["questions"] as Array<{ options?: unknown }>) : [];
+            if (!fields.length || fields.some((f) => Array.isArray(f.options) && f.options.length)) {
+              this.note("ask_user: not asked");
+              return { isError: false, halt: true, summary: "ask_user: not asked (accept all)", content: ACCEPT_ALL_REFUSAL };
+            }
           }
           // Several things asked together: one form, a field each (11 Nov, SAM.gov: nine values asked as one paragraph,
           // after twelve questions one at a time).

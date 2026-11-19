@@ -1,8 +1,8 @@
 // @pilotfish/agent — Claude-driven browser agent with evidence-returning tools.
-export { Agent, QUESTION_SYSTEM } from "./agent.js";
+export { Agent, QUESTION_SYSTEM, ACCEPT_ALL_REFUSAL, askModeNote } from "./agent.js";
 export { TOP_LAPS } from "./agent.js";
 export { TYPED_SECRET_MARK } from "./secrets.js";
-export type { AgentOptions, AgentRead, AgentResult, StepEvent, TargetDesc, ActOutcome, ActOptions, ActFacts, Expectation, ExpectStatus, ConsentWatcher, CodeQuery, CodeFound, CodeChannel, QuestionLabel } from "./agent.js";
+export type { AgentOptions, AgentRead, AgentResult, StepEvent, TargetDesc, ActOutcome, ActOptions, ActFacts, Expectation, ExpectStatus, ConsentWatcher, CodeQuery, CodeFound, CodeChannel, QuestionLabel, AskMode } from "./agent.js";
 export { buildTools, DEFAULT_TOOLS, ToolInputs } from "./tools.js";
 export type { ToolName, ToolInput } from "./tools.js";
 export { SecretBroker } from "./secrets.js";

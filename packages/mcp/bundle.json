@@ -7,6 +7,7 @@
   ],
   "ships": [
     "agent/src/agent.ts",
+    "agent/src/ask-mode.ts",
     "agent/src/budget.ts",
     "agent/src/challenge-policy.ts",
     "agent/src/challenges.ts",

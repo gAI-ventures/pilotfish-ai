@@ -411,7 +411,7 @@ export class SavedTasks {
     await this.c.request("DELETE", `/saved-tasks/${enc(id)}`);
   }
   /** Run it, with changes for this run only. */
-  run(id: string, o: Record<string, unknown> & { extraInstructions?: string; startUrl?: string | null; region?: string | null; sites?: string[]; solve?: boolean; outputSchema?: Record<string, unknown> | null } = {}): Promise<Task> {
+  run(id: string, o: Record<string, unknown> & { extraInstructions?: string; startUrl?: string | null; region?: string | null; sites?: string[]; stealth?: boolean; solve?: boolean; outputSchema?: Record<string, unknown> | null } = {}): Promise<Task> {
     return this.c.request("POST", `/saved-tasks/${enc(id)}/run`, { body: o });
   }
 }

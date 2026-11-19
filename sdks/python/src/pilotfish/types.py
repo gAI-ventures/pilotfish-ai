@@ -45,7 +45,9 @@ class TaskRequest(TypedDict, total=False):
     credentials: List[str]
     preApproved: PreApproved
     allowedHosts: List[str]
+    stealth: bool
     solve: bool
+    askMode: Literal["auto", "manual", "accept_all"]
     proxy: str
     webhookUrl: str
     outputSchema: Dict[str, Any]
@@ -177,6 +179,8 @@ class BatchItem(TypedDict, total=False):
     startedAt: Optional[int]
     endedAt: Optional[int]
     appUrl: str
+    #: Where a person answers the task's questions (the batch's maker only; never in a webhook).
+    answerUrl: str
 
 
 class BatchCounts(TypedDict, total=False):
@@ -268,7 +272,9 @@ class SavedTaskOptions(TypedDict, total=False):
     preApproved: PreApproved
     model: str
     allowedHosts: List[str]
+    stealth: bool
     solve: bool
+    askMode: Literal["auto", "manual", "accept_all"]
     outputSchema: Dict[str, Any]
 
 

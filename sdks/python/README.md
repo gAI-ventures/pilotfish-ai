@@ -88,6 +88,16 @@ if t["status"] == "needs_input":
     pf.tasks.answer(t["id"], q["id"], "yes")
 ```
 
+### How much a task asks you
+
+`"askMode": "auto"` (the default) asks only what the task can't do without the person; `"manual"` also asks every
+choice the task leaves open; `"accept_all"` decides every choice itself from the task, the session and the site, and
+says what it chose. Sign-ins, codes and final steps the person hasn't approved stay theirs in every mode.
+
+```python
+pf.tasks.create("Book a table for two at 8 pm tomorrow at Olive, Bandra", askMode="accept_all")
+```
+
 ## Structured output
 
 Give a JSON Schema (root `type: "object"`) and the result's `data` validates against it:

@@ -43,8 +43,16 @@ export interface TaskRequest {
   preApproved?: PreApproved;
   /** Hosts the run may visit (all when omitted). */
   allowedHosts?: string[];
+  /** Stealth browsing; on by default, false turns it off. */
+  stealth?: boolean;
   /** Clearing CAPTCHAs and bot checks by itself; on by default. */
   solve?: boolean;
+  /**
+   * How much the run asks the person: `auto` (the default) only what it can't do without them, `manual` also every
+   * choice the task leaves open, `accept_all` decides every open choice itself from the task, the session and the site.
+   * Sign-ins, codes and final steps (pay, send, delete) are the person's in every mode unless the task's words approve them.
+   */
+  askMode?: "auto" | "manual" | "accept_all";
   /** Your own egress proxy (`http://user:pass@host:port`, https, socks4/5). */
   proxy?: string;
   /** Where `job.needs_input` and `job.finished` go, signed (verifyWebhook). */
@@ -209,6 +217,8 @@ export interface BatchItem {
   startedAt: number | null;
   endedAt: number | null;
   appUrl?: string;
+  /** Where a person answers the task's questions: in the batch's own view for its maker, never in a webhook. */
+  answerUrl?: string;
 }
 
 export interface Batch {
@@ -287,8 +297,10 @@ export interface SavedTaskOptions {
   preApproved?: PreApproved;
   model?: string;
   allowedHosts?: string[];
+  stealth?: boolean;
   solve?: boolean;
   outputSchema?: Record<string, unknown>;
+  askMode?: "auto" | "manual" | "accept_all";
 }
 
 export interface SavedTask {

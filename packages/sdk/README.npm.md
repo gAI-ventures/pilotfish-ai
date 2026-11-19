@@ -54,6 +54,10 @@ if (paused.paused && paused.next === "continue") await pf.tasks.continue(next.id
 await pf.tasks.cancel(next.id);
 ```
 
+How much a task asks the person: `askMode: "auto"` (the default, only what it can't do without them),
+`"manual"` (also every choice the task leaves open) or `"accept_all"` (decides every choice itself from the task, the
+session and the site). Sign-ins, codes and final steps the person hasn't approved stay theirs in every mode.
+
 Also: `get`, `list` (one page) and `iterate` (all pages), `events`, `pause` / `resume` (take the browser and hand it
 back), `rerun`, `thread` (the whole session), `files` and `downloadFile`, `frames`, `replayMp4`, `deleteSession`.
 
