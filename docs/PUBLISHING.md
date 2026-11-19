@@ -25,9 +25,8 @@ real Chrome through the open MCP.
 
 `.github/workflows/publish-python.yml` releases the Python SDK: on every push that changes `sdks/python`, it runs its
 tests (the local client against a real Chrome through the MCP built here), builds the sdist and wheel, and publishes
-to PyPI with PyPI trusted publishing (no stored token) when `pyproject.toml`'s version is not on PyPI yet, only with
-the repository variable `PYPI_PUBLISH_ENABLED=true`. To release, raise `version` in `sdks/python/pyproject.toml` and
-`sdks/python/src/pilotfish/_version.py`.
+to PyPI with PyPI trusted publishing (no stored token) when the package's version is not on PyPI yet, only with
+the repository variable `PYPI_PUBLISH_ENABLED=true`. To release, raise `__version__` in `sdks/python/src/pilotfish/_version.py` (`pyproject.toml` reads it).
 
 A manual run (Actions → Publish → Run workflow) is a dry run unless "publish" is ticked.
 
