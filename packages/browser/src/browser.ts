@@ -420,8 +420,15 @@ export class Browser {
     this.cleanups.push(fn);
   }
 
-  /** Stop a download that has begun (its bytes stop flowing; the file is not kept). */
-  async cancelDownload(guid: string): Promise<void> {
+  /**
+   * Downloads the host stopped in the browser to fetch itself: not canceled for
+   * the task, so the agent says the system is fetching them (`cancelDownload` with `taken`).
+   */
+  readonly takenDownloads = new Set<string>();
+
+  /** Stop a download that has begun (its bytes stop flowing; the file is not kept). `taken`: the host fetches it instead. */
+  async cancelDownload(guid: string, o: { taken?: boolean } = {}): Promise<void> {
+    if (o.taken) this.takenDownloads.add(guid);
     await this.root.send("Browser.cancelDownload", { guid }).catch(() => undefined);
   }
 

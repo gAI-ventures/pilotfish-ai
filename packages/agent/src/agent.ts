@@ -978,6 +978,26 @@ const CHECK_QUESTION = /\b(re)?captcha\b|\bhcaptcha\b|\bbot (check|challenge)\b|
 export const SECRET_CODE = /\b(otp|one[- ]time|passcode|password|pin|2fa|two[- ]factor|totp|authenticator|verification)\b|\b(verification|security|confirmation|login|sign[- ]?in|access|sms|email(ed)?|text(ed)?|\d[- ]?digit)\s+code\b|\bcode\b[^.?!\n]{0,40}\b(sent|texted|emailed|received)\b|\b(sent|texted|emailed)\b[^.?!\n]{0,40}\bcode\b/i;
 const CODE_QUESTION = SECRET_CODE;
 
+/** A postal code by its Indian or US name ("delivery PIN code", "pincode", "zip"), not a card's or bank's PIN. */
+const POSTAL_CODE = /\b(pin\s?code|pincode|postal\s?code|post\s?code|zip(\s?code)?)\b/i;
+
+/**
+ * Whether the person's free-form answer to a question is a secret to keep from the model (`{{user_code}}`). A question
+ * about a password always is. A code question (OTP, PIN, verification) is only when the answer is one token, as a code
+ * is: "I didn't get it, send it to my email" is the person's words, and hiding them left the model told only "the user
+ * gave the code" (19 Nov review). A postal PIN code (a delivery address's) is never one: masked, 560001 was scrubbed
+ * from every page read and the check's input for five minutes.
+ */
+export function secretAnswer(question: string, answer: string): boolean {
+  if (/\b(password|passcode|passphrase)\b/i.test(question)) return true;
+  if (!SECRET_CODE.test(question)) return false;
+  if (POSTAL_CODE.test(question) && !/\b(card|bank|atm|upi|debit|credit)\b/i.test(question)) return false;
+  const a = answer.trim();
+  // A plain reply ("done" after a link was clicked) is the person's word, not a code.
+  if (/^(done|yes|no|ok|okay|sure|skip|resend|sent|none|later|cancel|clicked)[.!]?$/i.test(a)) return false;
+  return !/\s/.test(a);
+}
+
 /**
  * Whose a free-form ask_user question is. "person": only they can answer it. "page": it asks them to look at or
  * work the agent's browser, or to do the agent's own work. "note": a progress note, or no real question.
@@ -3380,7 +3400,7 @@ export class Agent {
           this.note("ask_user");
           if (!answer) return ok("The user did not answer. Proceed without this information or finish with success=false.", "ask_user");
           // A code (2FA, verification) never enters the model's context: it becomes a secret for this site.
-          if (input["kind"] === "code" || SECRET_CODE.test(String(input["question"]))) {
+          if (input["kind"] === "code" || secretAnswer(String(input["question"]), answer)) {
             this.secrets.addEphemeral("user_code", answer.trim(), [safeHost(this.page.url)]);
             // The person's code for this prompt: the saved authenticator key never types over it.
             this.personCode.add(promptKey(this.page.url));
@@ -3558,6 +3578,7 @@ export class Agent {
     // A tab this action opened becomes the current one; a current tab that closed itself (an OAuth
     // popup after sign-in) has already handed back to its opener.
     const tabNotes: string[] = [];
+    this.downloadLog = "";
     // A popup this action opened may still be initializing: wait for it (no wait when none is).
     await this.tabs.settleOpens(3_000);
     const closedNote = this.tabs.takeNotes();
@@ -3775,7 +3796,7 @@ export class Agent {
       );
     else if (skip) parts.push("(No page snapshot, as asked.)");
     lap("render");
-    return { isError: false, summary: `${label}: ${evidence.changed ? "changed" : "no change"}`, content: this.secrets.scrub(parts.join("\n\n")), evidence, snapshot, timings };
+    return { isError: false, summary: `${label}: ${evidence.changed ? "changed" : "no change"}${this.downloadLog ? `; ${this.downloadLog}` : ""}`, content: this.secrets.scrub(parts.join("\n\n")), evidence, snapshot, timings };
   }
 
   /**
@@ -3854,16 +3875,24 @@ export class Agent {
     if (!started.length) return "";
     const deadline = Date.now() + 20_000;
     while (started.some((d) => d.state === "inProgress") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
-    return started
-      .map((d) => {
-        const id = `d${this.downloads.size + 1}`;
-        this.downloads.set(id, d);
-        const kb = Math.max(1, Math.round((d.receivedBytes || d.totalBytes) / 1024));
-        if (d.state === "completed") return `Downloaded ${id}: "${d.suggestedFilename}" (${kb} KB); read it with read_file.`;
-        return `Download ${id} "${d.suggestedFilename}" ${d.state === "canceled" ? "was canceled" : "is still in progress"}.`;
-      })
-      .join(" ");
+    const lines = started.map((d) => {
+      const id = `d${this.downloads.size + 1}`;
+      this.downloads.set(id, d);
+      const kb = Math.max(1, Math.round((d.receivedBytes || d.totalBytes) / 1024));
+      if (d.state === "completed") return { text: `Downloaded ${id}: "${d.suggestedFilename}" (${kb} KB); read it with read_file.`, log: `downloaded "${d.suggestedFilename}"` };
+      // The host took it over (it fetches the file itself): it was never "canceled" to
+      // the task, and the agent read it so and clicked again (19 Nov review). The host says when it is kept.
+      if (d.state === "canceled" && this.page.browser.takenDownloads.has(d.guid))
+        return { text: `Download ${id} "${d.suggestedFilename}" is being fetched by the system; you are told when it is kept, and then read it with read_file "${d.suggestedFilename}". Do not start it again.`, log: `download "${d.suggestedFilename}" taken by the system` };
+      return { text: `Download ${id} "${d.suggestedFilename}" ${d.state === "canceled" ? "was canceled" : "is still in progress"}.`, log: `download "${d.suggestedFilename}" ${d.state === "canceled" ? "canceled" : "in progress"}` };
+    });
+    // The action's line in the log the end check reads names the files too (it read "click e5: changed" before).
+    this.downloadLog = lines.map((l) => l.log).join(", ");
+    return lines.map((l) => l.text).join(" ");
   }
+
+  /** What the latest action's downloads were, for its summary line (`collectDownloads`). */
+  private downloadLog = "";
 
   /** Model-facing page snapshot, `*`-marking what is new since `previous` (scrubbed). */
   private async renderSnapshot(snap: Snapshot, previous: Snapshot | null): Promise<string> {
