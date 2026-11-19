@@ -506,58 +506,58 @@ describe("checkout and corrections", () => {
 describe("a final step is on what the person named (19 Nov)", () => {
   it("reads what a request's book, order or buy is for, with generic words, times and how it is paid left out", async () => {
     const { namedObject, namedFor } = await import("./policy.js");
-    expect(namedObject("book rmz for me today")).toEqual(["rmz"]);
-    expect(namedObject("book ganganagar for me today, at checkout apply the best coupon")).toEqual(["ganganagar"]);
-    expect(namedObject("Book a desk at RMZ Latitude tomorrow 9am with my All Access membership")).toEqual(["rmz", "latitude"]);
+    expect(namedObject("book lvp for me today")).toEqual(["lvp"]);
+    expect(namedObject("book northgate for me today, at checkout apply the best coupon")).toEqual(["northgate"]);
+    expect(namedObject("Book a desk at LVP Lakeview Plaza tomorrow 9am with my membership")).toEqual(["lvp", "lakeview", "plaza"]);
     expect(namedObject("order amul gold full cream milk and place the order with cod")).toEqual(["amul", "gold", "full", "cream", "milk"]);
     expect(namedObject("book the same one again")).toEqual([]);
     expect(namedObject("what did it cost?")).toEqual([]);
     // A follow-up that continues an unfinished request: a new name is the thing; a move of its place is not.
-    const carried = "book ganganagar for me today, at checkout apply the best coupon";
-    expect(namedFor("rmz", carried)).toEqual(["rmz"]);
-    expect(namedFor("no, the rmz one", carried)).toEqual(["rmz"]);
-    expect(namedFor("it in banglore - your are chekcing new delhi", carried)).toEqual(["ganganagar"]);
-    expect(namedFor("it's in Bangalore", carried)).toEqual(["ganganagar"]);
-    expect(namedFor("book rmz", carried)).toEqual(["rmz"]);
-    expect(namedFor("rmz")).toEqual([]);
+    const carried = "book northgate for me today, at checkout apply the best coupon";
+    expect(namedFor("lvp", carried)).toEqual(["lvp"]);
+    expect(namedFor("no, the lvp one", carried)).toEqual(["lvp"]);
+    expect(namedFor("it in riverside - you are checking the wrong city", carried)).toEqual(["northgate"]);
+    expect(namedFor("it's in Bangalore", carried)).toEqual(["northgate"]);
+    expect(namedFor("book lvp", carried)).toEqual(["lvp"]);
+    expect(namedFor("lvp")).toEqual([]);
   });
 
   it("matches a page by every named word, a plural, a one-letter typo or a city's other name", async () => {
     const { objectShown } = await import("./policy.js");
-    const ganganagar = "Hillview Pinnacle Cowork, Ganganagar, Bengaluru — Day pass ₹750. Pay & Confirm Booking";
-    expect(objectShown(["rmz"], ganganagar)).toBe(false);
-    expect(objectShown(["ganganagar"], ganganagar)).toBe(true);
-    expect(objectShown(["rmz"], "Cowork RMZ Latitude Commercial, Hebbal, Bengaluru")).toBe(true);
-    expect(objectShown(["rmz", "latitude"], "Cowork RMZ Ecoworld, Bellandur")).toBe(false);
+    const northgate = "Northgate Tower, Hillside, Bengaluru — Day pass ₹750. Pay & Confirm Booking";
+    expect(objectShown(["lvp"], northgate)).toBe(false);
+    expect(objectShown(["northgate"], northgate)).toBe(true);
+    expect(objectShown(["lvp"], "LVP Lakeview Plaza, Riverside, Bengaluru")).toBe(true);
+    expect(objectShown(["lvp", "plaza"], "LVP Lakeview Annex, Eastbay")).toBe(false);
     expect(objectShown(["headphones"], "Sony WH-1000XM5 Wireless Headphone")).toBe(true);
-    expect(objectShown(["ganganager"], ganganagar)).toBe(true);
-    expect(objectShown(["bangalore"], ganganagar)).toBe(true);
+    expect(objectShown(["northgote"], northgate)).toBe(true);
+    expect(objectShown(["bangalore"], northgate)).toBe(true);
   });
 
   it("booking controls are final steps; choosing one is not", async () => {
     const p = new DefaultPolicy();
-    const at = (target: string) => p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/checkout", target, task: "book rmz" });
+    const at = (target: string) => p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/checkout", target, task: "book lvp" });
     for (const t of ["<button>Book now</button>", "<button>Confirm booking</button>", "<button>Book</button>", "<button> Reserve </button>", "<button>Confirm & book</button>", "<a>Complete your reservation</a>"]) {
       const d = await at(t);
       expect([t, d.kind, (d as { write?: string }).write]).toEqual([t, "confirm", "pay"]);
     }
-    for (const t of ["<a>Book a day pass</a>", "<button>Select Embassy One</button>", "<a>My bookings</a>", "<a>Booking.com</a>", "<a>Books</a>", "<button>Continue</button>"]) expect([t, (await at(t)).kind]).toEqual([t, "allow"]);
+    for (const t of ["<a>Book a day pass</a>", "<button>Select Northgate Tower</button>", "<a>My bookings</a>", "<a>Booking.com</a>", "<a>Books</a>", "<button>Continue</button>"]) expect([t, (await at(t)).kind]).toEqual([t, "allow"]);
   });
 
   it("an approved pay step on a page that does not show what the person named is asked about, saying so; on the named thing it goes through", async () => {
     const p = new DefaultPolicy();
     p.approve({ kinds: ["pay"] });
-    p.expect(["rmz"]);
-    const pay = (page: string) => p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/checkout", target: "<button>Pay & Confirm Booking</button>", task: "rmz", pageText: async () => page });
-    const wrong = await pay("Hillview Pinnacle Cowork, Ganganagar, Bengaluru. Coupon DESK10 applied. Total ₹675");
+    p.expect(["lvp"]);
+    const pay = (page: string) => p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/checkout", target: "<button>Pay & Confirm Booking</button>", task: "lvp", pageText: async () => page });
+    const wrong = await pay("Northgate Tower, Hillside, Bengaluru. Coupon DESK10 applied. Total ₹675");
     expect(wrong.kind).toBe("confirm");
-    expect((wrong as { reason: string }).reason).toContain("the person asked for rmz, which this page does not show");
-    expect((await pay("Cowork RMZ Latitude Commercial, Hebbal, Bengaluru. Total ₹675")).kind).toBe("allow");
+    expect((wrong as { reason: string }).reason).toContain("the person asked for lvp, which this page does not show");
+    expect((await pay("LVP Lakeview Plaza, Riverside, Bengaluru. Total ₹675")).kind).toBe("allow");
     // A step whose own words name it needs no page read; one with nothing to read is asked about.
-    expect((await p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/x", target: "<button>Pay ₹675 for RMZ Latitude</button>", task: "rmz" })).kind).toBe("allow");
-    expect((await p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/x", target: "<button>Pay ₹675</button>", task: "rmz" })).kind).toBe("confirm");
+    expect((await p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/x", target: "<button>Pay ₹675 for LVP Lakeview Plaza</button>", task: "lvp" })).kind).toBe("allow");
+    expect((await p.check({ tool: "click", input: { ref: "e1" }, url: "https://desks.example/x", target: "<button>Pay ₹675</button>", task: "lvp" })).kind).toBe("confirm");
     // Nothing named: as before.
     p.expect([]);
-    expect((await pay("Hillview Pinnacle Cowork, Ganganagar")).kind).toBe("allow");
+    expect((await pay("Northgate Tower, Hillside")).kind).toBe("allow");
   });
 });

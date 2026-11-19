@@ -206,12 +206,12 @@ export class DefaultPolicy implements ActionPolicy {
     this.opts = { ...this.opts, preApproved: { ...cur, kinds: [...new Set([...cur.kinds, ...extra.kinds])], ...(max !== undefined ? { maxAmount: max } : {}), ...(currency ? { currency } : {}) } };
   }
 
-  /** The words the person named the pay step's object by ("rmz", "full cream milk"), from `namedObject`. */
+  /** The words the person named the pay step's object by ("lvp", "full cream milk"), from `namedObject`. */
   private named: string[] = [];
 
   /**
    * What the person's words say the pay step (book, order, buy) is for: its distinctive words (`namedObject`). A pay
-   * step on a page that shows none of them as a whole (the person said "book rmz", the page books Ganganagar) is asked
+   * step on a page that shows none of them as a whole (the person said "book lvp", the page books another place) is asked
    * about whatever approved it, with the mismatch in the question: an approval is for what the person named, never for
    * another thing (19 Nov). [] clears it.
    */
@@ -407,7 +407,7 @@ const OBJECT_END = /[,.;:!?\n(]|\s[-–—]\s|\b(?:with|using|via|on|from|paying
 /**
  * Words with no name of their own in what a final step acts on: articles, pronouns and prepositions, times and dates,
  * the kinds of thing booked or ordered (a desk, a seat, a slot), and words of the request itself. What is left names
- * the thing ("rmz", "ganganagar", "full cream milk").
+ * the thing ("lvp", "northgate", "full cream milk").
  */
 const GENERIC = new Set(
   (
@@ -427,8 +427,8 @@ const GENERIC = new Set(
 
 /**
  * The words the person's request names its final step's object by: after its first book, order or buy that names one, up to where that
- * ends ("with my credits", "and apply the coupon", a comma), with generic words, numbers and times left out. "book rmz
- * for me today" → ["rmz"]; "book a desk at RMZ Latitude tomorrow" → ["rmz", "latitude"]; "book the same one" → [].
+ * ends ("with my credits", "and apply the coupon", a comma), with generic words, numbers and times left out. "book lvp
+ * for me today" → ["lvp"]; "book a desk at Lakeview Plaza tomorrow" → ["lakeview", "plaza"]; "book the same one" → [].
  */
 export function namedObject(text: string): string[] {
   // The first request that names something: "order amul gold milk and place the order with cod" is the milk.
@@ -464,8 +464,8 @@ function oneEdit(a: string, b: string): boolean {
 }
 
 /**
- * The page (or a control) shows every one of the named words: as a word, or a word it begins (a plural, "RMZ" in
- * "RMZLatitude"), a long one with a typo of one letter, or a city by its other name. A word missing means the step is
+ * The page (or a control) shows every one of the named words: as a word, or a word it begins (a plural, "LVP" in
+ * "LVPLakeview"), a long one with a typo of one letter, or a city by its other name. A word missing means the step is
  * on something else, or on something the page does not name, and either way not on what the person said.
  */
 export function objectShown(named: readonly string[], text: string): boolean {
@@ -482,9 +482,9 @@ export function objectShown(named: readonly string[], text: string): boolean {
 const SCOPE_ONLY = /^\W*(?:no[,.]?\s+)?(?:it'?s|it is|it|its|that'?s|that is|is|located|the place is|the venue is)\s+(?:in|at|near)\b/i;
 
 /**
- * What a run's pay step must be for, from the person's words: their newest message's request ("book rmz" → rmz), else,
- * when it continues an unfinished request, the new name it gives ("rmz" alone, "the RMZ one"), else that request's own
- * ("book ganganagar…" corrected by "it's in Bangalore" → ganganagar). [] when they name nothing ("book the same one").
+ * What a run's pay step must be for, from the person's words: their newest message's request ("book lvp" → lvp), else,
+ * when it continues an unfinished request, the new name it gives ("lvp" alone, "the LVP one"), else that request's own
+ * ("book northgate…" corrected by "it's in Bangalore" → northgate). [] when they name nothing ("book the same one").
  */
 export function namedFor(newest: string, carried = ""): string[] {
   const own = namedObject(newest);
