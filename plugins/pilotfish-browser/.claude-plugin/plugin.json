@@ -8,12 +8,12 @@
     "url": "https://pilotfish.gai.ventures"
   },
   "homepage": "https://pilotfish.gai.ventures/docs/open",
-  "repository": "https://github.com/gAI-ventures/pilotfish-mcp",
+  "repository": "https://github.com/gAI-ventures/pilotfish-ai",
   "license": "MIT",
   "keywords": ["browser", "chrome", "browser-automation", "web", "cdp", "mcp", "pilotfish"],
   "icon": "./assets/logo.png",
   "documentationUrl": "https://pilotfish.gai.ventures/docs/open",
-  "supportUrl": "https://github.com/gAI-ventures/pilotfish-mcp/issues",
+  "supportUrl": "https://github.com/gAI-ventures/pilotfish-ai/issues",
   "privacyPolicyUrl": "https://pilotfish.gai.ventures/privacy",
   "termsOfServiceUrl": "https://pilotfish.gai.ventures/terms"
 }

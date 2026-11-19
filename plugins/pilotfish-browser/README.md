@@ -10,11 +10,11 @@ model decides every step; the server makes no model calls. Free and MIT licensed
 Claude Code:
 
 ```text
-/plugin marketplace add gAI-ventures/pilotfish-mcp
+/plugin marketplace add gAI-ventures/pilotfish-ai
 /plugin install pilotfish-browser@pilotfish
 ```
 
-Cursor and VS Code: the install buttons in the [repository's README](https://github.com/gAI-ventures/pilotfish-mcp#install) add the server in one click.
+Cursor and VS Code: the install buttons in the [repository's README](https://github.com/gAI-ventures/pilotfish-ai#install) add the server in one click.
 
 ## What it needs
 
@@ -28,4 +28,4 @@ Ask your agent for something on the web, for example "open example.com and tell 
 opens and the agent works in it. Sign-ins, one-time codes and CAPTCHAs are handed to you in that window (the result
 says `NEEDS A PERSON`), and the agent carries on once you have dealt with the page.
 
-Tools, settings and setup per client: <https://pilotfish.gai.ventures/docs/open>. Issues: <https://github.com/gAI-ventures/pilotfish-mcp/issues>.
+Tools, settings and setup per client: <https://pilotfish.gai.ventures/docs/open>. Issues: <https://github.com/gAI-ventures/pilotfish-ai/issues>.

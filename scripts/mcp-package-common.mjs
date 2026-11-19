@@ -72,7 +72,7 @@ export { copyFileSync };
  * The public source repository of both packages (docs/PUBLISHING.md, "Public mirror"): their code, issues and releases. The
  * mirror export writes the repository it exports to here.
  */
-export const SOURCE_REPO = "https://github.com/gAI-ventures/pilotfish-mcp";
+export const SOURCE_REPO = "https://github.com/gAI-ventures/pilotfish-ai";
 
 /**
  * package.json fields both packages share. `release.npmDescriptionNote`, when set, is added to the npm description

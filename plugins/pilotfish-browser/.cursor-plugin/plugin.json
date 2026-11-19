@@ -8,7 +8,7 @@
     "url": "https://pilotfish.gai.ventures"
   },
   "homepage": "https://pilotfish.gai.ventures/docs/open",
-  "repository": "https://github.com/gAI-ventures/pilotfish-mcp",
+  "repository": "https://github.com/gAI-ventures/pilotfish-ai",
   "license": "MIT",
   "logo": "assets/logo.png",
   "keywords": ["browser", "chrome", "browser-automation", "web", "cdp", "mcp", "pilotfish"],

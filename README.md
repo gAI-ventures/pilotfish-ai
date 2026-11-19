@@ -1,19 +1,28 @@
-# pilotfish MCP
+# pilotfish: open MCP and SDKs
 
 [![npm: @gaiventures/pilotfish-mcp](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp?label=%40gaiventures%2Fpilotfish-mcp)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp)
+[![npm: @gaiventures/pilotfish](https://img.shields.io/npm/v/@gaiventures/pilotfish?label=%40gaiventures%2Fpilotfish)](https://www.npmjs.com/package/@gaiventures/pilotfish)
 [![npm: @gaiventures/pilotfish-mcp-managed](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp-managed?label=%40gaiventures%2Fpilotfish-mcp-managed)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp-managed)
 [![MCP Registry: io.github.gAI-ventures/pilotfish](https://img.shields.io/badge/MCP_Registry-io.github.gAI--ventures%2Fpilotfish-blue)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Give any MCP agent (Claude Code, Codex CLI, Cursor, ...) a real Chrome on your own computer. Free, no account, no
-API key: your agent's own model reads each page and decides every step through the `browser_*` tools, and this
-server makes no model calls. A page that offers its own tools through [WebMCP](https://webmachinelearning.github.io/webmcp/)
-gets them listed with its snapshot, callable with `browser_page_tool`.
+A real Chrome for AI agents and for your own code, that spends fewer tokens and answers sooner: pages go out as compact
+outlines with refs, and after the first look only what changed, so an agent pays for each screen once.
 
-- **Install:** `npx -y @gaiventures/pilotfish-mcp` ([npm](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp))
-- **Docs:** <https://pilotfish.gai.ventures/docs/open> (setup per client, tools, settings)
+- **Open MCP** (`@gaiventures/pilotfish-mcp`): give any MCP agent (Claude Code, Codex CLI, Cursor, ...) a real Chrome on
+  your own computer. Free, no account, no API key: your agent's own model reads each page and decides every step through
+  the `browser_*` tools, and this server makes no model calls. A page that offers its own tools through
+  [WebMCP](https://webmachinelearning.github.io/webmcp/) gets them listed with its snapshot, callable with `browser_page_tool`.
+- **SDKs for TypeScript** (`@gaiventures/pilotfish` on npm) **and Python** (`pilotfish`, installed from this repository): drive Chrome on your machine from
+  code with the same tools, or send whole tasks to pilotfish's cloud browser over its REST API (tasks, batches,
+  identities, saved tasks and schedules, webhooks), with the same names in both languages.
+
+- **Install the MCP:** `npx -y @gaiventures/pilotfish-mcp` ([npm](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp))
+- **Install an SDK:** `npm install @gaiventures/pilotfish` · `pip install "pilotfish @ git+https://github.com/gAI-ventures/pilotfish-ai#subdirectory=sdks/python"`
+- **Docs:** <https://pilotfish.gai.ventures/docs/open> (the MCP), <https://pilotfish.gai.ventures/docs/sdk> (the SDKs),
+  <https://pilotfish.gai.ventures/docs/api> (the REST API)
 - **MCP Registry:** `io.github.gAI-ventures/pilotfish` ([listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish))
-- **Issues:** <https://github.com/gAI-ventures/pilotfish-mcp/issues>
+- **Issues:** <https://github.com/gAI-ventures/pilotfish-ai/issues>
 
 ## Install
 
@@ -32,7 +41,7 @@ claude mcp add pilotfish -- npx -y @gaiventures/pilotfish-mcp
 or as a plugin, from this repository's plugin marketplace, inside Claude Code:
 
 ```text
-/plugin marketplace add gAI-ventures/pilotfish-mcp
+/plugin marketplace add gAI-ventures/pilotfish-ai
 /plugin install pilotfish-browser@pilotfish
 ```
 
@@ -49,12 +58,49 @@ or as a plugin, from this repository's plugin marketplace, inside Claude Code:
 Node 22 or later and Google Chrome (or Chromium) on the same computer. Setup per client:
 <https://pilotfish.gai.ventures/docs/open>.
 
+## SDKs
+
+TypeScript:
+
+```ts
+import { LocalBrowser, Pilotfish } from "@gaiventures/pilotfish";
+
+// Chrome on your machine, through this repository's MCP: no key, no model calls.
+const browser = await LocalBrowser.start();
+await browser.navigate("https://news.ycombinator.com");
+console.log((await browser.query("document.title")).value);
+await browser.close();
+
+// A whole task in pilotfish's cloud browser (an API key from Org settings → API keys).
+const pf = new Pilotfish({ apiKey: process.env.PILOTFISH_API_KEY });
+const task = await pf.tasks.run("Top story on Hacker News right now, with its points");
+console.log(task.result?.result);
+```
+
+Python:
+
+```python
+from pilotfish import LocalBrowser, Pilotfish
+
+with LocalBrowser.start() as browser:
+    browser.navigate("https://news.ycombinator.com")
+    print(browser.query("document.title").value)
+
+pf = Pilotfish()  # reads PILOTFISH_API_KEY
+task = pf.tasks.run("Top story on Hacker News right now, with its points")
+print(task["result"]["result"])
+```
+
+Docs: <https://pilotfish.gai.ventures/docs/sdk>. Sources: `packages/sdk` (TypeScript) and `sdks/python` (Python).
+
 ## What is here
 
 | Folder | What |
 | --- | --- |
 | `packages/mcp` | The local MCP server (stdio, or Streamable HTTP with `--http`): the tools, settings and the hand-off to a person. Published as `@gaiventures/pilotfish-mcp`. |
 | `packages/mcp-managed` | A stdio relay to pilotfish's hosted MCP, for clients that only speak stdio. Published as `@gaiventures/pilotfish-mcp-managed`. |
+| `packages/sdk` | The TypeScript SDK: `Pilotfish` (the hosted REST API) and `LocalBrowser` (this repository's MCP over stdio). Published as `@gaiventures/pilotfish`. |
+| `sdks/python` | The Python SDK, the same clients with the same names, sync and async (`pilotfish`). |
 | `packages/cdp` | A thin, typed Chrome DevTools Protocol client. |
 | `packages/browser` | Launching Chrome and driving pages over raw CDP: frames, hit-tested input, settling after an action. |
 | `packages/perception` | Structure-first page snapshots, element handles, and the evidence diff after each action. |
@@ -65,7 +111,7 @@ Node 22 or later and Google Chrome (or Chromium) on the same computer. Setup per
 
 ## Local or managed?
 
-This repository is the local version, free and MIT licensed. pilotfish managed is a paid service: pilotfish runs the whole task in its cloud browser and hands your agent the result.
+This repository holds the local version, free and MIT licensed, and the SDKs for both. pilotfish managed is a paid service: pilotfish runs the whole task in its cloud browser and hands your agent the result.
 
 |  | **Local** (this repository) | **Managed** |
 | --- | --- | --- |
@@ -87,7 +133,9 @@ npm ci
 npm run build
 npm test                                                         # unit tests
 PILOTFISH_E2E=1 npx vitest run packages/mcp --testTimeout 120000 # the MCP against a real Chrome
+PILOTFISH_E2E=1 npx vitest run packages/sdk --testTimeout 120000 # the TypeScript SDK's local client against a real Chrome
 npm run package                                                  # the npm packages, in packages/*/npm-package
+cd sdks/python && pip install -e ".[test]" && pytest              # the Python SDK (PILOTFISH_E2E=1 for its local client)
 ```
 
 The browser tests use Google Chrome when it is installed; set `PILOTFISH_CHROME` to a Chromium binary to use another.

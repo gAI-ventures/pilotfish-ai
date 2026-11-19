@@ -1,0 +1,6 @@
+{
+  "name": "@gaiventures/pilotfish",
+  "version": "0.1.0",
+  "title": "pilotfish SDK",
+  "description": "Run browser tasks in pilotfish's cloud from TypeScript, or drive Chrome on your own machine."
+}

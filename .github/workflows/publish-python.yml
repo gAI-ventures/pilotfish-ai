@@ -1,0 +1,95 @@
+name: Publish Python SDK
+
+# Releases the Python SDK (sdks/python, `pilotfish` on PyPI; docs/PUBLISHING.md):
+# 1. its unit tests, and its local client against a real Chrome through the MCP built here;
+# 2. the sdist and wheel (python -m build), checked with twine;
+# 3. published to PyPI with trusted publishing (this run's OIDC token, no stored token), only when pyproject.toml's
+#    version is not on PyPI yet and the repository variable PYPI_PUBLISH_ENABLED is true. Without it every run is a
+#    dry run that uploads the built files as an artifact.
+#
+# PyPI's side, once: a trusted publisher for project `pilotfish`, owner gAI-ventures, repository pilotfish-ai,
+# workflow publish-python.yml, environment pypi (a pending publisher before the first release).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - sdks/python/**
+      - .github/workflows/publish-python.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the version in pyproject.toml if PyPI does not have it (otherwise a dry run)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-python
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PILOTFISH_CHROME: /usr/bin/google-chrome
+      PILOTFISH_ADBLOCK_OFFLINE: "1"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      on_pypi: ${{ steps.version.outputs.on_pypi }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the open MCP (the local client drives Chrome through it)
+        run: |
+          npm ci
+          npm run build
+      - name: Chrome sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Tests
+        run: |
+          python -m pip install -e "sdks/python[test]"
+          python -m pytest sdks/python -q
+        env:
+          PILOTFISH_E2E: "1"
+      - name: Build and check
+        run: |
+          python -m pip install build twine
+          python -m build sdks/python --outdir "$RUNNER_TEMP/dist"
+          python -m twine check "$RUNNER_TEMP"/dist/*
+      - name: Version, and whether PyPI has it
+        id: version
+        run: |
+          v=$(python -c "import tomllib; print(tomllib.load(open('sdks/python/pyproject.toml','rb'))['project']['version'])")
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/pilotfish/$v/json")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "on_pypi=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "pilotfish $v: $([ "$code" = 200 ] && echo 'already on PyPI, nothing to publish' || echo 'not on PyPI yet')" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: ${{ runner.temp }}/dist
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: vars.PYPI_PUBLISH_ENABLED == 'true' && needs.build.outputs.on_pypi == 'false' && (github.event_name == 'push' || inputs.publish == true)
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

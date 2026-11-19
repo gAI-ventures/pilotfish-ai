@@ -1,19 +1,21 @@
 #!/usr/bin/env node
-// Decides and prepares a release of one public MCP package, for .github/workflows/publish.yml (docs/PUBLISHING.md):
-//   node scripts/mcp-release.mjs <mcp|mcp-managed> [--against <tarball>]
+// Decides and prepares a release of one public npm package (the two MCPs and the SDK), for the publish workflows
+// (docs/PUBLISHING.md):
+//   node scripts/mcp-release.mjs <mcp|mcp-managed|sdk> [--against <tarball>]
 //
 // 1. The version: release.json's when it is above the latest on npm (a deliberate bump of the minor or major), else
 //    the latest on npm plus one patch.
 // 2. Builds the package with it: packages/<name>/scripts/package.mjs, with all its checks (classified code only,
 //    nothing hosted-only, user docs that match the server).
-// 3. Compares what would ship (cli.js, README.md, LICENSE, and package.json but its version) with the latest on npm.
+// 3. Compares what would ship (every file: cli.js or dist/, README.md, LICENSE, and package.json but its version) with
+//    the latest on npm.
 //    Unchanged: nothing to publish, whatever the push changed elsewhere.
 //
 // Prints a summary and writes name, version, on_npm and changed to $GITHUB_OUTPUT when it is set. --against compares
 // with a local tarball instead of npm's latest (a test of this script).
 
 import { execFileSync, execSync } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +24,7 @@ import { parseArgs } from "node:util";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { values, positionals } = parseArgs({ allowPositionals: true, options: { against: { type: "string" } } });
 const which = positionals[0];
-if (which !== "mcp" && which !== "mcp-managed") throw new Error("Usage: node scripts/mcp-release.mjs <mcp|mcp-managed> [--against <tarball>]");
+if (!["mcp", "mcp-managed", "sdk"].includes(which)) throw new Error("Usage: node scripts/mcp-release.mjs <mcp|mcp-managed|sdk> [--against <tarball>]");
 const pkgDir = join(root, "packages", which);
 const release = JSON.parse(readFileSync(join(pkgDir, "release.json"), "utf8"));
 
@@ -75,9 +77,16 @@ const contentOf = (dir, f, v) => {
   const file = join(dir, f);
   return existsSync(file) ? readFileSync(file, "utf8").replaceAll(JSON.stringify(v), '"<version>"') : null;
 };
+/** Every file a package folder ships (its package.json `files`) but package.json, as paths with forward slashes. */
+const shipped = (dir, sub = "", files = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).files ?? []) =>
+  readdirSync(join(dir, sub), { withFileTypes: true }).flatMap((e) => {
+    const rel = sub ? `${sub}/${e.name}` : e.name;
+    if (e.isDirectory()) return shipped(dir, rel, files);
+    return rel !== "package.json" && files.some((f) => rel === f || rel.startsWith(`${f}/`)) ? [rel] : [];
+  });
 let changed = [];
 if (published) {
-  for (const f of ["cli.js", "README.md", "LICENSE"]) {
+  for (const f of [...new Set([...shipped(built), ...shipped(published.dir)])].sort()) {
     const a = contentOf(built, f, version);
     const b = contentOf(published.dir, f, published.version);
     if (a === null || b === null || a !== b) changed.push(f);
@@ -88,7 +97,7 @@ if (published) {
 rmSync(tmp, { recursive: true, force: true });
 
 const summary = !published
-  ? `${release.name} is not on npm yet: the first version (${version}) is published by hand (docs/PUBLISHING.md).`
+  ? `${release.name} is not on npm yet: the first version (${version}) is published by hand, then its trusted publisher is set (docs/PUBLISHING.md).`
   : changed.length
     ? `${release.name}: npm has ${published.version}; ${version} changes ${changed.join(", ")}.`
     : `${release.name}: what would ship is the same as ${published.version} on npm; nothing to publish.`;

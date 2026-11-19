@@ -21,6 +21,9 @@
     },
     {
       "path": "packages/mcp-managed"
+    },
+    {
+      "path": "packages/sdk"
     }
   ]
 }

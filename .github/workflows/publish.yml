@@ -1,8 +1,10 @@
 name: Publish
 
-# Keeps the two npm packages in step with this repository (docs/PUBLISHING.md):
+# Keeps the three npm packages in step with this repository (docs/PUBLISHING.md):
 #   @gaiventures/pilotfish-mcp          packages/mcp, the open local MCP (bundles the core packages)
 #   @gaiventures/pilotfish-mcp-managed  packages/mcp-managed, the managed MCP's stdio relay
+#   @gaiventures/pilotfish              packages/sdk, the TypeScript SDK (not an MCP server: no MCP Registry listing)
+# The Python SDK has its own workflow, publish-python.yml.
 #
 # On every push to main, for each package: build and test; scripts/mcp-release.mjs picks the next version and builds
 # the package with its checks; the tarball is installed in an empty project and tested; then it is published to npm
@@ -37,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [mcp, mcp-managed]
+        package: [mcp, mcp-managed, sdk]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # One release of a package at a time: two pushes never pick the same version.
@@ -60,7 +62,7 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Chrome sandbox
-        if: matrix.package == 'mcp'
+        if: matrix.package == 'mcp' || matrix.package == 'sdk'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Local MCP e2e (in process, and the CLI over stdio)
         if: matrix.package == 'mcp'
@@ -84,6 +86,13 @@ jobs:
         env:
           PILOTFISH_E2E: "1"
           PILOTFISH_MCP_CLI: ${{ runner.temp }}/user/node_modules/@gaiventures/pilotfish-mcp/cli.js
+      - name: The installed SDK loads, and drives a real Chrome through the open MCP
+        if: matrix.package == 'sdk'
+        run: |
+          cd "$RUNNER_TEMP/user" && node -e "import('@gaiventures/pilotfish').then((m) => { if (!m.Pilotfish || !m.LocalBrowser || m.VERSION !== '${{ steps.release.outputs.version }}') process.exit(1) })"
+          cd "$GITHUB_WORKSPACE" && npx vitest run packages/sdk --testTimeout 120000
+        env:
+          PILOTFISH_E2E: "1"
       - name: The installed relay carries a session over stdio
         if: matrix.package == 'mcp-managed'
         run: npx vitest run packages/mcp-managed -t "CLI relays"
@@ -97,7 +106,7 @@ jobs:
         working-directory: packages/${{ matrix.package }}/npm-package
         run: npm publish --access public --provenance
       - name: List in the MCP Registry
-        if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true'
+        if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true' && matrix.package != 'sdk'
         run: |
           curl -fsSL --retry 3 --retry-all-errors "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz" | tar xz -C "$RUNNER_TEMP" mcp-publisher
           "$RUNNER_TEMP/mcp-publisher" login github-oidc

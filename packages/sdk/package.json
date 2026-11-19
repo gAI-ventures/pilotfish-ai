@@ -1,0 +1,22 @@
+{
+  "name": "@pilotfish/sdk",
+  "version": "0.0.1",
+  "description": "pilotfish SDK for TypeScript and JavaScript: run browser tasks in pilotfish's cloud from code (the REST API), or drive Chrome on your own machine with the open MCP's tools.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gAI-ventures/pilotfish-ai.git",
+    "directory": "packages/sdk"
+  }
+}

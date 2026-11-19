@@ -245,9 +245,9 @@ pilotfish servers, no model providers.
 
 ## Source and issues
 
-- Source: [gAI-ventures/pilotfish-mcp](https://github.com/gAI-ventures/pilotfish-mcp/tree/main/packages/mcp) on GitHub.
+- Source: [gAI-ventures/pilotfish-ai](https://github.com/gAI-ventures/pilotfish-ai/tree/main/packages/mcp) on GitHub.
   This package is published from there, with npm provenance.
-- Issues: [github.com/gAI-ventures/pilotfish-mcp/issues](https://github.com/gAI-ventures/pilotfish-mcp/issues).
+- Issues: [github.com/gAI-ventures/pilotfish-ai/issues](https://github.com/gAI-ventures/pilotfish-ai/issues).
 
 ## License
 

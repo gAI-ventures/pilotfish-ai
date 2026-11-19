@@ -376,6 +376,9 @@ the monthly limit and spending by category and by model.
 | `message_job` `{id, text}` | Pass on what the person says while a job runs ("take the cheaper one", a detail it asked for), in their words. It reads the message before its next step, and the person's newest words win over the task; sent while the job waits on a question, it answers it. |
 | `take_control` `{id}` / `hand_back` `{id}` | Pause a running job and get a link to drive its browser yourself, then let it carry on from where you left it. |
 | `cancel_job` `{id}` | Stop a queued, running or waiting job for good: it can't be resumed, and what it spent stays charged. It is the only way to stop one: a tool call that is cancelled or times out stops waiting, and the job carries on. |
+| `run_batch` `{tasks, name?, start_url?, region?, sites?, login?, accounts?, identity?, credentials?, stealth?, solve?, model?, max_steps?, output_schema?, wait?, wait_seconds?}` | Run up to 100 independent tasks in one call, one after another, and collect their results together: the same kind of task over a list (each product's price, each company's careers page). Each task is its words or `{task, start_url?, region?, model?, max_steps?, output_schema?}`; the other options apply to every task unless it sets its own. Each task is charged as a task when it runs; if credits run out the rest are skipped, never run or charged. Waits like `browser_task`, then gives the batch's status, cost and each task's status, job id, cost and answer so far. |
+| `get_batch` `{id?, wait_seconds?}` | A batch's status and each task's result so far; `wait_seconds` waits for it to end. Without `id`: your recent batches. `get_job` on a task's job id gives its whole result. |
+| `cancel_batch` `{id}` | Stop a batch: the task running now is cancelled and the rest are skipped (never run, never charged). |
 | `get_replay` `{id}` | The job's steps with timings and what got in the way, and a link to its replay video (valid for an hour) when one was recorded. Replay videos are kept 7 days by default (your org's admins can choose 1–30); after that it says the video expired, and the steps are still there. |
 | `list_saved_tasks` | Your saved tasks: id, name, settings, how often and when they last ran, and what their last run needed. |
 | `run_saved_task` `{id, extra_instructions?, start_url?, region?, sites?, stealth?, solve?, output_schema?, wait?, wait_seconds?}` | Run a saved task with its saved settings, with optional changes for this run only. |
@@ -500,9 +503,9 @@ Only for this package (the relay). Clients that connect to the URL need none.
 
 ## Source and issues
 
-- Source: [gAI-ventures/pilotfish-mcp](https://github.com/gAI-ventures/pilotfish-mcp/tree/main/packages/mcp-managed) on GitHub.
+- Source: [gAI-ventures/pilotfish-ai](https://github.com/gAI-ventures/pilotfish-ai/tree/main/packages/mcp-managed) on GitHub.
   The relay is published from there, with npm provenance.
-- Issues: [github.com/gAI-ventures/pilotfish-mcp/issues](https://github.com/gAI-ventures/pilotfish-mcp/issues).
+- Issues: [github.com/gAI-ventures/pilotfish-ai/issues](https://github.com/gAI-ventures/pilotfish-ai/issues).
 
 ## License
 

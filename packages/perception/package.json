@@ -19,7 +19,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gAI-ventures/pilotfish-mcp.git",
+    "url": "git+https://github.com/gAI-ventures/pilotfish-ai.git",
     "directory": "packages/perception"
   }
 }
