@@ -81,6 +81,14 @@ const Quiet = z
   .boolean()
   .optional()
   .describe("Default true. false: no page snapshot in the result, only the evidence (what changed, was added or removed) and notes; for a next step that reads with browser_query or browser_get_text, or more steps before one look. browser_snapshot shows the screen at any time.");
+/**
+ * The same three parameters on the other tools, each said once (18 Nov): their full wording is on browser_click, and
+ * the client's model reads the whole tool list. Repeated whole, they were about 3,000 of its 19,781 characters, paid by
+ * every session on every call.
+ */
+const QuietRef = Quiet.describe("Default true; false: evidence and notes only, as in browser_click.");
+const ExpectRef = Expect.describe("As in browser_click.");
+const EscalateRef = Escalate.describe("As in browser_click.");
 
 /** The fields of each browser_actions step, its first ones required. */
 const STEP_FIELDS = {
@@ -121,8 +129,8 @@ export const Inputs = {
   browser_navigate: z
     .object({
       url: z.url({ protocol: /^https?$/ }).describe("Absolute http(s) URL"),
-      expect: Expect,
-      escalate: Escalate,
+      expect: ExpectRef,
+      escalate: EscalateRef,
       snapshot: z
         .boolean()
         .optional()
@@ -138,14 +146,14 @@ export const Inputs = {
       ref: Ref,
       text: z.string().max(20_000),
       submit: z.boolean().optional().describe("Press Enter afterwards"),
-      snapshot: Quiet,
-      expect: Expect,
-      escalate: Escalate,
+      snapshot: QuietRef,
+      expect: ExpectRef,
+      escalate: EscalateRef,
     })
     .strict(),
-  browser_select: z.object({ ref: Ref, values: z.array(z.string()).min(1).max(50), snapshot: Quiet, expect: Expect, escalate: Escalate }).strict(),
-  browser_press: z.object({ key: z.string().min(1).max(40).describe('e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a"'), snapshot: Quiet, expect: Expect, escalate: Escalate }).strict(),
-  browser_scroll: z.object({ direction: Direction, snapshot: Quiet }).strict(),
+  browser_select: z.object({ ref: Ref, values: z.array(z.string()).min(1).max(50), snapshot: QuietRef, expect: ExpectRef, escalate: EscalateRef }).strict(),
+  browser_press: z.object({ key: z.string().min(1).max(40).describe('e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a"'), snapshot: QuietRef, expect: ExpectRef, escalate: EscalateRef }).strict(),
+  browser_scroll: z.object({ direction: Direction, snapshot: QuietRef }).strict(),
   browser_screenshot: z.object({}).strict(),
   browser_get_text: z
     .object({
@@ -166,11 +174,11 @@ export const Inputs = {
       until: z.string().max(120).optional().describe("Return once the page shows this text"),
       gone: z.string().max(120).optional().describe("Return once this text is gone"),
       in: Ref.optional().describe("Only within this element; the reply says whether it already held when the wait began"),
-      snapshot: Quiet,
+      snapshot: QuietRef,
     })
     .strict(),
   browser_resume: z.object({ timeout_s: z.number().int().min(5).max(900).optional().describe("Default 300") }).strict(),
-  browser_actions: z.object({ actions: z.array(Step).min(1).max(10), snapshot: Quiet }).strict(),
+  browser_actions: z.object({ actions: z.array(Step).min(1).max(10), snapshot: QuietRef }).strict(),
   browser_tabs: z.object({ switch_to: z.string().min(1).max(10).optional().describe('Tab id to work in from now on, e.g. "t2"') }).strict(),
   browser_close: z.object({}).strict(),
   browser_page_tool: z
@@ -630,7 +638,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     {
       title: "Open a URL",
       description:
-        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false leaves the screen out for a page you will only read or leave. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first with your own search tool to pick the site, or answer from the search when that is enough; open a site when the task needs one (a price for dates, a form, an account).",
+        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false leaves the screen out for a page you will only read or leave. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. A search the site's form takes several steps for (a place, dates, guests, a sort, filters) is usually one call as such an address, where the form takes a call and a screen for each step. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first with your own search tool to pick the site, or answer from the search when that is enough; open a site when the task needs one (a price for dates, a form, an account).",
       inputSchema: Inputs.browser_navigate,
       annotations: acting,
     },
@@ -772,6 +780,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       // Each run step's facts, printed under its line; the last step's are in its own evidence below.
       const stepFacts: string[][] = [];
       let failed = false;
+      let changedBefore = false;
       for (const [i, a] of args.actions.entries()) {
         const before = (await session.page()).lastDocumentAt;
         // Each step's own fields are there: the schema refused a step without them.
@@ -782,7 +791,12 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
           : a.action === "press" ? ["press", { key: a.key }]
           : a.action === "scroll" ? ["scroll", { direction: a.direction }]
           : ["wait", { seconds: a.seconds }];
-        const r = await session.act(name, input, { ...(args.snapshot === false ? { snapshot: false } : {}), ...baseOpts() });
+        // Only the last step's reply reaches the client: once an earlier step changed the page, the last one prints it
+        // even if it changed nothing itself (a type, then a wait while suggestions came: "unchanged" was said of a
+        // screen the client never got, 18 Nov).
+        const earlierChanged = i > 0 && i === args.actions.length - 1 && changedBefore;
+        const r = await session.act(name, input, { ...(args.snapshot === false ? { snapshot: false } : {}), ...baseOpts(), ...(earlierChanged ? { earlierChanged: true } : {}) });
+        if (/: changed$/.test(r.summary)) changedBefore = true;
         ran++;
         for (const [k, v] of Object.entries(numbersOnly(r.timings ?? {}))) phases[k] = (phases[k] ?? 0) + v;
         lines.push(`${i + 1}. ${r.ok ? "" : "FAILED "}${r.summary}`);
@@ -897,13 +911,27 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       delete s["properties"];
       delete s["additionalProperties"];
     }
+    // Checks only the server needs (18 Nov): a ref's pattern, a string's length bounds, a URL's format and a nested
+    // object's "additionalProperties: false" (each tool's own arguments stay closed, below). Every call is still validated against the full schema here, and a
+    // wrong value gets its reason back; the model is told types, required fields, enums, number ranges and list
+    // sizes. They were about 1,900 of the list's 13,750 description and schema characters, read on every call.
+    for (const k of ["pattern", "minLength", "maxLength", "format"]) delete s[k];
+    if (s["additionalProperties"] === false) delete s["additionalProperties"];
+    // An object said once in full (expect, on browser_click) is only pointed to on the other tools: its fields are read
+    // there, and a call is validated against them here as before (about 400 characters on each of four tools).
+    if (s["description"] === "As in browser_click." && s["type"] === "object") {
+      delete s["properties"];
+      delete s["required"];
+    }
   };
   mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: [...registered]
       .filter(([, t]) => t.enabled)
       .map(([name, t]): Tool => {
         const { $schema: _dialect, ...inputSchema } = z.toJSONSchema(t.inputSchema as z.ZodType, { target: "draft-07", io: "input", override: trim });
-        return { name, title: t.title, description: t.description, inputSchema: inputSchema as Tool["inputSchema"], annotations: t.annotations, execution: t.execution, _meta: t._meta };
+        // Each tool's own arguments stay closed in the list: the model is told it may send no other field.
+        const closed = { ...inputSchema, additionalProperties: false };
+        return { name, title: t.title, description: t.description, inputSchema: closed as Tool["inputSchema"], annotations: t.annotations, execution: t.execution, _meta: t._meta };
       }),
   }));
 

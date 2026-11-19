@@ -210,6 +210,10 @@ export interface AgentOptions {
   compactSnapshots?: boolean;
   /** With compactSnapshots: the serializer's `roleTags` markup on screens, evidence and find lines (the open MCP). */
   roleTags?: boolean;
+  /** The serializer's `screenOnly`: nothing printed off the screen to the side, no empty tracker frames (the open MCP). */
+  screenOnly?: boolean;
+  /** The serializer's `sameNames`: a line under a suggestion list whose options share a name (the open MCP). */
+  sameNameNotes?: boolean;
   /**
    * Action receipts for a client that reads its own pages (the open MCP, 17 Nov): an element found again after the
    * page redrew it is said in the evidence, and the receipt lines of later stages (read-back, validation, facts,
@@ -559,6 +563,9 @@ export interface RenderedPage {
   loading?: { active: string[]; exempt: string[]; unknown?: true };
 }
 
+/** How long a pick of a tab, sort or list option waits for the lists on screen to change (the open MCP; 18 Nov). */
+const LISTS_WAIT_MS = 6_000;
+
 /** What act() returns besides the evidence. */
 export interface ActOptions {
   /** false: no page snapshot after the action (the caller reads the page its own way); the evidence gives counts. */
@@ -576,6 +583,12 @@ export interface ActOptions {
    * even when this action changed nothing, and do not call refs from an earlier snapshot valid.
    */
   unseen?: boolean;
+  /**
+   * An earlier step of the caller's same call changed the page, and only this step's reply reaches the client (the
+   * open MCP's browser_actions, 18 Nov): print the page even when this step changed nothing, and never call the
+   * previous snapshot (printed for that earlier step, never delivered) the one the client has.
+   */
+  earlierChanged?: boolean;
   /**
    * The caller's base is a page printed this way (a RenderedPage's `view`, e.g. a read_page reply's): when the action's
    * own printing differs and the executor can print the page that way, the page is printed that way too
@@ -1215,6 +1228,10 @@ export class Agent {
   private escalate = false;
   /** This act's ActOptions.unseen. */
   private unseen = false;
+  /** This act's ActOptions.earlierChanged. */
+  private earlierChanged = false;
+  /** Same-name suggestion picks already refused once (tab, document and ref): a second click of one goes through. */
+  private readonly sameNameRefused = new Set<string>();
   /** This act's ActOptions.alsoView. */
   private alsoView: string | undefined;
   /** The plain read_page this act printed, in parts (ActOutcome.read). */
@@ -1854,6 +1871,7 @@ export class Agent {
     this.expectation = this.opts.actionReceipts && actOpts.expect && Object.keys(actOpts.expect).length ? actOpts.expect : null;
     this.escalate = !!(this.opts.actionReceipts && actOpts.escalate);
     this.unseen = !!actOpts.unseen;
+    this.earlierChanged = !!actOpts.earlierChanged;
     this.alsoView = actOpts.alsoView;
     this.readRendered = null;
     this.skipSnapshot = actOpts.snapshot === false;
@@ -1867,6 +1885,7 @@ export class Agent {
       this.expectation = null;
       this.escalate = false;
       this.unseen = false;
+      this.earlierChanged = false;
       this.alsoView = undefined;
     }
     this.opts.onStep?.({ type: "tool_result", step, name, ok: !outcome.isError, summary: outcome.summary, evidence: outcome.evidence, durationMs: Date.now() - started, ...(outcome.answered ? { answered: outcome.answered } : {}), ...(outcome.timings ? { timings: outcome.timings } : {}) });
@@ -2052,6 +2071,38 @@ export class Agent {
     const r = await readPage(this.page, snap);
     if (r.state === "unknown") return { check: true, snap: r.snap };
     return { check: isChallenge(r.result.category) || r.result.category === "hard_block", snap: r.snap };
+  }
+
+  /**
+   * The text of the lists, tables, grids, feeds and tab panels on screen, outermost only (read only; menus, listboxes,
+   * tab lists, navigation and dialogs left out: a pick's own control is no result), or null when it cannot be read.
+   */
+  private async listsOnScreen(): Promise<string | null> {
+    const read = `(() => {
+      const sel = '[role=list],[role=grid],[role=table],[role=treegrid],[role=feed],[role=tabpanel],ul,ol,table';
+      const skip = /^(listbox|menu|menubar|tablist|navigation|toolbar|radiogroup|tree)$/;
+      const out = [];
+      for (const e of document.querySelectorAll(sel)) {
+        if (skip.test(e.getAttribute('role') || '') || e.closest('nav,header,[role=navigation],[role=menu],[role=listbox],[role=dialog]')) continue;
+        if (e.parentElement && e.parentElement.closest(sel)) continue;
+        const r = e.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1 || r.bottom < 0 || r.top > innerHeight) continue;
+        out.push((e.innerText || '').slice(0, 4000));
+      }
+      return out.join('\\n\\u0001\\n').slice(0, 40000);
+    })()`;
+    return this.page.main.evaluate<string>(read, { readOnly: true, timeoutMs: 2_000 }).catch(() => null);
+  }
+
+  /** Whether the lists on screen changed from `before` within LISTS_WAIT_MS (one it cannot read, a new page, counts as changed). */
+  private async awaitListsChange(before: string): Promise<boolean> {
+    const end = Date.now() + LISTS_WAIT_MS;
+    for (;;) {
+      const now = await this.listsOnScreen();
+      if (now === null || now !== before) return true;
+      if (Date.now() >= end) return false;
+      await sleep(250);
+    }
   }
 
   /**
@@ -2406,7 +2457,7 @@ export class Agent {
     }
     this.lastSnapshot = snap;
     this.keepSeen(snap);
-    const text = serializeSnapshot(snap, { maxChars, previous, interactiveOnly, rootRef, ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}), ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}) });
+    const text = serializeSnapshot(snap, { maxChars, previous, interactiveOnly, rootRef, ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}), ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}), ...(this.opts.screenOnly && !wholePage ? { screenOnly: true } : {}), ...(this.opts.sameNameNotes ? { sameNames: true } : {}) });
     if (!wholePage && !interactiveOnly && !rootRef) this.obsBase = { url: snap.url, text, uses: 0, fresh: true };
     const tabs = this.tabHeader();
     const noted = await this.withLoadNote(text);
@@ -2450,7 +2501,7 @@ export class Agent {
     this.keepSeen(snap);
     const maxChars = this.opts.snapshotMaxChars ?? 24_000;
     // The same printing as observe(), so a change list compares like with like.
-    const body = serializeSnapshot(snap, { maxChars, previous, ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}) });
+    const body = serializeSnapshot(snap, { maxChars, previous, ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}), ...(this.opts.screenOnly ? { screenOnly: true } : {}), ...(this.opts.sameNameNotes ? { sameNames: true } : {}) });
     const base = this.obsBase;
     // Context editing keeps the latest 6 tool results (3 after a model switch): the base must be one.
     const kept = this.switchedModel ? KEEP_AFTER_SWITCH : KEEP_TOOL_RESULTS;
@@ -2776,7 +2827,28 @@ export class Agent {
           // An item picked out of a list (a suggestion, a menu item, a tab): which one, as the page labeled it in the snapshot
           // the ref came from, said with the evidence, so a pick between look-alike entries is on record in the page's own
           // words. A ref missing from that snapshot says nothing; the line is no proof beyond the click's own checks.
-          const chose = choiceOf(this.turnSnapshot ?? this.lastSnapshot, String(input["ref"]));
+          const chose = choiceOf(this.turnSnapshot ?? this.lastSnapshot, String(input["ref"]), { sameNameAbove: this.inAct && !!this.opts.compactSnapshots });
+          // A suggestion picked below another of the same name (the open MCP, 19 Nov): not clicked the first time, so the
+          // choice is made again with both in view. A note before or after the pick was not acted on (Booking: "North goa ·
+          // Goa (North Goa), India", a town of eight stays, picked under "North Goa · India" in 2 of 7 runs). A second
+          // click of the same option on the same page goes through: the task may name that smaller place.
+          if (chose && chose.includes("listed above it, has the same name")) {
+            const key = `${this.page.targetId}:${this.page.lastDocumentAt}:${String(input["ref"])}`;
+            if (!this.sameNameRefused.has(key)) {
+              this.sameNameRefused.add(key);
+              this.nextDialog = null;
+              return err(`Not clicked yet: ${input["ref"]} is ${chose} Click the option above it if the task means that place; click ${input["ref"]} again only if the task names this smaller place.`);
+            }
+          }
+          // A pick of a tab or a menu item, a sort among them (the open MCP, 18 Nov): the lists it governs may be drawn again
+          // after the request settles (Google Flights marks "Cheapest" selected at once and keeps the Best list, "Sorted by
+          // top flights", a few seconds more; a read in between answered from it). Wait up to LISTS_WAIT_MS for the lists on
+          // screen to change, and say so if they have not. Not for a suggestion or a dropdown's option: those change no list.
+          // A tab or item already selected before the click changes nothing to wait for.
+          const pickedNode = (this.turnSnapshot ?? this.lastSnapshot)?.byRef.get(String(input["ref"]));
+          const pickWaits = this.inAct && !!this.opts.compactSnapshots && !!chose && /^(tab|menuitem|menuitemradio)\b/.test(chose) && !pickedNode?.selected && !pickedNode?.checked;
+          const listsBefore = pickWaits ? await this.listsOnScreen() : null;
+          let listsUnchanged = false;
           try {
             return await this.withEvidence(
               async () => {
@@ -2795,9 +2867,17 @@ export class Agent {
                   if (!dismissed) throw e;
                   await this.page.click(target.frame, target.backendNodeId, clickOpts);
                 });
+                if (listsBefore) listsUnchanged = !(await this.awaitListsChange(listsBefore));
               },
               `click ${input["ref"]}`,
-              () => [chose ? `Chose ${chose}` : "", dismissed ? `Auto-dismissed (it covered the target): ${dismissed}` : ""].filter(Boolean).join("\n"),
+              () =>
+                [
+                  chose ? `Chose ${chose}` : "",
+                  dismissed ? `Auto-dismissed (it covered the target): ${dismissed}` : "",
+                  listsUnchanged ? `(The lists on screen had not changed ${LISTS_WAIT_MS / 1000} s after this choice: they may still show the earlier order or tab. Wait, or check what the page says it is sorted by, before reading.)` : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
             );
           } finally {
             // A planned dialog response that never fired must not auto-answer a later, unrelated dialog.
@@ -2832,11 +2912,23 @@ export class Agent {
             markSensitiveField(this.page, tn);
           }
           if (this.opts.actionReceipts && this.inAct) this.pendingReceipt = () => this.readBack(h, { typed: text, append: input["clear"] === false, secret: sensitive });
+          let dismissedForType = "";
+          const typeOpts = { clear: input["clear"] !== false, perKey: input["per_key"] === true, submit: input["submit"] === true };
           return await this.withEvidence(
             async () => {
-              await this.page.type(h.frame, h.backendNodeId, text, { clear: input["clear"] !== false, perKey: input["per_key"] === true, submit: input["submit"] === true });
+              await this.page.type(h.frame, h.backendNodeId, text, typeOpts).catch(async (e: unknown) => {
+                // A popup over the page (a sign-in offer drawn over Booking's search box) leaves the field covered and
+                // unfocusable; nothing was typed. As for a click: auto-dismiss, then type once more (18 Nov: two runs
+                // spent a call on "Element is not focusable"). The open MCP's direct calls only (measured there).
+                const covered = e instanceof ActionError && (e.code === "obscured" || (e.code === "not_interactable" && /not focusable/i.test(e.message)));
+                if (!(this.opts.autoDismiss && covered && this.inAct && this.opts.compactSnapshots)) throw e;
+                dismissedForType = (await this.dismissOverlays()).done;
+                if (!dismissedForType) throw e;
+                await this.page.type(h.frame, h.backendNodeId, text, typeOpts);
+              });
             },
             `type ${input["ref"]}${used.length ? ` (secrets: ${used.join(",")})` : ""}`,
+            () => (dismissedForType ? `Auto-dismissed (it covered the target): ${dismissedForType}` : ""),
           );
         }
         case "fill":
@@ -3136,7 +3228,16 @@ export class Agent {
               .catch((e: unknown) => {
                 throw new ActionError("not_found", `selector ${sel}: ${e instanceof Error ? e.message.slice(0, 160) : String(e)}`);
               });
-            if (found === null) return err(`No element matches the selector ${sel}. Use get_text without a selector, or find to locate the part you mean.`);
+            if (found === null) {
+              if (!(this.inAct && this.opts.compactSnapshots)) return err(`No element matches the selector ${sel}. Use get_text without a selector, or find to locate the part you mean.`);
+              // The open MCP's direct calls: the page's whole text, said so, rather than an error the model answers with
+              // that call anyway (18 Nov: Google Flights has no <main>, and two runs spent a call on "main").
+              const whole = await captureSnapshot(this.page, { viewportBand: Infinity });
+              const all = pageText(whole, { maxChars });
+              this.note("get_text");
+              this.keepRead("get_text", this.secrets.scrub(all));
+              return ok(this.secrets.scrub(`(No element matches the selector ${sel}: the page's whole text follows.)\nPAGE TEXT (${whole.url}):\n${all}`), `get_text: no ${sel}, whole page ${all.length} chars`);
+            }
             const part = found.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
             const shown = part.length > maxChars ? `${part.slice(0, maxChars)}…(truncated)` : part;
             this.note(readKey("get_text", input));
@@ -3207,7 +3308,13 @@ export class Agent {
           const unblock = await blockPageWrites(this.page).catch(() => null);
           let value: unknown;
           try {
-            value = await this.page.main.evaluate(expression, { readOnly: true, timeoutMs: 10_000 });
+            value = await this.page.main.evaluate(expression, { readOnly: true, timeoutMs: 10_000 }).catch(async (e: unknown) => {
+              // An object written as the whole expression ("{count: …, rows: …}") reads as a block and throws on its first
+              // ':' (18 Nov: a run lost a call to it). The same object in parentheses is what it meant; anything else
+              // that throws is reported as before. The open MCP's direct calls only (measured there).
+              if (this.inAct && this.opts.compactSnapshots && /^\s*\{/.test(expression) && e instanceof Error && /Unexpected token ':'/.test(e.message)) return this.page.main.evaluate(`(${expression})`, { readOnly: true, timeoutMs: 10_000 });
+              throw e;
+            });
           } finally {
             unblock?.();
           }
@@ -3765,7 +3872,7 @@ export class Agent {
         f.invalid.length > 0 ||
         f.stillLoading);
     const skip = this.skipSnapshot && !escalated;
-    const snapshot = (evidence.changed || escalated || this.unseen) && !skip ? await this.renderSnapshot(after, before) : undefined;
+    const snapshot = (evidence.changed || escalated || this.unseen || this.earlierChanged) && !skip ? await this.renderSnapshot(after, before) : undefined;
     if (escalated && snapshot) this.actEscalated = true;
     // compactSnapshots, through act(): what the snapshot below shows is counted in the evidence, not listed twice.
     // Not in the agent's own loop, which shows one snapshot after all of a turn's actions: an element one action
@@ -3774,7 +3881,7 @@ export class Agent {
     // an action's without a page (its added, removed and new-text lists included), and the page's own notes the page
     // would have carried (still loading, a PDF, a canvas) are kept; the loading read is not carried to a later page.
     const compactUrls = this.inAct && !!this.opts.compactSnapshots;
-    const parts = [formatEvidence(evidence, { compactUrls, ...(!skip && snapshot && this.inAct && this.opts.compactSnapshots && this.rendered ? { shown: this.rendered.body } : {}) })];
+    const parts = [formatEvidence(evidence, { compactUrls, newDocument: this.page.lastDocumentAt !== docBefore, ...(!skip && snapshot && this.inAct && this.opts.compactSnapshots && this.rendered ? { shown: this.rendered.body } : {}) })];
     if (skip) {
       const notes = (await this.withLoadNote(".").catch(() => ".")).slice(0, -1).trim();
       if (notes) parts.push(this.secrets.scrub(notes));
@@ -3790,7 +3897,11 @@ export class Agent {
     if (this.regrounded.length) parts.unshift(`(${this.regrounded.join(", ")} found again after the page redrew ${this.regrounded.length === 1 ? "it" : "them"}: same role, name and position among look-alikes.)`);
     if (!evidence.changed)
       parts.push(
-        this.unseen
+        this.earlierChanged && !this.unseen
+          ? skip
+            ? "(This step changed nothing; earlier steps of this call did (their lines above). browser_snapshot shows the page as they left it.)"
+            : "(This step changed nothing; earlier steps of this call did, and the page as they left it is printed below.)"
+          : this.unseen
           ? `(This action changed nothing on the page. The last reply that would have shown the page was withheld, so earlier refs may not match it: use only refs printed ${skip ? "by browser_snapshot" : "in this reply"}.)`
           : "(Page snapshot unchanged; refs from the previous snapshot are still valid.)",
       );
@@ -3902,7 +4013,7 @@ export class Agent {
       previous,
       ...(this.opts.actionSnapshotBand !== undefined ? { band: this.opts.actionSnapshotBand } : {}),
       ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}),
-      ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}),
+      ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}), ...(this.opts.screenOnly ? { screenOnly: true } : {}), ...(this.opts.sameNameNotes ? { sameNames: true } : {}),
     });
     const body = await this.withLoadNote(printed);
     const tabs = this.tabHeader();
@@ -3916,7 +4027,7 @@ export class Agent {
           maxChars,
           previous,
           ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}),
-          ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}),
+          ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}), ...(this.opts.screenOnly ? { screenOnly: true } : {}), ...(this.opts.sameNameNotes ? { sameNames: true } : {}),
         })
       : null;
     this.rendered = {

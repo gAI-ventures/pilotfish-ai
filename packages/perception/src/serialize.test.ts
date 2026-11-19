@@ -2,7 +2,7 @@
 // covers real snapshots).
 import { describe, expect, it } from "vitest";
 import type { FrameSession, Rect } from "@pilotfish/browser";
-import { controlStates, describeNode, findInSnapshot, findScored, serializeSnapshot } from "./serialize.js";
+import { choiceOf, controlStates, describeNode, findInSnapshot, findScored, serializeSnapshot } from "./serialize.js";
 import { formatEvidence } from "./evidence.js";
 import { nodeKey, type SnapNode, type Snapshot } from "./snapshot.js";
 
@@ -242,6 +242,66 @@ describe("serializeSnapshot: band (the visible screen of a three-screen capture)
     const s = page();
     expect(serializeSnapshot(s, { maxChars: 120, moreHint: "browser_get_text for the page's text" })).toContain("(output truncated at 120 chars; browser_get_text for the page's text)");
     expect(serializeSnapshot(s, { maxChars: 120 })).toContain("use find() or read_page(rootRef) for more");
+  });
+});
+
+describe("serializeSnapshot: screenOnly (the screen across as well as down; 18 Nov, the open MCP)", () => {
+  // A sideways calendar: 6 months of 3 day buttons in a 600 px wide area that clips across (scrollsX), viewport 1280 px.
+  // Month m sits at x = 40 + 400m, so months 0 and 1 are inside the area, 2 is past its right edge inside the
+  // viewport, and 3-5 are past the viewport too.
+  const page = () => {
+    const months = Array.from({ length: 6 }, (_, m) =>
+      E("div", {}, [
+        E("h3", {}, [`Month ${m}`], { role: "heading", rect: { x: 40 + 400 * m, y: 100, width: 300, height: 20 } }),
+        ...Array.from({ length: 3 }, (_, d) => I("button", {}, [`M${m}D${d + 1}`], { role: "button", name: `M${m}D${d + 1}`, rect: { x: 40 + 400 * m + d * 40, y: 130, width: 36, height: 36 } })),
+      ], { rect: { x: 40 + 400 * m, y: 100, width: 300, height: 120 } }),
+    );
+    const grid = E("div", { role: "grid" }, months, { role: "grid", scrollsX: true, rect: { x: 20, y: 90, width: 600, height: 200 } });
+    const next = I("button", {}, ["Next"], { role: "button", name: "Next", rect: { x: 640, y: 150, width: 60, height: 30 } });
+    // A tracker's frame: no box, nothing drawn in it.
+    const pixel = E("iframe", { src: "https://pixel.example/sync?id=1" }, [], { isIframe: true, visible: false, rect: { x: 0, y: 0, width: 0, height: 0 } });
+    // A frame on screen with a button in it.
+    const shown = E("iframe", { src: "https://pay.example/widget" }, [I("button", {}, ["Pay"], { role: "button", name: "Pay", rect: { x: 40, y: 400, width: 80, height: 30 } })], { isIframe: true, rect: { x: 20, y: 380, width: 400, height: 100 } });
+    return S([grid, next, pixel, shown]);
+  };
+
+  it("leaves out what is off the screen to the side and counts it in one note; refs still resolve", () => {
+    const s = page();
+    const before = serializeSnapshot(s, { band: 0 });
+    const out = serializeSnapshot(s, { band: 0, screenOnly: true });
+    for (const d of ["M0D1", "M0D3", "M1D1", "M1D3", "Next", "Pay"]) expect(out, d).toContain(d);
+    expect(out).toContain("Month 1");
+    for (const m of [2, 3, 4, 5]) {
+      expect(out, `month ${m}`).not.toContain(`M${m}D1`);
+      expect(out, `month ${m}`).not.toContain(`Month ${m}`);
+    }
+    expect(out).toContain("(12 interactive elements off the screen to the side, in an area that scrolls sideways: use its own controls, such as Next, or find them)");
+    // Without the option nothing changes: every month and both frames print.
+    for (const m of [0, 5]) expect(before).toContain(`M${m}D1`);
+    expect(before).toContain("pixel.example");
+    expect(before).not.toContain("to the side");
+    expect(s.byRef.size).toBe(6 * 3 + 2);
+  });
+
+  it("drops a frame with no box and nothing drawn in it, never one that shows something", () => {
+    const out = serializeSnapshot(page(), { band: 0, screenOnly: true });
+    expect(out).not.toContain("pixel.example");
+    expect(out).toContain("pay.example");
+  });
+
+  it("an area that only scrolls down does not hide what is beside it, and the whole page (no band) still filters across", () => {
+    const s = page();
+    const grid = s.nodes.find((n) => n.role === "grid")!;
+    grid.scrollsX = false;
+    const out = serializeSnapshot(s, { band: 0, screenOnly: true });
+    // Months 2 and 3's first day are inside the viewport (x < 1280): shown once the area does not clip across; month 3's
+    // other days (x >= 1280) and months 4-5 are past the viewport.
+    expect(out).toContain("M2D3");
+    expect(out).toContain("M3D1");
+    expect(out).not.toContain("M3D2");
+    expect(out).not.toContain("M4D1");
+    expect(out).toContain("(8 interactive elements off the screen to the side");
+    expect(serializeSnapshot(s, { screenOnly: true })).not.toContain("M4D1");
   });
 });
 
@@ -619,6 +679,29 @@ Hello
   });
 });
 
+describe("choiceOf: a pick below a suggestion of the same name says so (18 Nov, the open MCP)", () => {
+  const block = { __block: "1" };
+  const listbox = (...options: SnapNode[]) => S([E("div", {}, options, { role: "listbox", name: "Suggestions" })]);
+  const option = (name: string, place: string) => I("li", {}, [E("div", block, [name]), E("div", block, [place])], { role: "option" });
+  const refs = (s: Snapshot) => [...s.byRef.keys()];
+  const list = () => listbox(option("North Ridge", "Westland"), option("North ridge", "Lakes (North Ridge), Westland"), option("Old Ridge", "Lakes (North Ridge), Westland"));
+  it("names the same-named option listed above the pick, in the list's words, with one sentence on which a task means", () => {
+    const s = list();
+    const said = choiceOf(s, refs(s)[1]!, { sameNameAbove: true })!;
+    expect(said).toMatch(/^option 2 of 3 in "Suggestions": "North ridge/);
+    expect(said).toContain('Option 1, listed above it, has the same name: "North Ridge · Westland"');
+    expect(said).toContain("the task's place is the place itself");
+  });
+  it("says nothing more for the first of them, for a name no option above has, for a tab, or with the option off (the hosted agent)", () => {
+    const s = list();
+    expect(choiceOf(s, refs(s)[0]!, { sameNameAbove: true })).toBe('option 1 of 3 in "Suggestions": "North Ridge Westland"');
+    expect(choiceOf(s, refs(s)[2]!, { sameNameAbove: true })).toBe('option 3 of 3 in "Suggestions": "Old Ridge Lakes (North Ridge), Westland"');
+    expect(choiceOf(s, refs(s)[1]!)).toBe('option 2 of 3 in "Suggestions": "North ridge Lakes (North Ridge), Westland"');
+    const tabs = S([E("div", {}, [I("button", {}, ["Best"], { role: "tab", name: "Best" }), I("button", {}, ["best"], { role: "tab", name: "best" })], { role: "tablist", name: "Sort" })]);
+    expect(choiceOf(tabs, refs(tabs)[1]!, { sameNameAbove: true })).toBe('tab 2 of 2 in "Sort": "best"');
+  });
+});
+
 describe("a suggestion's stacked parts (16 Nov: Booking printed \"North Goa India\" for a name over its place)", () => {
   const block = { __block: "1" };
   const listbox = (...options: SnapNode[]) =>
@@ -670,5 +753,26 @@ describe("capture metadata is not page evidence (17 Nov review)", () => {
     expect(hits("1")).toEqual(["Page"]); // the page's own data-count="1" still matches; the capture's "1" does not
     expect(hits("pointer")).toEqual([]);
     expect(hits("none")).toEqual([]);
+  });
+});
+
+describe("serializeSnapshot sameNames: a suggestion list whose options share a name says so while the pick is open (19 Nov)", () => {
+  const block = { __block: "1" };
+  const option = (name: string, place: string) => I("li", {}, [E("div", block, [name]), E("div", block, [place])], { role: "option" });
+  const box = (...options: SnapNode[]) => I("ul", { "aria-label": "Suggestions" }, options, { role: "listbox", name: "Suggestions" });
+  it("names the options that share a name, under the list, with the rule for which a task means", () => {
+    const s = S([box(option("North Ridge", "Westland"), option("North ridge", "Lakes (North Ridge), Westland"), option("Old Ridge", "Westland"))]);
+    const out = serializeSnapshot(s, { sameNames: true });
+    const refs = [...s.byRef.values()].filter((n) => n.role === "option").map((n) => n.ref);
+    expect(out).toContain(`([${refs[0]}], [${refs[1]}] share the name "North Ridge": they are different places.`);
+    expect(out).toContain("not a smaller place that shares its name, unless the task names that smaller place.)");
+    // The line comes after the options it names.
+    expect(out.indexOf("share the name")).toBeGreaterThan(out.indexOf("Lakes (North Ridge)"));
+  });
+  it("says nothing for options with different names, for other lists, or with the option off", () => {
+    expect(serializeSnapshot(S([box(option("North Ridge", "Westland"), option("Old Ridge", "Westland"))]), { sameNames: true })).not.toContain("share the name");
+    const list = S([E("ul", {}, [E("li", {}, ["North Ridge"]), E("li", {}, ["North ridge"])], { role: "list" })]);
+    expect(serializeSnapshot(list, { sameNames: true })).not.toContain("share the name");
+    expect(serializeSnapshot(S([box(option("North Ridge", "Westland"), option("North ridge", "Lakes"))]))).not.toContain("share the name");
   });
 });

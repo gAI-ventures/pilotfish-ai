@@ -55,6 +55,21 @@ export interface SerializeOptions {
    * of 17 Nov (a character simulation): 10-15% fewer characters on Google Flights, under 1% on Amazon and Booking.
    */
   roleTags?: boolean;
+  /**
+   * The screen across as well as down (18 Nov, the open MCP): an element wholly past the viewport's left or right edge,
+   * or wholly outside the box of an area that scrolls (a sideways calendar or carousel: Google Flights' date picker
+   * printed about 330 day buttons for the two months on screen), is left out and counted in one note; and a frame with
+   * no box and nothing drawn inside it (a tracker's cookie-sync or pixel frame) prints nothing. Refs of what is left
+   * out still resolve (browser_find finds them), as with `band`.
+   */
+  screenOnly?: boolean;
+  /**
+   * Under a list of suggestions (a listbox) in which two or more options share a name (their first line as printed,
+   * before " · ", without case or punctuation), one line naming them and which of them a task means (19 Nov, the open
+   * MCP): Booking lists "North Goa · India" (the region) over "North goa · Goa (North Goa), India" (a town of eight
+   * stays), and a note after the pick was not acted on. Said while the choice is still open; nothing for other lists.
+   */
+  sameNames?: boolean;
 }
 
 /** A generated id (framework counters and hashes), not a name a person gave the element. */
@@ -82,20 +97,38 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
   // The printed range: the capture's band, or a narrower one around the viewport.
   const narrower = opts.band !== undefined && Number.isFinite(opts.band) && opts.band >= 0;
   const range = narrower ? { top: snap.scroll.y - opts.band! * snap.viewport.height, bottom: snap.scroll.y + (1 + opts.band!) * snap.viewport.height } : snap.band;
-  const shown = (n: SnapNode): boolean => {
+  const screenOnly = !!opts.screenOnly;
+  /** Wholly past the viewport's left or right edge, or wholly outside the box of a sideways area it is in (screenOnly). */
+  const offSide = (n: SnapNode): boolean => {
+    const r = n.rect;
+    if (!screenOnly || !r || r.width <= 0) return false;
+    if (r.x + r.width <= 0 || r.x >= snap.viewport.width) return true;
+    for (let a = n.parent; a; a = a.parent) {
+      const b = a.rect;
+      if (a.scrollsX && b && b.width > 0 && (r.x + r.width <= b.x || r.x >= b.x + b.width)) return true;
+    }
+    return false;
+  };
+  const inRange = (n: SnapNode): boolean => {
     if (!narrower) return inBand(snap, n);
     if (!n.rect) return true;
     const top = n.rect.y + snap.scroll.y;
     return top + n.rect.height >= range.top && top <= range.bottom;
   };
+  const shown = (n: SnapNode): boolean => inRange(n) && !offSide(n);
+  /** Elements with refs are filtered by what is shown (a narrower band, or screenOnly), not only by the capture's band. */
+  const filtering = narrower || screenOnly;
   const shownRefBelow = (n: SnapNode): boolean => n.children.some((c) => (c.ref !== undefined && shown(c)) || shownRefBelow(c));
   // Elements with refs in the capture but outside the printed range, counted with the capture's own.
   const offscreen = { ...snap.offscreen };
-  if (narrower) {
+  let offscreenSide = 0;
+  if (filtering) {
     for (const n of snap.byRef.values()) {
       if (!n.rect || shown(n)) continue;
-      if (n.rect.y + snap.scroll.y >= range.bottom) offscreen.below++;
-      else offscreen.above++;
+      if (!inRange(n)) {
+        if (n.rect.y + snap.scroll.y >= range.bottom) offscreen.below++;
+        else offscreen.above++;
+      } else offscreenSide++;
     }
   }
   const maxText = opts.maxTextChars ?? 160;
@@ -168,8 +201,10 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
     // fixed positioned): pass through it like a boxless wrapper, unless it clips them (a collapsed
     // accordion: height 0, overflow hidden).
     if (!n.visible && !n.isIframe) return !n.attrs["__clip"] && hasVisibleDescendant(n) ? walk(n, level, { skipText: said }) : undefined;
-    if (n.rect && !shown(n) && !(narrower ? shownRefBelow(n) : hasInteractiveDescendant(n))) return;
+    if (n.rect && !shown(n) && !(filtering ? shownRefBelow(n) : hasInteractiveDescendant(n))) return;
     const ind = indent(level);
+    // A frame with no box and nothing drawn inside it (a tracker's cookie sync or pixel) shows nothing.
+    if (n.isIframe && screenOnly && !n.visible && !hasVisibleDescendant(n)) return;
     if (n.isIframe) {
       const src = n.attrs["src"] ? ` src="${clip(n.attrs["src"], 80)}"` : "";
       push(`${ind}|IFRAME${src}|`);
@@ -194,8 +229,8 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
       if (hasInteractiveDescendant(n)) walk(n, level + 1, { skipText: true });
       return;
     }
-    if (n.ref && narrower && !shown(n)) {
-      // Left out of the printout (counted above or below); a part of it in range still prints.
+    if (n.ref && filtering && !shown(n)) {
+      // Left out of the printout (counted above, below or to the side); a part of it in range still prints.
       walk(n, level);
       return;
     }
@@ -221,6 +256,10 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
       }
       // Its line says all of its text (not cut short): the lines under it show only what it does not say.
       if (hasInteractiveDescendant(n) || n.scrollable) walk(n, level + 1, { skipText: compact && !!inner && !own.clipped });
+      if (opts.sameNames && n.role === "listbox") {
+        const note = sameNamesNote(n);
+        if (note) push(indent(level + 1) + note);
+      }
       return;
     }
     if (opts.interactiveOnly && n.role !== "heading") {
@@ -249,6 +288,10 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
       const label = n.name ? ` "${clip(n.name, 40)}"` : "";
       push(`${ind}<${n.role}${label}>`);
       walk(n, level + 1, { skipText: said });
+      if (opts.sameNames && n.role === "listbox") {
+        const note = sameNamesNote(n);
+        if (note) push(indent(level + 1) + note);
+      }
       return;
     }
     walk(n, level, { skipText: said });
@@ -347,6 +390,7 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
   const body = lines.join("\n");
   const footer: string[] = [];
   if (offscreen.below) footer.push(`(${offscreen.below} interactive elements below the viewport; scroll down to reveal)`);
+  if (offscreenSide) footer.push(`(${offscreenSide} interactive elements off the screen to the side, in an area that scrolls sideways: use its own controls, such as Next, or find them)`);
   if (truncated) footer.push(`(output truncated at ${maxChars} chars; ${opts.moreHint ?? "use find() or read_page(rootRef) for more"})`);
   return [...header, body, ...footer].filter(Boolean).join("\n");
 }
@@ -979,7 +1023,7 @@ const CHOICE_HOLDERS = new Set(["listbox", "menu", "menubar", "tablist", "tree",
  * is no proof of what a click reached beyond the checks the click itself makes (the ref's staleness check, its hit
  * test). Facts the page shows, nothing inferred about what the item stands for.
  */
-export function choiceOf(snap: Snapshot | null | undefined, ref: string): string | null {
+export function choiceOf(snap: Snapshot | null | undefined, ref: string, { sameNameAbove = false }: { sameNameAbove?: boolean } = {}): string | null {
   const n = snap?.byRef.get(ref);
   if (!n || !CHOICE_ROLES.has(n.role)) return null;
   let holder: SnapNode | null = n.parent;
@@ -997,5 +1041,59 @@ export function choiceOf(snap: Snapshot | null | undefined, ref: string): string
   walk(holder);
   const at = items.indexOf(n);
   const name = holder.name ? ` in "${clip(holder.name, 60)}"` : "";
-  return at >= 0 ? `${n.role} ${at + 1} of ${items.length}${name}: "${label}"` : `${n.role}${name}: "${label}"`;
+  if (at < 0) return `${n.role}${name}: "${label}"`;
+  return `${n.role} ${at + 1} of ${items.length}${name}: "${label}"${sameNameAbove && n.role === "option" ? skippedSameName(items, at) : ""}`;
+}
+
+/**
+ * A suggestion picked below another of the same name (18 Nov, the open MCP): an autocomplete lists different places
+ * under one name, the place itself first and smaller places that share its name after it ("North Goa" over "India",
+ * then "North goa" over "Goa (North Goa), India"), and a pick of the later one decides every search after it. Said
+ * only when an item listed above the pick has its name (its first line as the screen prints it, before " · ", without
+ * case or punctuation): a pick of the first such item says nothing, so a right first pick costs nothing. The list's own
+ * words, with one sentence on which of them a task means.
+ */
+/** An option's name for comparing: its first line as the screen prints it (before " · "), no case or punctuation. */
+function optionLead(x: SnapNode): string {
+  return (inlineText(x, 200).split(` ${PART_SEP} `)[0] ?? "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/** The line under a listbox whose options share a name (SerializeOptions.sameNames), or "" (see there). */
+function sameNamesNote(box: SnapNode): string {
+  const options: SnapNode[] = [];
+  const walk = (x: SnapNode) => {
+    for (const c of x.children) {
+      if (c.nodeType !== 1) continue;
+      if (c.role === "option" && c.visible) options.push(c);
+      else if (c.role !== "listbox") walk(c);
+    }
+  };
+  walk(box);
+  const groups = new Map<string, SnapNode[]>();
+  for (const o of options) {
+    const k = optionLead(o);
+    if (!k) continue;
+    groups.set(k, [...(groups.get(k) ?? []), o]);
+  }
+  const same = [...groups.values()].find((g) => g.length > 1);
+  if (!same) return "";
+  const named = same.map((o) => (o.ref ? `[${o.ref}]` : `"${clip(inlineText(o, 60), 60)}"`)).join(", ");
+  const shown = clip(inlineText(same[0]!, 60).split(` ${PART_SEP} `)[0] ?? "", 60);
+  return `(${named} share the name "${shown}": they are different places. The task's place is the place itself (its country, region or city), not a smaller place that shares its name, unless the task names that smaller place.)`;
+}
+
+function skippedSameName(items: SnapNode[], at: number): string {
+  const lead = (x: SnapNode) =>
+    (inlineText(x, 200).split(` ${PART_SEP} `)[0] ?? "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  const mine = lead(items[at]!);
+  if (!mine) return "";
+  const above = items.slice(0, at).findIndex((x) => lead(x) === mine);
+  if (above < 0) return "";
+  return `. Option ${above + 1}, listed above it, has the same name: "${clip(inlineText(items[above]!, 120), 120)}". These are different places; the task's place is the place itself (its country, region or city), not a smaller place that shares its name.`;
 }

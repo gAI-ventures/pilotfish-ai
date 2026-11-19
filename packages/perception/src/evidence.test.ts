@@ -218,3 +218,30 @@ describe("formatEvidence with a page part (C1a controls, 18 Nov): only an added 
     expect(out).not.toContain("[e7]<button>Here</button>");
   });
 });
+
+describe("formatEvidence on a new document (the open MCP, 18 Nov): the earlier page's elements are counted, not named", () => {
+  const ev = {
+    changed: true, navigated: true, urlBefore: "https://shop.test/s?q=buds&page=1", urlAfter: "https://shop.test/s?q=buds&page=2", titleBefore: "Shop", titleAfter: "Shop",
+    dialogs: [], scrollDelta: { x: 0, y: 0 }, focusedBefore: undefined, focusedAfter: undefined,
+    valueChanges: [], stateChanges: [],
+    added: ["[e40]<a>Buds Two</a>"], addedCount: 1,
+    removed: ["[e9]<a>Buds One</a>", "[e10]<a>Next</a>"], removedCount: 2,
+    newText: [], network: { requests: 2, failed: 0 },
+  } as unknown as Parameters<typeof formatEvidence>[0];
+  it("names no element of the earlier page, keeps the count and says whose they were", () => {
+    const out = formatEvidence(ev, { compactUrls: true, newDocument: true });
+    expect(out).toContain("- 2 element(s) removed (the earlier page's)");
+    expect(out).not.toContain("Buds One");
+    // The new page's own elements are still named: a quiet reply's ref may be the next action's target.
+    expect(out).toContain("[e40]<a>Buds Two</a>");
+  });
+  it("names them as before on the same document, and outside the open MCP (no compactUrls)", () => {
+    expect(formatEvidence(ev, { compactUrls: true })).toContain("- 2 element(s) removed: [e9]<a>Buds One</a>");
+    expect(formatEvidence(ev, { newDocument: true })).toContain("- 2 element(s) removed: [e9]<a>Buds One</a>");
+  });
+  it("counts only, as before, when no lists are asked for", () => {
+    const out = formatEvidence(ev, { compactUrls: true, newDocument: true, lists: false });
+    expect(out).toContain("- 2 element(s) removed");
+    expect(out).not.toContain("earlier page");
+  });
+});

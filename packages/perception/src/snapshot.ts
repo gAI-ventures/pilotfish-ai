@@ -70,6 +70,8 @@ export interface SnapNode {
   interactive: boolean;
   /** Scroll container (overflow with content larger than box). */
   scrollable: boolean;
+  /** Wider inside than its box, and clips across (overflow-x not visible): a sideways area, scrolled or moved by script. */
+  scrollsX?: boolean;
   shadowRoot?: "open" | "closed" | "user-agent";
   isIframe: boolean;
   /** Positional disambiguator among nodes with the same (frameId, role, name, tag). */
@@ -728,6 +730,8 @@ function buildDocument(
         if (scrollRect && clientRect && (ox === "auto" || ox === "scroll" || oy === "auto" || oy === "scroll")) {
           if (scrollRect[3]! > clientRect[3]! + 1 || scrollRect[2]! > clientRect[2]! + 1) node.scrollable = true;
         }
+        // Wider inside than its box and clipping across (a carousel or calendar moved by script or by scrolling).
+        if (scrollRect && clientRect && ox !== "visible" && scrollRect[2]! > clientRect[2]! + 1) node.scrollsX = true;
       } else if (KEEP_CHILDREN_WITHOUT_LAYOUT.has(tag) || (parent && KEEP_CHILDREN_WITHOUT_LAYOUT.has(parent.tag))) {
         // <option> and friends have no layout boxes but carry the labels we show on the <select>.
         node.visible = parent?.visible ?? true;

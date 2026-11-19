@@ -202,6 +202,25 @@ describe("MCP protocol (no browser)", () => {
     }
   });
 
+  it("lists types, required fields, enums and number ranges, but no check only the server needs; calls are still checked in full (18 Nov)", async () => {
+    const { tools } = await client.listTools();
+    // Nested objects only: each tool's own arguments stay closed (the test above).
+    const listed = JSON.stringify(tools.map((t) => ({ ...t.inputSchema, additionalProperties: undefined })));
+    for (const k of ['"pattern"', '"minLength"', '"maxLength"', '"format"', '"additionalProperties":false']) expect(listed, k).not.toContain(k);
+    for (const k of ['"enum"', '"required"', '"minimum"', '"maxItems"']) expect(listed, k).toContain(k);
+    // expect is spelled out on browser_click and pointed to elsewhere.
+    const props = (name: string) => (tools.find((t) => t.name === name)!.inputSchema.properties ?? {}) as Record<string, Record<string, unknown>>;
+    expect(Object.keys(props("browser_click")["expect"]!["properties"] as object).sort()).toEqual(["gone", "in", "text", "url", "within"]);
+    for (const name of ["browser_navigate", "browser_type", "browser_select", "browser_press"]) {
+      expect(props(name)["expect"], name).toEqual({ description: "As in browser_click.", type: "object" });
+    }
+    // The checks left out of the list still run: a ref that is no ref, and an unknown field, are refused with a reason.
+    const bad = await client.callTool({ name: "browser_click", arguments: { ref: "button one" } });
+    expect(bad.isError).toBe(true);
+    const extra = await client.callTool({ name: "browser_type", arguments: { ref: "e1", text: "x", expect: { text: "ok", colour: "red" } } });
+    expect(extra.isError).toBe(true);
+  });
+
   it("reports this package's version (a repository build: 0.0.0-dev; the npm package: its published version)", () => {
     expect(VERSION).toBe("0.0.0-dev");
     expect(client.getServerVersion()).toEqual({ name: "pilotfish", version: VERSION });

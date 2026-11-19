@@ -214,6 +214,11 @@ export class BrowserSession {
       // An action returns the visible screen, with counts of what is above and below: the client's model reads every
       // result again on each later call, and three screens of a results page ran to 24,000 characters (4 Nov).
       actionSnapshotBand: 0,
+      // Nor anything off it to the side (a sideways calendar printed about 330 day buttons for two months shown), nor a
+      // tracker's empty frame (18 Nov).
+      screenOnly: true,
+      // A suggestion list whose options share a name says so while the pick is open (19 Nov: Booking's North Goa town).
+      sameNameNotes: true,
       snapshotMoreHint: "browser_scroll for the next screen, browser_get_text for the page's text, or browser_snapshot (whole_page) for every element",
       // A page's WebMCP tools are listed with its snapshot, for browser_page_tool (enabled once a page offers one).
       pageToolCall: "browser_page_tool",

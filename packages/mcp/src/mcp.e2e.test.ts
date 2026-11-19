@@ -308,6 +308,16 @@ ${Array.from({ length: 30 }, (_, i) => `<p>Note ${i + 1}: free cancellation on m
 function swap(){ const [a,b]=ps(); const t=a.textContent; a.textContent=b.textContent; b.textContent=t; }
 function sortIt(){ const l=document.getElementById('l'); [...l.children].sort((x,y)=>parseFloat(y.querySelector('p').textContent.slice(6))-parseFloat(x.querySelector('p').textContent.slice(6))).forEach(li=>l.appendChild(li)); }</script></body></html>`;
 
+// A tab that is marked selected at once and whose list is sorted later (18 Nov: Google Flights' Cheapest tab kept the
+// Best list a few seconds after the click), a tab that changes no list, and the delay from the address.
+const TABSORT_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Fares</title></head><body><h1>Fares</h1>
+<div role="tablist" aria-label="Order"><button role="tab" aria-selected="true" onclick="pick(this,'best')">Best</button><button role="tab" aria-selected="false" onclick="pick(this,'cheap')">Cheapest</button><button role="tab" aria-selected="false" onclick="pick(this,'still')">Unchanged</button></div>
+<p id="sorted">Sorted by top flights</p><ul id="fares"><li>Air A ₹10,041</li><li>Air B ₹9,584</li><li>Air C ₹9,420</li></ul>
+<script>const delay = Number(new URLSearchParams(location.search).get('delay') || 0);
+const price = (li) => +li.textContent.replace(/[^0-9]/g, '');
+function pick(t, k) { for (const b of document.querySelectorAll('[role=tab]')) b.setAttribute('aria-selected', b === t ? 'true' : 'false'); if (k === 'still') return;
+  setTimeout(() => { const l = document.getElementById('fares'); const items = [...l.children].sort((x, y) => price(x) - price(y)); if (k === 'best') items.reverse(); items.forEach((li) => l.appendChild(li)); document.getElementById('sorted').textContent = k === 'cheap' ? 'Sorted by price' : 'Sorted by top flights'; }, delay); }</script></body></html>`;
+
 // C1a (18 Nov): a page whose heading, a field, an element near the top, one far below the printed screens and one that
 // goes away all change on their own buttons; an address change (pushState) and a reload; text enough for change lists.
 const C1_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Stays</title></head><body><h1 id="h">Stays</h1>
@@ -388,7 +398,7 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
       if (u.startsWith("/scope2")) return void res.end(scopeHtml(true));
       if (u.startsWith("/scope1")) return void res.end(scopeHtml(false));
       if (u.startsWith("/reground")) return void res.end(regroundHtml(new URL(u, "http://x").searchParams.get("mode") ?? "reorder"));
-      res.end(u.startsWith("/waitq") ? WAITQ_HTML : u.startsWith("/aria-hidden") ? ARIA_HIDDEN_HTML : u.startsWith("/pick") ? PICK_HTML : u.startsWith("/quiet") ? QUIET_HTML : u.startsWith("/widget") ? WIDGET_HTML : u.startsWith("/suggest") ? SUGGEST_HTML : u.startsWith("/fares") ? FARES_HTML : u.startsWith("/sort") ? SORT_HTML : u.startsWith("/loading") ? LOADING_HTML : u.startsWith("/spinner") ? SPINNER_HTML : u.startsWith("/otp") ? OTP_HTML : u.startsWith("/results") ? RESULTS_HTML : u.startsWith("/signin") ? SIGNIN_HTML : u.startsWith("/robot") ? ROBOT_HTML : u.startsWith("/blocked") ? BLOCKED_HTML : HOME_HTML);
+      res.end(u.startsWith("/tablag") ? TABSORT_HTML : u.startsWith("/waitq") ? WAITQ_HTML : u.startsWith("/aria-hidden") ? ARIA_HIDDEN_HTML : u.startsWith("/pick") ? PICK_HTML : u.startsWith("/quiet") ? QUIET_HTML : u.startsWith("/widget") ? WIDGET_HTML : u.startsWith("/suggest") ? SUGGEST_HTML : u.startsWith("/fares") ? FARES_HTML : u.startsWith("/sort") ? SORT_HTML : u.startsWith("/loading") ? LOADING_HTML : u.startsWith("/spinner") ? SPINNER_HTML : u.startsWith("/otp") ? OTP_HTML : u.startsWith("/results") ? RESULTS_HTML : u.startsWith("/signin") ? SIGNIN_HTML : u.startsWith("/robot") ? ROBOT_HTML : u.startsWith("/blocked") ? BLOCKED_HTML : HOME_HTML);
     });
     await new Promise<void>((r) => site.listen(0, "127.0.0.1", () => r()));
     origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
@@ -741,6 +751,100 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
     expect(under.isError, textOf(under)).toBeFalsy();
     expect(textOf(under)).toMatch(/^Auto-dismissed \(it covered the target\): popup: [^\n]*Dismiss/);
     expect(textOf(under)).toMatch(/1 element\(s\) removed: \[e\d+\]<button[^\n]*Dismiss/);
+  }, 90_000);
+
+  it("a batch whose last step changed nothing still shows what its earlier steps did, never 'unchanged' of a screen the client never got (18 Nov)", async () => {
+    const nav = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/quiet?batch` } }));
+    const add = /\[(e\d+)\]<button[^\n]*Add filter/.exec(nav)![1]!;
+    const shown = textOf(await client.callTool({ name: "browser_actions", arguments: { actions: [{ action: "click", ref: add }, { action: "wait", seconds: 1 }] } }));
+    expect(shown).toMatch(/^1\. [^\n]*: changed/m);
+    expect(shown).toContain("Remove filter 1");
+    expect(shown).toContain("earlier steps of this call did, and the page as they left it is printed below");
+    expect(shown).not.toContain("refs from the previous snapshot are still valid");
+    // Quietly: no page, and no claim that the client's screen is current.
+    const nav2 = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/quiet?batch2` } }));
+    const add2 = /\[(e\d+)\]<button[^\n]*Add filter/.exec(nav2)![1]!;
+    const quiet = textOf(await client.callTool({ name: "browser_actions", arguments: { snapshot: false, actions: [{ action: "click", ref: add2 }, { action: "wait", seconds: 1 }] } }));
+    expect(quiet).not.toContain("PAGE SNAPSHOT");
+    expect(quiet).toContain("browser_snapshot shows the page as they left it");
+    expect(quiet).not.toContain("refs from the previous snapshot are still valid");
+  }, 60_000);
+
+  it("a tab whose list is sorted after the click: the reply and the next read see the sorted list; a tab that changes no list says so (18 Nov)", async () => {
+    const ref = (re: RegExp, t: string) => re.exec(t)![1]!;
+    const first = async () => textOf(await client.callTool({ name: "browser_query", arguments: { expression: "document.querySelector('#fares li').textContent" } }));
+    // Sorted 1.5 s after the click: the click waits for it.
+    const nav = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/tablag?delay=1500` } }));
+    const t0 = Date.now();
+    const cheap = textOf(await client.callTool({ name: "browser_click", arguments: { ref: ref(/\[(e\d+)\]<@?(?:button|tab)[^\n]*Cheapest/, nav), snapshot: false } }));
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(1_400);
+    expect(cheap).toContain('Chose tab 2 of 3 in "Order": "Cheapest"');
+    expect(cheap).not.toContain("had not changed");
+    expect(await first()).toContain("₹9,420");
+    // Sorted at once: no wait to speak of.
+    const nav2 = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/tablag?delay=0` } }));
+    const t1 = Date.now();
+    const fast = textOf(await client.callTool({ name: "browser_click", arguments: { ref: ref(/\[(e\d+)\]<@?(?:button|tab)[^\n]*Cheapest/, nav2), snapshot: false } }));
+    expect(Date.now() - t1).toBeLessThan(4_000);
+    expect(fast).not.toContain("had not changed");
+    expect(await first()).toContain("₹9,420");
+    // A tab that changes no list: the reply says so after the wait.
+    const still = textOf(await client.callTool({ name: "browser_click", arguments: { ref: ref(/\[(e\d+)\]<@?(?:button|tab)[^\n]*Unchanged/, nav2), snapshot: false } }));
+    expect(still).toContain("(The lists on screen had not changed 6 s after this choice");
+    // A tab already selected: nothing to wait for.
+    const nav3 = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/tablag?delay=0` } }));
+    const t2 = Date.now();
+    const again = textOf(await client.callTool({ name: "browser_click", arguments: { ref: ref(/\[(e\d+)\]<@?(?:button|tab)[^\n]*Best/, nav3), snapshot: false } }));
+    expect(Date.now() - t2).toBeLessThan(4_000);
+    expect(again).not.toContain("had not changed");
+  }, 90_000);
+
+  it("a suggestion list whose options share a name says so under the list, before the pick (19 Nov)", async () => {
+    const nav = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/suggest?same` } }));
+    expect(nav).toMatch(/\(\[e\d+\], \[e\d+\] share the name "North Ridge": they are different places\./);
+    expect(nav.indexOf("share the name")).toBeGreaterThan(nav.indexOf("Lakes (North Ridge), Westland"));
+    expect(nav).not.toMatch(/share the name "North Ridge Inn/);
+  }, 60_000);
+
+  it("a suggestion picked below another of the same name is not clicked the first time; again, it is; the first of them always is (19 Nov)", async () => {
+    const opt = (re: RegExp, t: string) => re.exec(t)![1]!;
+    const nav = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/suggest?refuse` } }));
+    const lower = opt(/\[(e\d+)\]<@option[^\n]*North ridge/, nav);
+    const first = await client.callTool({ name: "browser_click", arguments: { ref: lower } });
+    expect(first.isError).toBe(true);
+    expect(textOf(first)).toMatch(/^Not clicked yet: e\d+ is option 2 of 3 in "Suggestions": "North ridge[^"]*"\. Option 1, listed above it, has the same name: "North Ridge · Westland"/);
+    expect(textOf(first)).toContain("click " + lower + " again only if the task names this smaller place");
+    const again = await client.callTool({ name: "browser_click", arguments: { ref: lower } });
+    expect(again.isError, textOf(again)).toBeFalsy();
+    expect(textOf(again)).toContain("Chose option 2 of 3");
+    // The first of the same-named options is clicked at once.
+    const nav2 = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/suggest?refuse2` } }));
+    const top = await client.callTool({ name: "browser_click", arguments: { ref: opt(/\[(e\d+)\]<@option[^\n]*North Ridge · Westland/, nav2) } });
+    expect(top.isError, textOf(top)).toBeFalsy();
+    expect(textOf(top)).toContain("Chose option 1 of 3");
+  }, 60_000);
+
+  it("no call spent on a retry (18 Nov): typing under a popup dismisses it as a click does; a missing get_text selector reads the page; an object query works", async () => {
+    const nav = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/aria-hidden?type` } }));
+    const ref = (re: RegExp, t = nav) => re.exec(t)![1]!;
+    expect((await client.callTool({ name: "browser_click", arguments: { ref: ref(/\[(e\d+)\]<button[^\n]*Offers/) } })).isError).toBeFalsy();
+    // The modal leaves the field covered and unfocusable: dismissed by its own button, then typed into.
+    const typed = await client.callTool({ name: "browser_type", arguments: { ref: ref(/\[(e\d+)\]<input[^\n]*Where from/), text: "Mumbai" } });
+    expect(typed.isError, textOf(typed)).toBeFalsy();
+    expect(textOf(typed)).toMatch(/^Auto-dismissed \(it covered the target\): popup: [^\n]*Dismiss/);
+    expect(textOf(await client.callTool({ name: "browser_query", arguments: { expression: "document.querySelector('input').value" } }))).toContain("Mumbai");
+    // A selector that matches nothing: the page's whole text, said so, not an error.
+    const text = await client.callTool({ name: "browser_get_text", arguments: { selector: "main#nowhere", max_chars: 2000 } });
+    expect(text.isError).toBeFalsy();
+    expect(textOf(text)).toMatch(/^\(No element matches the selector main#nowhere: the page's whole text follows\.\)\nPAGE TEXT \(/);
+    expect(textOf(text)).toContain("Find a trip");
+    // An object written as the whole expression is read as the object it means.
+    const obj = textOf(await client.callTool({ name: "browser_query", arguments: { expression: "{title: document.title, tips: document.querySelectorAll('p').length}" } }));
+    expect(obj).toContain('"title":"Trips"');
+    expect(obj).toContain('"tips":25');
+    // Code that throws for another reason is still reported.
+    const bad = await client.callTool({ name: "browser_query", arguments: { expression: "{ nope( }" } });
+    expect(textOf(bad)).toMatch(/query failed|SyntaxError/);
   }, 90_000);
 
   it("quiet replies never become the printed base, never diff across documents, and keep identity and protected facts (17 Nov review)", async () => {

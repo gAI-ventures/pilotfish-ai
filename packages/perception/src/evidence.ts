@@ -258,12 +258,14 @@ function unlistedTabs(ev: ActionEvidence, listed: string[], onScreen: (t: string
   return `- ${n} new tab(s) not listed above: ${named.join(" ; ")}${n > named.length ? ` (+${n - named.length} more)` : ""}`;
 }
 
-export function formatEvidence(ev: ActionEvidence, { shown, lists = true, compactUrls = false }: { shown?: string; lists?: boolean; compactUrls?: boolean } = {}): string {
+export function formatEvidence(ev: ActionEvidence, { shown, lists = true, compactUrls = false, newDocument = false }: { shown?: string; lists?: boolean; compactUrls?: boolean; newDocument?: boolean } = {}): string {
   const refIn = (s: string) => /^\[((?:f\d+)?e\d+)\]/.exec(s)?.[1];
   // The same items as without `shown`, less the ones it prints.
   const added = !lists ? [] : ev.added.slice(0, 5).filter((a) => !(shown && refIn(a) && shown.includes(`[${refIn(a)}]`)));
   const newText = !lists ? [] : ev.newText.slice(0, 5).filter((t) => !(shown && shown.includes(t.replace(/\s+/g, " ").trim())));
-  const removed = lists ? ev.removed : [];
+  // A new document (18 Nov, the open MCP): every element of the earlier one is gone, so naming three of them tells
+  // nothing; the count stays. (Amazon's next results page listed three of the last page's links, about 400 characters.)
+  const removed = lists && !(compactUrls && newDocument) ? ev.removed : [];
   const lines: string[] = [];
   if (!ev.changed) {
     lines.push("EVIDENCE: no observable change (same URL, no new/removed elements, no value/state changes, no text changes).");
@@ -285,7 +287,7 @@ export function formatEvidence(ev: ActionEvidence, { shown, lists = true, compac
     // with none left out there is no line. It repairs what the reply shows; it does not claim a reader will open a tab.
     const tabsLine = lists ? unlistedTabs(ev, added, (t) => !!(shown && refIn(t) && shown.includes(`[${refIn(t)}]`))) : "";
     if (tabsLine) lines.push(tabsLine);
-    if (ev.removedCount) lines.push(`- ${ev.removedCount} element(s) removed${removed.length ? ": " + removed.slice(0, 3).join(" ; ") : ""}`);
+    if (ev.removedCount) lines.push(`- ${ev.removedCount} element(s) removed${removed.length ? ": " + removed.slice(0, 3).join(" ; ") : compactUrls && newDocument && lists ? " (the earlier page's)" : ""}`);
     if (newText.length) lines.push(`- new text: ${newText.slice(0, 5).map((t) => `"${t}"`).join(", ")}`);
     if (ev.textChanged && !ev.newText.length) lines.push("- visible text changed");
     if (ev.scrollDelta.y || ev.scrollDelta.x) lines.push(`- scrolled by (${ev.scrollDelta.x}, ${ev.scrollDelta.y})`);
