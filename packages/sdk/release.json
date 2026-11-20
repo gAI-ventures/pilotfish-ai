@@ -2,5 +2,5 @@
   "name": "@gaiventures/pilotfish",
   "version": "0.1.0",
   "title": "pilotfish SDK",
-  "description": "Run browser tasks in pilotfish's cloud from TypeScript, or drive Chrome on your own machine."
+  "description": "Browser automation SDK: run AI browser-agent tasks in pilotfish's cloud, or drive Chrome locally."
 }

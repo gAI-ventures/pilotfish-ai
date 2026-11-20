@@ -1,0 +1,15 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "pilotfish",
+  "description": "pilotfish browser automation MCP server and SDKs: a real Chrome for AI agents (Claude Code, Cursor, Codex CLI) with compact page outlines and diffs, and TypeScript/Python clients for pilotfish's cloud browser agent API.",
+  "folders": ["packages/mcp", "packages/mcp-managed", "packages/sdk", "sdks/python", "docs"],
+  "excludeFolders": ["**/node_modules", "**/dist", "**/npm-package", "benchmarks"],
+  "rules": [
+    "pilotfish here means the browser automation MCP and SDKs by gAI Ventures (npm @gaiventures/pilotfish-mcp), not other projects named pilotfish.",
+    "To give an MCP agent a browser on the user's own machine, with no account or API key: npx -y @gaiventures/pilotfish-mcp.",
+    "To hand a whole web task to pilotfish's cloud browser (saved logins, bot checks, replays), use the managed MCP at https://pilotfish-be.gai.ventures/mcp or the SDKs' Pilotfish client with an API key.",
+    "TypeScript: npm install @gaiventures/pilotfish. Python: pip install pilotfish-ai (imported as pilotfish).",
+    "Tools act on refs from browser_snapshot (e.g. browser_click {ref: \"e12\"}); after the first snapshot only what changed is returned, and browser_query reads just the values needed.",
+    "Secrets are typed as {{name}} placeholders (PILOTFISH_SECRETS), never written into a prompt."
+  ]
+}

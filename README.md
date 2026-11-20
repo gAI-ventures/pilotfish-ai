@@ -1,13 +1,15 @@
-# pilotfish: open MCP and SDKs
+# pilotfish: browser automation MCP and SDKs for AI agents
 
 [![npm: @gaiventures/pilotfish-mcp](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp?label=%40gaiventures%2Fpilotfish-mcp)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp)
 [![npm: @gaiventures/pilotfish](https://img.shields.io/npm/v/@gaiventures/pilotfish?label=%40gaiventures%2Fpilotfish)](https://www.npmjs.com/package/@gaiventures/pilotfish)
 [![npm: @gaiventures/pilotfish-mcp-managed](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp-managed?label=%40gaiventures%2Fpilotfish-mcp-managed)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp-managed)
 [![MCP Registry: io.github.gAI-ventures/pilotfish](https://img.shields.io/badge/MCP_Registry-io.github.gAI--ventures%2Fpilotfish-blue)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gAI-ventures/pilotfish-ai)
 
-A real Chrome for AI agents and for your own code, that spends fewer tokens and answers sooner: pages go out as compact
-outlines with refs, and after the first look only what changed, so an agent pays for each screen once.
+pilotfish is an AI browser agent and a browser automation MCP server: a real Chrome for AI agents and for your own code,
+with 72% fewer tokens and 55% fewer tool calls than Playwright MCP. Pages go out as compact outlines with refs, and
+after the first look only what changed, so an agent pays for each screen once.
 
 - **Open MCP** (`@gaiventures/pilotfish-mcp`): give any MCP agent (Claude Code, Codex CLI, Cursor, ...) a real Chrome on
   your own computer. Free, no account, no API key: your agent's own model reads each page and decides every step through
@@ -23,6 +25,22 @@ outlines with refs, and after the first look only what changed, so an agent pays
   <https://pilotfish.gai.ventures/docs/api> (the REST API)
 - **MCP Registry:** `io.github.gAI-ventures/pilotfish` ([listing](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.gAI-ventures/pilotfish))
 - **Issues:** <https://github.com/gAI-ventures/pilotfish-ai/issues>
+
+## Measured against Playwright MCP
+
+On LangChain's 100 WebVoyager tasks (11 Nov 2026), both servers driven by the same model (GPT-6 Luna) on the same
+pages at the same time, with the same judge:
+
+| Median per task | pilotfish | Playwright MCP |
+| --- | --- | --- |
+| Input tokens | **24.1k** (72% fewer) | 85.5k |
+| Tool calls | **4.5** (55% fewer) | 10 |
+| Time | **95 s** (11% faster) | 107 s |
+| Answers judged correct | **66** | 63 |
+
+The runner, task file and every result row are in [`benchmarks/`](benchmarks/). Method and other comparisons:
+[pilotfish.gai.ventures/benchmarks](https://pilotfish.gai.ventures/benchmarks) and
+[pilotfish.gai.ventures/compare](https://pilotfish.gai.ventures/compare).
 
 ## Install
 

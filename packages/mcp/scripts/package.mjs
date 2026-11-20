@@ -217,7 +217,7 @@ const pkg = packageJson(release, {
   dependencies,
   directory: "packages/mcp",
   homepage: "https://pilotfish.gai.ventures/docs/open",
-  keywords: ["mcp", "mcp-server", "model-context-protocol", "pilotfish", "browser", "browser-automation", "browser-agent", "ai-agent", "chromium", "chrome-devtools-protocol", "claude-code", "codex", "cursor"],
+  keywords: ["mcp", "mcp-server", "model-context-protocol", "pilotfish", "browser", "browser-mcp", "browser-automation", "browser-agent", "web-agent", "ai-agent", "ai-browser", "web-automation", "web-scraping", "playwright", "puppeteer", "chrome", "chromium", "headless-chrome", "chrome-devtools-protocol", "cdp", "computer-use", "llm", "claude-code", "codex", "cursor"],
 });
 const optional = (name, description, isSecret = false) => ({ name, description, isRequired: false, format: "string", isSecret });
 const server = {

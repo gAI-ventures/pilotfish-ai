@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp-managed)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp-managed)
 
-An MCP server that does whole browser tasks for your AI agent. Your agent says what it wants done ("download last
+A browser automation MCP server that does whole browser tasks for your AI agent. Your agent says what it wants done ("download last
 month's invoices from our AWS billing console", "pull the risk factors from Apple's latest 10-K on SEC EDGAR").
 [pilotfish](https://pilotfish.gai.ventures) does it in its cloud browser, signed in with your saved logins, and
 returns the answer and any files.
@@ -29,6 +29,9 @@ Want a browser on your own computer for free, driven by your agent's own model, 
 
 ## Why managed
 
+- **Fewer tokens, sooner answers.** On 8 live shopping, travel and finance tasks against a well-known cloud browser
+  agent on the same model, both got all 8 right; pilotfish took 16:53 against 43:00 with 56% less model spend
+  ([benchmarks](https://pilotfish.gai.ventures/benchmarks), [comparisons](https://pilotfish.gai.ventures/compare)).
 - **One call per task.** pilotfish plans and runs the task on its own models and checks the answer. Your agent spends
   a tool call or two, not a context full of web pages.
 - **Signed in as you.** Save a login once in the app and every task can use it, several accounts a site if you have

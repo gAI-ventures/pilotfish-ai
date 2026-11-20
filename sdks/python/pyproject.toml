@@ -5,14 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "pilotfish-ai"
 dynamic = ["version"]
-description = "Run browser tasks in pilotfish's cloud from Python, or drive Chrome on your own machine."
+description = "Browser automation SDK for Python: run AI browser-agent tasks in pilotfish's cloud, or drive Chrome on your own machine."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "gAI Ventures" }]
-keywords = ["browser automation", "browser agent", "mcp", "web automation", "ai agent"]
+keywords = ["browser automation", "browser agent", "web agent", "ai browser", "web automation", "web scraping", "mcp", "playwright", "llm", "ai agent"]
 classifiers = [
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
@@ -23,6 +24,8 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Internet :: WWW/HTTP :: Browsers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Testing",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
@@ -36,6 +39,8 @@ Homepage = "https://pilotfish.gai.ventures/docs/sdk"
 Documentation = "https://pilotfish.gai.ventures/docs/sdk"
 Source = "https://github.com/gAI-ventures/pilotfish-ai/tree/main/sdks/python"
 Issues = "https://github.com/gAI-ventures/pilotfish-ai/issues"
+Changelog = "https://github.com/gAI-ventures/pilotfish-ai/releases"
+Benchmarks = "https://pilotfish.gai.ventures/benchmarks"
 
 [tool.hatch.version]
 path = "src/pilotfish/_version.py"

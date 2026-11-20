@@ -19,6 +19,8 @@ Three npm packages and one Python package are built from this repository:
 3. **Pack and test the installed package**, as a user would install it.
 4. **Publish** to npm, only when step 2 found a change, with npm trusted publishing and provenance (no stored token).
 5. **List** the version in the MCP Registry (`scripts/mcp-registry.mjs`, GitHub OIDC login).
+6. **Release** it on GitHub: a release and tag `<package>-v<version>` (`mcp-v0.1.70`), linking the npm version. It never
+   fails the publish, and a version that already has its release is left alone.
 
 The TypeScript SDK goes through the same steps but the MCP Registry; its installed package is also tested driving a
 real Chrome through the open MCP.

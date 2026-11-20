@@ -72,7 +72,7 @@ const manifest = {
   repository: { type: "git", url: `git+${SOURCE_REPO}.git`, directory: "packages/sdk" },
   homepage: "https://pilotfish.gai.ventures/docs/sdk",
   bugs: { url: `${SOURCE_REPO}/issues` },
-  keywords: ["pilotfish", "browser automation", "browser agent", "web automation", "ai agent", "mcp", "chrome", "cdp", "sdk"],
+  keywords: ["pilotfish", "browser-automation", "browser-agent", "web-agent", "web-automation", "web-scraping", "ai-agent", "ai-browser", "cloud-browser", "mcp", "playwright", "puppeteer", "chrome", "cdp", "llm", "sdk", "typescript"],
   publishConfig: { access: "public" },
 };
 

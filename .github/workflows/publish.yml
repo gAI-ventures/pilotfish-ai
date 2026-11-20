@@ -31,7 +31,8 @@ on:
         default: false
 
 permissions:
-  contents: read
+  # write: a GitHub Release (and its tag) for each version published to npm.
+  contents: write
   id-token: write
 
 jobs:
@@ -105,6 +106,20 @@ jobs:
         if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true' && steps.release.outputs.changed == 'true'
         working-directory: packages/${{ matrix.package }}/npm-package
         run: npm publish --access public --provenance
+      # A release per published version, so the repository's Releases list what is on npm. Never fails the publish.
+      - name: GitHub Release
+        if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true' && steps.release.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.release.outputs.name }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ matrix.package }}-v${{ steps.release.outputs.version }}
+          LATEST: ${{ matrix.package == 'mcp' }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 && exit 0
+          notes="Published to npm as [\`$NAME@$VERSION\`](https://www.npmjs.com/package/$NAME/v/$VERSION), with provenance."
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$NAME $VERSION" --notes "$notes" --latest="$LATEST"
       - name: List in the MCP Registry
         if: env.PUBLISH == 'true' && steps.release.outputs.on_npm == 'true' && matrix.package != 'sdk'
         run: |

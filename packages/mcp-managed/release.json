@@ -3,6 +3,5 @@
   "version": "0.1.1",
   "mcpName": "io.github.gAI-ventures/pilotfish-managed",
   "title": "pilotfish (managed)",
-  "description": "Whole browser tasks done in pilotfish's cloud for any MCP agent, signed in with your saved logins.",
-  "npmDescriptionNote": "mcprush.com-37c48d491684ec6011385ea5"
+  "description": "Browser automation MCP for whole web tasks in a cloud browser: saved logins, bot checks, replays."
 }

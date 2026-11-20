@@ -3,8 +3,9 @@
 [![npm](https://img.shields.io/npm/v/@gaiventures/pilotfish-mcp)](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](https://opensource.org/license/mit)
 
-An MCP server that gives your AI agent a real Chrome browser on your own computer. Your agent's own model reads each
-page and picks each step; pilotfish carries the step out, checks it and tells the agent what changed.
+A browser automation MCP server that gives your AI agent a real Chrome on your own computer, with 72% fewer tokens
+than Playwright MCP. Your agent's own model reads each page and picks each step; pilotfish carries the step out, checks
+it and tells the agent what changed.
 
 For anyone using Claude Code, Codex CLI, Cursor, Claude Desktop, VS Code or another
 [MCP](https://modelcontextprotocol.io) client. Free and MIT licensed: no account, no API key, no pilotfish servers.
@@ -18,6 +19,21 @@ Setup for other clients is below. To have whole tasks done for you in pilotfish'
 with your saved logins, see "Local or managed?" below.
 
 [![pilotfish (local) MCP server](https://mcprush.com/badge/pilotfish-local-mcp/card.svg)](https://mcprush.com/to/pilotfish-local-mcp?ref=badge)
+
+## Measured against Playwright MCP
+
+On LangChain's 100 WebVoyager tasks (11 Nov 2026), both servers driven by the same model (GPT-6 Luna) on the same
+pages at the same time, with the same judge:
+
+| Median per task | pilotfish | Playwright MCP |
+| --- | --- | --- |
+| Input tokens | **24.1k** (72% fewer) | 85.5k |
+| Tool calls | **4.5** (55% fewer) | 10 |
+| Time | **95 s** (11% faster) | 107 s |
+| Answers judged correct | **66** | 63 |
+
+Method, every result row and other comparisons: [pilotfish.gai.ventures/benchmarks](https://pilotfish.gai.ventures/benchmarks)
+and [pilotfish vs Playwright MCP](https://pilotfish.gai.ventures/compare/playwright-mcp).
 
 ## Why pilotfish
 

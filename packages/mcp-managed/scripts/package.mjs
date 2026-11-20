@@ -82,7 +82,7 @@ const pkg = packageJson(release, {
   dependencies,
   directory: "packages/mcp-managed",
   homepage: "https://pilotfish.gai.ventures/docs/managed",
-  keywords: ["mcp", "mcp-server", "model-context-protocol", "pilotfish", "browser-automation", "browser-agent", "ai-agent", "cloud-browser", "web-automation", "claude-code", "codex", "cursor"],
+  keywords: ["mcp", "mcp-server", "model-context-protocol", "pilotfish", "browser-mcp", "browser-automation", "browser-agent", "web-agent", "ai-agent", "ai-browser", "cloud-browser", "remote-browser", "web-automation", "web-scraping", "captcha", "playwright", "computer-use", "llm", "claude-code", "codex", "cursor"],
 });
 const server = {
   $schema: SERVER_SCHEMA,
