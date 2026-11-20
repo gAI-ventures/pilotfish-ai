@@ -7,12 +7,12 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ActOutcome } from "@pilotfish/agent";
 import { configFromEnv } from "./config.js";
-import { createMcpServer, Inputs, type PilotfishMcp } from "./server.js";
+import { createMcpServer, Inputs, isBotWall, type PilotfishMcp } from "./server.js";
 import { VERSION } from "./version.js";
 
 const TOOLS = [
   "browser_actions", "browser_click", "browser_close", "browser_find", "browser_get_text", "browser_navigate", "browser_press", "browser_query",
-  "browser_resume", "browser_screenshot", "browser_scroll", "browser_select", "browser_snapshot", "browser_tabs", "browser_type", "browser_wait",
+  "browser_resume", "browser_screenshot", "browser_scroll", "browser_search", "browser_select", "browser_snapshot", "browser_tabs", "browser_type", "browser_wait",
 ];
 
 /** Every credential a model client could pick up from the environment. */
@@ -541,5 +541,211 @@ describe("browser_get_text (the executor stubbed: no browser; 20 Nov)", () => {
     expect(Inputs.browser_get_text.safeParse({ offset: 100, mode: "links" }).success).toBe(true);
     expect(Inputs.browser_get_text.safeParse({ offset: -1 }).success).toBe(false);
     expect(Inputs.browser_get_text.safeParse({ mode: "html" }).success).toBe(false);
+  });
+});
+
+describe("isBotWall: a short bot-check or traffic-block page (20 Nov)", () => {
+  it.each([
+    "DuckDuckGo Unfortunately, bots use DuckDuckGo too. Please complete the following challenge to confirm this search was made by a human. Select all squares containing a duck: Submit",
+    "Brave Search Verifying you're not a bot Quick check before you continue searching. Verify",
+    "Our systems have detected unusual traffic from your computer network. This page checks to see if it's really you sending the requests, and not a robot.",
+    "403 - Forbidden Sorry your network appears to be sending automated queries so we can't process your search at this time.",
+    "Access Temporarily Suspended To prevent possible abuse of our service, your ability to connect has been suspended at this time.",
+    "Confirm you're not a robot Our system has detected unusual traffic from your network. Please solve the challenge below.",
+  ])("a wall: %s", (t) => expect(isBotWall(t)).toBe(true));
+  it.each([
+    "",
+    "Tompkins Square Park is a 10.5-acre public park in the East Village neighborhood of Manhattan.",
+    "Sign in to your account. Email Password Forgot password?",
+    `${"A long article about how CAPTCHAs work and why sites ask you to prove you are human. ".repeat(30)}`,
+  ])("not a wall: %s", (t) => expect(isBotWall(t)).toBe(false));
+});
+
+describe("browser_navigate notes (the executor stubbed: no browser; 20 Nov)", () => {
+  let pf: PilotfishMcp;
+  let client: Client;
+  let navOk = true;
+  let page: [string, string] = ["shop.example", "A normal page with products and prices."];
+  const nav = async (url: string) => (await client.callTool({ name: "browser_navigate", arguments: { url, snapshot: false } })) as CallToolResult;
+  const textOf = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+
+  beforeAll(async () => {
+    pf = createMcpServer({ config: { ...configFromEnv({}), headless: true } });
+    pf.session.act = async (name) => {
+      if (name === "query") return { ok: true, summary: "query", text: JSON.stringify(page) };
+      return navOk ? { ok: true, summary: "navigate", text: "EVIDENCE: navigated" } : { ok: false, summary: "navigate: 404", text: "This URL does not exist on shop.example (HTTP 404)." };
+    };
+    pf.session.obstacle = async () => null;
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await pf.server.connect(serverSide);
+    client = new Client({ name: "nav", version: "1" });
+    await client.connect(clientSide);
+  });
+
+  afterAll(async () => {
+    await client?.close();
+    await pf?.close();
+  });
+
+  it("a page that loaded clean gets no note; a bot-check page gets one line", async () => {
+    expect(textOf(await nav("https://shop.example/"))).not.toMatch(/BOT CHECK|NOTE:/);
+    page = ["search.example", "Unfortunately, bots use Search too. Please complete the following challenge to confirm this search was made by a human."];
+    expect(textOf(await nav("https://search.example/?q=x"))).toMatch(/^BOT CHECK: search\.example answered with a bot check, which this headless browser cannot pass\./m);
+    page = ["shop.example", "A normal page with products and prices."];
+  });
+
+  it("four failed addresses of the last six earn one nudge, then none until six more", async () => {
+    navOk = false;
+    const outs: string[] = [];
+    for (let i = 0; i < 10; i++) outs.push(textOf(await nav(`https://shop.example/guess-${i}`)));
+    navOk = true;
+    const nudged = outs.map((o) => /^NOTE: \d of your last \d addresses failed/m.test(o));
+    expect(nudged.filter(Boolean).length).toBe(2);
+    expect(nudged.indexOf(true)).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("browser_search (21 Nov: a search API, no browser; the HTTP client stubbed)", () => {
+  const connect = async (env: Record<string, string>, searchFetch?: typeof fetch, secrets = {}) => {
+    const pf = createMcpServer({ config: { ...configFromEnv(env), secrets }, ...(searchFetch ? { searchFetch } : {}) });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "search", version: "1" });
+    await pf.server.connect(serverSide);
+    await client.connect(clientSide);
+    return { pf, client, close: async () => (await client.close(), await pf.close()) };
+  };
+  const names = async (env: Record<string, string>) => {
+    const c = await connect(env);
+    try {
+      return (await c.client.listTools()).tools.map((t) => t.name);
+    } finally {
+      await c.close();
+    }
+  };
+
+  it("is listed by default, and navigate points to it; off with PILOTFISH_SEARCH=0, and by default when the browser is limited to some sites", async () => {
+    expect(await names({})).toContain("browser_search");
+    expect(await names({ PILOTFISH_SEARCH: "0" })).not.toContain("browser_search");
+    expect(await names({ PILOTFISH_ALLOWED_HOSTS: "example.com" })).not.toContain("browser_search");
+    expect(await names({ PILOTFISH_ALLOWED_HOSTS: "example.com", PILOTFISH_SEARCH: "1" })).toContain("browser_search");
+    const c = await connect({});
+    try {
+      const nav = (await c.client.listTools()).tools.find((t) => t.name === "browser_navigate")!.description!;
+      expect(nav).toContain("search the web first with browser_search, not a search engine's own page,");
+    } finally {
+      await c.close();
+    }
+    const off = await connect({ PILOTFISH_SEARCH: "off" });
+    try {
+      const nav = (await off.client.listTools()).tools.find((t) => t.name === "browser_navigate")!.description!;
+      expect(nav).toContain("search the web first with your own search tool to pick the site");
+      expect(nav).not.toContain("browser_search");
+    } finally {
+      await off.close();
+    }
+  });
+
+  it("answers with the results, never opening the browser; a key from the environment is used; a query holding a secret value never leaves", async () => {
+    const sent: string[] = [];
+    const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+      sent.push(`${String(url)} ${String(init?.body)}`);
+      return new Response(JSON.stringify({ results: [{ title: "Trout Lake Trail", url: "https://www.nps.gov/trout", snippet: "A lake trail" }] }), { status: 200 });
+    }) as typeof fetch;
+    const c = await connect({ KEENABLE_API_KEY: "keen_test" }, fetchFn, { pw: { value: "hunter2-secret" } });
+    try {
+      const r = (await c.client.callTool({ name: "browser_search", arguments: { query: "hikes near Seattle", max_results: 2 } })) as CallToolResult;
+      expect(r.isError).toBeFalsy();
+      expect((r.content[0] as { text: string }).text).toContain("1. Trout Lake Trail\n   https://www.nps.gov/trout");
+      expect(sent[0]).toMatch(/^https:\/\/api\.keenable\.ai\/v1\/search \{"query":"hikes near Seattle","max_results":2/);
+      expect(c.pf.session.launched).toBe(false);
+      const leak = (await c.client.callTool({ name: "browser_search", arguments: { query: "who uses hunter2-secret" } })) as CallToolResult;
+      expect(leak.isError).toBe(true);
+      expect(sent).toHaveLength(1);
+      expect(Inputs.browser_search.safeParse({ query: "x", site: "https://evil/" }).success).toBe(false);
+      expect(Inputs.browser_search.safeParse({ query: "x", max_results: 11 }).success).toBe(false);
+    } finally {
+      await c.close();
+    }
+  });
+});
+
+describe("open and read in one call, and search engines' addresses (21 Nov; the executor and search stubbed)", () => {
+  const calls: string[] = [];
+  let navOk = true;
+  const searched: string[] = [];
+  const searchFetch = (async (_u: string | URL | Request, init?: RequestInit) => {
+    searched.push(JSON.parse(String(init?.body)).query);
+    return new Response(JSON.stringify({ results: [{ title: "Fafnir journal", url: "https://journal.finfar.org/articles/x", snippet: "Dragons" }] }), { status: 200 });
+  }) as typeof fetch;
+  const connect = async (env: Record<string, string>) => {
+    const pf = createMcpServer({ config: configFromEnv(env), searchFetch });
+    pf.session.act = async (name, input) => {
+      calls.push(`${name} ${JSON.stringify(input)}`);
+      if (name === "navigate") return navOk ? { ok: true, summary: "navigate", text: "EVIDENCE:\n- navigated: https://site.example/a" } : { ok: false, summary: "navigate", text: "navigate failed (navigation_failed): no such host" };
+      if (name === "query") return { ok: false, summary: "query", text: "" };
+      return { ok: true, summary: "get_text", text: `PAGE TEXT (https://site.example/a):\n${"words ".repeat(150)}` };
+    };
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "open-read", version: "1" });
+    await pf.server.connect(serverSide);
+    await client.connect(clientSide);
+    return { client, close: async () => (await client.close(), await pf.close()) };
+  };
+  const textOf = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+
+  it("browser_get_text with a url opens it without a snapshot, then reads it; a failed load is said as navigate says it, with nothing read", async () => {
+    const c = await connect({ PILOTFISH_HEADLESS: "1" });
+    try {
+      calls.length = 0;
+      const r = (await c.client.callTool({ name: "browser_get_text", arguments: { url: "https://site.example/a" } })) as CallToolResult;
+      expect(calls[0]).toBe('navigate {"url":"https://site.example/a"}');
+      expect(calls.at(-1)).toBe('get_text {"max_chars":8000,"structured":true,"main_first":true}');
+      expect(textOf(r)).toMatch(/^PAGE TEXT \(https:\/\/site\.example\/a\)/);
+      navOk = false;
+      calls.length = 0;
+      const bad = (await c.client.callTool({ name: "browser_get_text", arguments: { url: "https://nope.example/" } })) as CallToolResult;
+      expect(bad.isError).toBe(true);
+      expect(textOf(bad)).toMatch(/navigate failed/);
+      expect(calls.some((x) => x.startsWith("get_text"))).toBe(false);
+      expect(Inputs.browser_get_text.safeParse({ url: "file:///etc/passwd" }).success).toBe(false);
+    } finally {
+      navOk = true;
+      await c.close();
+    }
+  });
+
+  it("headless, a search engine's results address is answered by the search API and the browser is not moved; its other pages, and a headed browser, open as asked", async () => {
+    const c = await connect({ PILOTFISH_HEADLESS: "1" });
+    try {
+      calls.length = 0;
+      searched.length = 0;
+      const r = (await c.client.callTool({ name: "browser_navigate", arguments: { url: "https://www.google.com/search?q=Emily+Midkiff+2014+Fafnir", snapshot: false } })) as CallToolResult;
+      expect(textOf(r)).toMatch(/^NOT OPENED: www\.google\.com's results page .* for "Emily Midkiff 2014 Fafnir"[^\n]*\nSEARCH RESULTS for "Emily Midkiff 2014 Fafnir" \(1;/);
+      expect(calls).toEqual([]);
+      const viaRead = (await c.client.callTool({ name: "browser_get_text", arguments: { url: "https://duckduckgo.com/?q=fafnir+dragons" } })) as CallToolResult;
+      expect(textOf(viaRead)).toMatch(/^NOT OPENED: duckduckgo\.com's/);
+      expect(searched).toEqual(["Emily Midkiff 2014 Fafnir", "fafnir dragons"]);
+      expect(calls).toEqual([]);
+      await c.client.callTool({ name: "browser_navigate", arguments: { url: "https://www.google.com/maps/search/gyms", snapshot: false } });
+      expect(calls[0]).toMatch(/^navigate /);
+    } finally {
+      await c.close();
+    }
+    const headed = await connect({ PILOTFISH_HEADLESS: "0" });
+    try {
+      calls.length = 0;
+      await headed.client.callTool({ name: "browser_navigate", arguments: { url: "https://www.bing.com/search?q=x", snapshot: false } });
+      expect(calls[0]).toMatch(/^navigate /);
+    } finally {
+      await headed.close();
+    }
+    const off = await connect({ PILOTFISH_HEADLESS: "1", PILOTFISH_SEARCH: "0" });
+    try {
+      calls.length = 0;
+      await off.client.callTool({ name: "browser_navigate", arguments: { url: "https://www.bing.com/search?q=x", snapshot: false } });
+      expect(calls[0]).toMatch(/^navigate /);
+    } finally {
+      await off.close();
+    }
   });
 });

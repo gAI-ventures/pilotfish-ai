@@ -83,9 +83,12 @@ stay signed in to sites between runs, or keep running into bot checks. Managed n
 [package page](https://www.npmjs.com/package/@gaiventures/pilotfish-mcp-managed) has every client's setup, the
 tools and the prices.
 
-**Tasks that name no site.** Your agent searches the web first (with its own search tool) to pick the site, or answers
-from the search when that is enough. It opens a site with `browser_navigate` when the task needs one: a price for
-your dates, a form, an account. With this package the search is your agent's, not pilotfish's.
+**Tasks that name no site.** Your agent searches the web first with `browser_search` (or its own search tool) to pick
+the site, or answers from the search when that is enough. It opens a site with `browser_navigate` when the task needs
+one: a price for your dates, a form, an account. `browser_search` asks [Keenable](https://docs.keenable.ai)'s search API
+rather than a search engine's page, which shows a headless browser a bot check on many networks; in a headless
+browser, opening a search engine's own results address (Google, Bing, DuckDuckGo, Brave, Yahoo, Ecosia) returns
+`browser_search`'s results for its query instead, and the browser stays where it was.
 
 ## Requirements
 
@@ -167,11 +170,12 @@ other address.
 | `browser_actions` `{actions, snapshot?}` | Up to 10 steps in one call, such as a form's fields and its submit button. Each step is `{action, …}`: `click`, `type`, `select`, `press`, `scroll` or `wait`, with the same fields as its own tool. A malformed step stops the batch before anything runs; otherwise it stops at the first step that fails or moves to another page, and after a step that raised a dialog, opened a new tab, had a server write refused or unanswered, left the page still loading, or left a check or sign-in on the page. Each earlier step's line keeps what it did that must not be lost (dialogs, new tab, refused writes, invalid fields, choices, field read-back). When an earlier step changed the page, the page is printed even if the last step changed nothing. |
 | `browser_query` `{expression, schema?}` | Read values with a JavaScript expression that returns JSON (up to 4,000 characters): a list of results, prices, counts. It cannot click, type, submit or send data. The cheapest way to read a page. An object written as the whole expression (`{a: 1}`) is read as if in parentheses. With `schema` (a JSON Schema), the result is checked against it: a match also comes back as `structuredContent: {value}`, a mismatch as an error starting `ERROR schema_mismatch` with up to 5 `path: message` lines. |
 | `browser_find` `{query}` | Find elements anywhere on the page by their words, best match first. Separate several targets with commas. |
-| `browser_get_text` `{max_chars?, offset?, mode?, selector?}` | The readable text of the page (PDFs too), main content first, lists as `- ` lines and table rows as `| a | b |`, with secrets masked; or of one element (`main`, `#results`). Up to `max_chars` (default 8,000): a longer page says which characters it gave and where the rest starts, read on with `offset`. `mode: "links"` lists only the page's links, one a line. Reading the same page again unchanged returns one line saying so, not the text again. A `selector` that matches nothing returns the page's whole text, saying so. |
+| `browser_get_text` `{url?, max_chars?, offset?, mode?, selector?}` | With `url`, opens that page first and reads it in the same call (a failed load is reported as `browser_navigate` reports it). The readable text of the page (PDFs too), main content first, lists as `- ` lines and table rows as `| a | b |`, with secrets masked; or of one element (`main`, `#results`). Up to `max_chars` (default 8,000): a longer page says which characters it gave and where the rest starts, read on with `offset`. `mode: "links"` lists only the page's links, one a line. Reading the same page again unchanged returns one line saying so, not the text again. A `selector` that matches nothing returns the page's whole text, saying so. |
 | `browser_screenshot` `{}` | A JPEG of the viewport. Off when secrets are configured, since the image could show them, and withheld (`UNSAFE_OUTPUT`) once a password was typed into a password field in this browser, whose pixels cannot be checked for it. |
 | `browser_wait` `{seconds, until?, gone?, in?, snapshot?}` | Wait up to 0.5 to 10 seconds, then return what changed. With `until` or `gone` it returns the moment that text appears on the page or goes (a result's label, the site's "Calculating…"). Actions already wait for the requests they start, for answers a page gets over its own WebSocket, and for a loading line or countdown the site shows. |
 | `browser_resume` `{timeout_s?}` | After a result said `NEEDS A PERSON`: wait (default 300 s) until you have dealt with the page, then return it. |
 | `browser_page_tool` `{tool, arguments?}` | Call a tool the page itself offers through [WebMCP](https://webmachinelearning.github.io/webmcp/), as listed on the `PAGE TOOLS` line of its snapshot: the site's own way to do a step (a search, a booking step), often one call where clicks take several. Returns the tool's answer and what changed. In the tool list only once a page offers tools (your client is told the list changed). A form tool that only fills its form leaves the submit to `browser_click`. |
+| `browser_search` `{query, max_results?, site?}` | Search the web without the browser: a numbered list of title, address and snippet (up to 10, default 8; `site` keeps one site's results). It asks [Keenable](https://docs.keenable.ai)'s search API, without a key by default (a shared limit per IP address, 1,000 searches an hour); `KEENABLE_API_KEY` uses your own. Not listed when `PILOTFISH_SEARCH=0`, or by default when `PILOTFISH_ALLOWED_HOSTS` is set (then only those sites' results when turned on). A query holding a configured secret's value is refused. |
 | `browser_tabs` `{switch_to?}` | List open tabs, or switch with `switch_to: "t2"`. |
 | `browser_close` `{}` | Close the browser; the next call opens a fresh one. Not needed at the end: it closes when the client disconnects. |
 
@@ -221,6 +225,8 @@ All optional.
 | `PILOTFISH_INTERVENTION_TIMEOUT_MS` | `180000` | How long a call waits for your answer to a question asked in the client. |
 | `PILOTFISH_ALLOW_SCREENSHOTS` | on unless secrets are set | `1` allows screenshots even with secrets configured. |
 | `PILOTFISH_CHROME` | found automatically | Path to the browser executable. |
+| `PILOTFISH_SEARCH` | `1`, or `0` when `PILOTFISH_ALLOWED_HOSTS` is set | `0` removes `browser_search`, so no query leaves your machine for the search API. |
+| `KEENABLE_API_KEY` | | `browser_search` uses your own [Keenable](https://docs.keenable.ai) key and its limits instead of the shared keyless one. |
 | `PILOTFISH_MCP_TOKEN` | | HTTP mode: the bearer token clients must send. |
 | `PILOTFISH_MCP_DEBUG_LOG` | | A file path: one JSON line per tool call with timings and sizes (how long it took, whether the page came back whole or as changes and why, the site's host, whether a loading indicator was still in view). Never page text, typed values or full URLs. For diagnosing; off by default. |
 
@@ -235,8 +241,10 @@ Example with a secret:
 ## Privacy
 
 pilotfish connects only to the sites your agent opens, plus the public ad-block lists (EasyList, EasyPrivacy and
-uBlock Origin's filters), downloaded about once a week and cached in `~/.pilotfish/adblock`. No telemetry, no
-pilotfish servers, no model providers.
+uBlock Origin's filters), downloaded about once a week and cached in `~/.pilotfish/adblock`, and, when your agent calls
+`browser_search`, Keenable's search API (`api.keenable.ai`), which gets the query (see its
+[data policy](https://docs.keenable.ai)); `PILOTFISH_SEARCH=0` turns that off. No telemetry, no pilotfish servers, no
+model providers.
 
 ## Troubleshooting
 

@@ -239,9 +239,10 @@ class LocalBrowser:
         selector: Optional[str] = None,
         offset: Optional[int] = None,
         mode: Optional[str] = None,
+        url: Optional[str] = None,
     ) -> ToolResult:
-        """The page's readable text (PDFs too), main content first, in parts of 8,000 characters (``offset``), or only its links (``mode="links"``); or one element's (``selector``)."""
-        return self.call("browser_get_text", _args(max_chars=max_chars, selector=selector, offset=offset, mode=mode))
+        """The page's readable text (PDFs too), main content first, in parts of 8,000 characters (``offset``), or only its links (``mode="links"``); or one element's (``selector``). With ``url``, opens that page first and reads it in the same call."""
+        return self.call("browser_get_text", _args(max_chars=max_chars, selector=selector, offset=offset, mode=mode, url=url))
 
     def screenshot(self) -> bytes:
         """A JPEG of the viewport."""
@@ -258,6 +259,10 @@ class LocalBrowser:
     def resume(self, timeout_s: Optional[float] = None) -> ToolResult:
         """After a result said NEEDS A PERSON: wait (default 300 s) until the person has dealt with the page."""
         return self.call("browser_resume", _args(timeout_s=timeout_s))
+
+    def search(self, query: str, max_results: Optional[int] = None, site: Optional[str] = None) -> ToolResult:
+        """Search the web without the browser (a search API): title, address and snippet of each result."""
+        return self.call("browser_search", {"query": query, **_args(max_results=max_results, site=site)})
 
     def tabs(self, switch_to: Optional[str] = None) -> ToolResult:
         """Open tabs, or switch to one (``"t2"``)."""

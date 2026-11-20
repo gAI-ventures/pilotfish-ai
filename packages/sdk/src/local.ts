@@ -183,8 +183,9 @@ export class LocalBrowser {
     return this.call("browser_find", { query });
   }
   /** The page's readable text (PDFs too), or one element's (`selector`). */
-  getText(o: { maxChars?: number; offset?: number; mode?: "text" | "links"; selector?: string } = {}): Promise<ToolResult> {
+  getText(o: { url?: string; maxChars?: number; offset?: number; mode?: "text" | "links"; selector?: string } = {}): Promise<ToolResult> {
     return this.call("browser_get_text", {
+      ...(o.url !== undefined ? { url: o.url } : {}),
       ...(o.maxChars !== undefined ? { max_chars: o.maxChars } : {}),
       ...(o.offset !== undefined ? { offset: o.offset } : {}),
       ...(o.mode !== undefined ? { mode: o.mode } : {}),
@@ -205,6 +206,10 @@ export class LocalBrowser {
   /** After a result said NEEDS A PERSON: wait (default 300 s) until the person has dealt with the page. */
   resume(o: { timeoutS?: number } = {}): Promise<ToolResult> {
     return this.call("browser_resume", o.timeoutS !== undefined ? { timeout_s: o.timeoutS } : {});
+  }
+  /** Search the web without the browser (a search API): title, address and snippet of each result. */
+  search(query: string, o: { maxResults?: number; site?: string } = {}): Promise<ToolResult> {
+    return this.call("browser_search", { query, ...(o.maxResults !== undefined ? { max_results: o.maxResults } : {}), ...(o.site !== undefined ? { site: o.site } : {}) });
   }
   /** Open tabs, or switch to one (`"t2"`). */
   tabs(o: { switchTo?: string } = {}): Promise<ToolResult> {

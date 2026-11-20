@@ -268,8 +268,9 @@ with LocalBrowser.start() as b:
 
 Tools: `navigate(url, snapshot=, expect=, escalate=)`, `snapshot(whole_page=False)`, `click(ref)`,
 `type(ref, text, submit=)`, `select(ref, values)`, `press(key)`, `scroll(direction)`, `actions(steps)` (up to 10 in
-one call), `query(expression, schema=)` (`.value`), `find(query)`, `get_text(max_chars=, selector=)`,
-`screenshot()` (JPEG bytes), `wait(seconds, until=, gone=, in_=)`, `resume(timeout_s=)`, `tabs(switch_to=)`,
+one call), `query(expression, schema=)` (`.value`), `find(query)`, `get_text(max_chars=, selector=, offset=, mode=, url=)`,
+`screenshot()` (JPEG bytes), `wait(seconds, until=, gone=, in_=)`, `resume(timeout_s=)`,
+`search(query, max_results=, site=)` (the web, without the browser), `tabs(switch_to=)`,
 `page_tool(tool, arguments)`, `tools()`, and `call(name, args)` for any tool by name. Each returns a `ToolResult`
 (`text`, `images`, `structured`, `is_error`); a tool's error raises `LocalToolError` (with `.tool` and `.result`)
 unless `throw_on_error=False`.

@@ -25,6 +25,18 @@ export interface McpConfig {
   interventionTimeoutMs: number;
   /** Screenshots are off when secrets are configured (the image would show them) unless PILOTFISH_ALLOW_SCREENSHOTS=1. */
   allowScreenshots: boolean;
+  /**
+   * browser_search (PILOTFISH_SEARCH): a web search through Keenable's API, no browser. On by default; off by default when
+   * PILOTFISH_ALLOWED_HOSTS limits the browser (its results then only from those sites when turned on). Undefined = that default.
+   */
+  search?: boolean;
+  /** KEENABLE_API_KEY: the keyed search endpoint and its own limits; unset = the keyless public one. */
+  searchApiKey?: string;
+}
+
+/** Whether browser_search is offered: PILOTFISH_SEARCH when set, else on unless the browser is limited to some sites. */
+export function searchOn(config: Pick<McpConfig, "search" | "allowedHosts">): boolean {
+  return config.search ?? config.allowedHosts.length === 0;
 }
 
 /** Placeholder names the secret broker substitutes ({{name}}). */
@@ -102,5 +114,7 @@ export function configFromEnv(env: Record<string, string | undefined> = process.
     secrets,
     interventionTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 180_000,
     allowScreenshots: flag(env["PILOTFISH_ALLOW_SCREENSHOTS"], Object.keys(secrets).length === 0),
+    ...(env["PILOTFISH_SEARCH"]?.trim() ? { search: flag(env["PILOTFISH_SEARCH"], true) } : {}),
+    ...(env["KEENABLE_API_KEY"]?.trim() ? { searchApiKey: env["KEENABLE_API_KEY"].trim() } : {}),
   };
 }

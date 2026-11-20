@@ -157,7 +157,7 @@ It starts the open MCP ([`@gaiventures/pilotfish-mcp`](https://www.npmjs.com/pac
 and talks to it over stdio: the installed package when there is one (`npm install @gaiventures/pilotfish-mcp` to pin
 it), else `npx -y @gaiventures/pilotfish-mcp`. Every browser tool is a method: `navigate`, `snapshot`, `click`,
 `type`, `select`, `press`, `scroll`, `actions` (up to 10 steps in one call), `query`, `find`, `getText`,
-`screenshot`, `wait`, `resume`, `tabs`, `pageTool`, plus `call(name, args)` for any tool by name and `close`. Each
+`screenshot`, `wait`, `resume`, `search` (the web, without the browser), `tabs`, `pageTool`, plus `call(name, args)` for any tool by name and `close`. Each
 returns `{text, images, structured, isError}`; a tool's error is thrown as `LocalToolError` (`throwOnError: false`
 returns it instead).
 

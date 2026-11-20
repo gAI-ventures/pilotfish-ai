@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configFromEnv, parseHosts, parseSecrets } from "./config.js";
+import { configFromEnv, parseHosts, parseSecrets, searchOn } from "./config.js";
 
 describe("parseSecrets", () => {
   it("accepts plain values and specs, and normalizes allowed hosts", () => {
@@ -86,5 +86,16 @@ describe("configFromEnv", () => {
     const c = configFromEnv({ ANTHROPIC_API_KEY: "sk-ant-x", OPENAI_API_KEY: "sk-x", PILOTFISH_MODEL: "claude-haiku-5-5" });
     expect(c).toEqual(configFromEnv({}));
     expect(JSON.stringify(c)).not.toMatch(/sk-|claude/);
+  });
+});
+
+describe("browser_search settings (21 Nov)", () => {
+  it("PILOTFISH_SEARCH and KEENABLE_API_KEY are read only when set", () => {
+    expect(configFromEnv({}, "linux")).not.toHaveProperty("search");
+    expect(configFromEnv({ PILOTFISH_SEARCH: "0", KEENABLE_API_KEY: " keen_1 " }, "linux")).toMatchObject({ search: false, searchApiKey: "keen_1" });
+    expect(searchOn({ allowedHosts: [] })).toBe(true);
+    expect(searchOn({ allowedHosts: ["a.com"] })).toBe(false);
+    expect(searchOn({ allowedHosts: ["a.com"], search: true })).toBe(true);
+    expect(searchOn({ allowedHosts: [], search: false })).toBe(false);
   });
 });

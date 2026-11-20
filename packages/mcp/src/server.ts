@@ -18,10 +18,11 @@ import { TOP_LAPS, ToolInputs, TYPED_SECRET_MARK, type ActOptions, type ActOutco
 import { currentCaptureStats, diffObservation, withCaptureStats } from "@pilotfish/perception";
 import { appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { configFromEnv, type McpConfig } from "./config.js";
+import { configFromEnv, searchOn, type McpConfig } from "./config.js";
 import { checkQueryText, InvalidSchemaError, schemaCheck } from "./query-schema.js";
 import { BrowserSession, type PageCheck, type PageObstacle, type PageUnread, type SessionOptions } from "./session.js";
 import { VERSION } from "./version.js";
+import { SEARCH_DEFAULT_RESULTS, searchEngineQuery, webSearch } from "./web-search.js";
 
 const hostOf = (url: string): string => {
   try {
@@ -39,6 +40,8 @@ export interface PilotfishMcpOptions extends SessionOptions {
   session?: BrowserSession;
   /** Reported to clients in `initialize`. Default: this package's version (the published one in the npm package). */
   version?: string;
+  /** browser_search's HTTP client (tests). Default: the global fetch. */
+  searchFetch?: typeof fetch;
 }
 
 export interface PilotfishMcp {
@@ -130,6 +133,24 @@ export const GET_TEXT_DEFAULT_CHARS = 8_000;
 /** A re-read shorter than this is given again (cheaper than explaining it is unchanged). */
 const UNCHANGED_MIN_CHARS = 600;
 
+/** Navigations looked back over for repeated failures, and how many of them failing earns the nudge. */
+const NAV_WINDOW = 6;
+const NAV_MISSES = 4;
+
+/** The page's host and the start of its text, read without touching the page. */
+const BOT_WALL_READ = `[location.host, (document.title + ' ' + (document.body ? document.body.innerText || document.body.textContent || '' : '')).slice(0, 2000)]`;
+
+/**
+ * A page whose short text is a bot check or a traffic block: a search engine's "unusual traffic", "confirm this search
+ * was made by a human", "verifying you're not a bot", "access temporarily suspended", "automated queries". Only a short
+ * page counts, so an article that mentions CAPTCHAs is never one.
+ */
+export function isBotWall(text: string): boolean {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (!t || t.length > 1_500) return false;
+  return /unusual traffic|automated (queries|requests|access)|(are|confirm|verify|verifying)[^.]{0,40}(not a (ro)?bot|human)|bots use \w+ too|access (has been |temporarily )?(suspended|denied)|request (has been |was )?blocked|solve (this|the) (challenge|puzzle)|i'?m not a robot|press (&|and) hold/i.test(t);
+}
+
 export const Inputs = {
   browser_navigate: z
     .object({
@@ -165,6 +186,7 @@ export const Inputs = {
       max_chars: z.number().int().min(500).max(60_000).optional().describe("Default 8000. A longer page says where the rest starts."),
       offset: z.number().int().min(0).max(1_000_000).optional().describe("Read on from this character, as the last read said"),
       mode: z.enum(["text", "links"]).optional().describe("links: only the page's links, one a line"),
+      url: z.url({ protocol: /^https?$/ }).optional().describe("Open this http(s) URL first and read it, in one call"),
       selector: z.string().min(1).max(300).optional().describe('CSS selector: only the first match\'s text, e.g. "main" or "#results"'),
     })
     .strict(),
@@ -192,6 +214,13 @@ export const Inputs = {
     .object({
       tool: z.string().min(1).max(200).describe("A name from the PAGE TOOLS line"),
       arguments: z.looseObject({}).optional().describe("Its input, as the parameters listed there"),
+    })
+    .strict(),
+  browser_search: z
+    .object({
+      query: z.string().min(1).max(400).describe("Words to search the web for"),
+      max_results: z.number().int().min(1).max(10).optional().describe(`Default ${SEARCH_DEFAULT_RESULTS}`),
+      site: z.string().min(3).max(253).regex(/^[a-z0-9.-]+$/i).optional().describe('Only results from this site, e.g. "en.wikipedia.org"'),
     })
     .strict(),
 } as const;
@@ -224,6 +253,9 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
   const ownsSession = !opts.session;
   const session = opts.session ?? new BrowserSession(config, opts);
   const mcp = new McpServer({ name: "pilotfish", version: opts.version ?? VERSION }, { capabilities: { logging: {} }, instructions: serverInstructions(config) });
+  const searchEnabled = searchOn(config);
+  /** Where a model that met a bot check or kept guessing addresses can look instead. */
+  const elsewhere = searchEnabled ? "browser_search, another site, a reference site's own search" : "another site, a reference site's own search";
   const secretNames = Object.keys(config.secrets);
   const secretHint = secretNames.length ? ` Secrets: ${secretNames.map((n) => `{{${n}}}`).join(", ")}.` : "";
 
@@ -258,7 +290,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       `NEEDS A PERSON (${o.category}${o.vendor ? `, ${o.vendor}` : ""}): ${session.scrubReply(forWindow(o.message))}`,
       extraLine,
       byHand(o) && config.headless
-        ? `This browser is headless, so it cannot be done by hand here: tell the user, and that the pilotfish server needs PILOTFISH_HEADLESS=0 (a visible window) for steps like this one. Docs: ${DOCS}/open-settings`
+        ? `This browser is headless, so it cannot be done by hand here: get what you need another way (another site or page) when the task allows; otherwise tell the user, and that the pilotfish server needs PILOTFISH_HEADLESS=0 (a visible window) for steps like this one. Docs: ${DOCS}/open-settings`
         : `Tell the user now, in your reply: what the page needs, and that the pilotfish browser window is open on it (${o.url}). Ask them to do it there and to tell you when it is done. Then call browser_resume: it waits for the page to move on and returns it.`,
       "Do not try to get past it yourself: pilotfish does not type passwords or codes it was not given, and does not solve CAPTCHAs.",
       byHand(o) && config.headless ? "" : `Docs: ${DOCS}/open`,
@@ -293,6 +325,25 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     return o;
   };
   const withNote = (r: CallToolResult, note: string): CallToolResult => ({ ...r, content: [...r.content, { type: "text", text: note }] });
+  /** Whether each of the last NAV_WINDOW navigations failed (an error, a block or a bot check), and navigations since the last nudge. */
+  const recentNavs: boolean[] = [];
+  let sinceNudge = NAV_WINDOW;
+  /**
+   * The page's host when the page is a short bot-check or traffic-block page the obstacle check did not name (a
+   * search engine's "unusual traffic", "confirm this search was made by a human"), else null. Read in the read-only world.
+   */
+  const botWallOn = async (): Promise<string | null> => {
+    const r = await session.act("query", { expression: BOT_WALL_READ }, {});
+    if (!r.ok) return null;
+    let v: unknown;
+    try {
+      v = JSON.parse(r.text);
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(v) || typeof v[0] !== "string" || typeof v[1] !== "string") return null;
+    return isBotWall(v[1]) ? v[0] : null;
+  };
   const handOff = async (extra: Extra, r: CallToolResult): Promise<CallToolResult> => {
     const first = await session.obstacle();
     if (!first) return r;
@@ -645,12 +696,65 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     {
       title: "Open a URL",
       description:
-        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false leaves the screen out for a page you will only read or leave. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. A search the site's form takes several steps for (a place, dates, guests, a sort, filters) is usually one call as such an address, where the form takes a call and a screen for each step. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first with your own search tool to pick the site, or answer from the search when that is enough; open a site when the task needs one (a price for dates, a form, an account).",
+        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false leaves the screen out for a page you will only read or leave; to only read a page, browser_get_text with its url opens and reads it in one call. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. A search the site's form takes several steps for (a place, dates, guests, a sort, filters) is usually one call as such an address, where the form takes a call and a screen for each step. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first " +
+          (searchEnabled ? "with browser_search, not a search engine's own page," : "with your own search tool") +
+          " to pick the site, or answer from the search when that is enough; when search engines show a bot check, search inside a site that answers (its search box, or a search address it has shown you) rather than guessing addresses; open a site when the task needs one (a price for dates, a form, an account).",
       inputSchema: Inputs.browser_navigate,
       annotations: acting,
     },
-    (args, extra) => direct(extra, "navigate", { url: args.url }, true, actOpts(args)),
+    async (args, extra) => (await openPage(args, extra)).out,
   );
+
+  /**
+   * Open a URL (browser_navigate, and browser_get_text with a url): the reply, and whether the page failed (an error, a
+   * block, a person needed, a bot check), which counts toward the failed-addresses NOTE. Headless with browser_search on,
+   * a search engine's own results address is answered by the search API instead (21 Nov: 65 of 286 page loads in a
+   * benchmark run went to search engines, which wall or poison a headless browser, though the tool list said not to).
+   */
+  const openPage = async (
+    args: { url: string; snapshot?: boolean; expect?: ActOptions["expect"]; escalate?: boolean },
+    extra: Extra,
+  ): Promise<{ out: CallToolResult; failed: boolean; searched?: boolean }> => {
+    const engine = searchEnabled && config.headless ? searchEngineQuery(args.url) : null;
+    if (engine) {
+      if (session.holdsSecret(engine.query)) return { out: text("A search query cannot carry a secret value. Search with other words.", true), failed: true };
+      const r = await webSearch(engine.query, {
+        ...(config.searchApiKey ? { apiKey: config.searchApiKey } : {}),
+        allowedHosts: config.allowedHosts,
+        ...(opts.searchFetch ? { fetch: opts.searchFetch } : {}),
+      });
+      const head = `NOT OPENED: ${engine.host}'s results page shows this headless browser a bot check, so this is browser_search's answer for "${engine.query}" (the browser stayed where it was).`;
+      return { out: text(`${head}\n${r.text}`, !r.ok), failed: !r.ok, searched: true };
+    }
+    {
+      const out = await direct(extra, "navigate", { url: args.url }, true, actOpts(args));
+      const shown = out.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+      let failed = out.isError === true || /^(BLOCKED|STOP|NEEDS A PERSON)/m.test(shown);
+      const notes: string[] = [];
+      if (!failed) {
+        const wall = await botWallOn().catch(() => null);
+        if (wall) {
+          failed = true;
+          notes.push(
+            config.headless
+              ? `BOT CHECK: ${wall} answered with a bot check, which this headless browser cannot pass. Do not wait or reload it: get what you need another way (${elsewhere}), or tell the user if only this site has it.`
+              : `BOT CHECK: ${wall} answered with a bot check. A person can pass it in the pilotfish browser window; otherwise get what you need another way (${elsewhere}).`,
+          );
+        }
+      }
+      recentNavs.push(failed);
+      if (recentNavs.length > NAV_WINDOW) recentNavs.shift();
+      sinceNudge++;
+      const misses = recentNavs.filter(Boolean).length;
+      if (failed && misses >= NAV_MISSES && sinceNudge >= NAV_WINDOW) {
+        sinceNudge = 0;
+        notes.push(
+          `NOTE: ${misses} of your last ${recentNavs.length} addresses failed (not found, blocked or a bot check). Stop guessing addresses: open a page that works and follow its links, menus or its own search box (browser_find "search"), or ${searchEnabled ? "use browser_search, or " : ""}search inside a reference site that answers (an encyclopedia, a directory, a map's own search).`,
+        );
+      }
+      return { out: notes.length ? { ...out, content: [...out.content, ...notes.map((t) => ({ type: "text" as const, text: t }))] } : out, failed };
+    }
+  };
 
   tool(
     "browser_snapshot",
@@ -725,11 +829,16 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     {
       title: "Page text",
       description:
-        "Readable text of the page (PDFs too), main content first, lists and tables kept as lists and rows, secrets masked, without refs. A long page comes in parts: the reply says where the rest starts (offset). mode links lists only the links. To read a few values or a list, browser_query is far smaller.",
+        "Readable text of the page (PDFs too), main content first, lists and tables kept as lists and rows, secrets masked, without refs. url opens that page first and reads it in the same call: use it for a page you will only read. A long page comes in parts: the reply says where the rest starts (offset). mode links lists only the links. To read a few values or a list, browser_query is far smaller.",
       inputSchema: Inputs.browser_get_text,
       annotations: readOnly,
     },
     async (args, extra) => {
+      if (args.url) {
+        const opened = await openPage({ url: args.url, snapshot: false }, extra);
+        // A failed load is said as browser_navigate says it; a search engine's address is answered by the search.
+        if (opened.failed || opened.searched) return opened.out;
+      }
       const input = {
         max_chars: args.max_chars ?? GET_TEXT_DEFAULT_CHARS,
         ...(args.selector ? { selector: args.selector } : { structured: true, main_first: true }),
@@ -913,6 +1022,31 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       return text(list ? list.split(" | ").join("\n") : "No open tabs.");
     },
   );
+
+  if (searchEnabled) {
+    tool(
+      "browser_search",
+      {
+        title: "Search the web",
+        description:
+          "Search the web without the browser (a search API, so no bot check): a numbered list of title, address and snippet. Use it to find which site has what the task needs, then open the result with browser_navigate; a snippet can be out of date, so check a value on the page itself.",
+        inputSchema: Inputs.browser_search,
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      },
+      async (args) => {
+        // The query leaves this machine: a configured secret's value never goes in one.
+        if (session.holdsSecret(args.query)) return text("A search query cannot carry a secret value. Search with other words.", true);
+        const r = await webSearch(args.query, {
+          ...(args.max_results !== undefined ? { maxResults: args.max_results } : {}),
+          ...(args.site ? { site: args.site.toLowerCase() } : {}),
+          ...(config.searchApiKey ? { apiKey: config.searchApiKey } : {}),
+          allowedHosts: config.allowedHosts,
+          ...(opts.searchFetch ? { fetch: opts.searchFetch } : {}),
+        });
+        return text(r.text, !r.ok);
+      },
+    );
+  }
 
   tool(
     "browser_close",
