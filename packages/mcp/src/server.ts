@@ -125,6 +125,11 @@ const Step = z
   });
 
 /** Tool input schemas (strict: unknown keys are rejected). Exported for tests. */
+/** browser_get_text's default size: about two screens of text; a longer page says where the rest starts. */
+export const GET_TEXT_DEFAULT_CHARS = 8_000;
+/** A re-read shorter than this is given again (cheaper than explaining it is unchanged). */
+const UNCHANGED_MIN_CHARS = 600;
+
 export const Inputs = {
   browser_navigate: z
     .object({
@@ -157,7 +162,9 @@ export const Inputs = {
   browser_screenshot: z.object({}).strict(),
   browser_get_text: z
     .object({
-      max_chars: z.number().int().min(500).max(60_000).optional().describe("Default 20000. Ask for less when the start of the page is enough."),
+      max_chars: z.number().int().min(500).max(60_000).optional().describe("Default 8000. A longer page says where the rest starts."),
+      offset: z.number().int().min(0).max(1_000_000).optional().describe("Read on from this character, as the last read said"),
+      mode: z.enum(["text", "links"]).optional().describe("links: only the page's links, one a line"),
       selector: z.string().min(1).max(300).optional().describe('CSS selector: only the first match\'s text, e.g. "main" or "#results"'),
     })
     .strict(),
@@ -708,16 +715,42 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     },
   );
 
+  /**
+   * The last whole-page read given, to answer an identical re-read in a line: a page re-read with nothing changed gave
+   * the client the same thousands of characters again, and every later turn carried both copies.
+   */
+  let lastRead: { hash: string; chars: number } | null = null;
   tool(
     "browser_get_text",
     {
       title: "Page text",
-      description: "Readable text of the page (PDFs too), secrets masked, without refs. To read a few values or a list, browser_query is far smaller.",
+      description:
+        "Readable text of the page (PDFs too), main content first, lists and tables kept as lists and rows, secrets masked, without refs. A long page comes in parts: the reply says where the rest starts (offset). mode links lists only the links. To read a few values or a list, browser_query is far smaller.",
       inputSchema: Inputs.browser_get_text,
       annotations: readOnly,
     },
-    (args, extra) => direct(extra, "get_text", { ...(args.max_chars ? { max_chars: args.max_chars } : {}), ...(args.selector ? { selector: args.selector } : {}) }, false),
+    async (args, extra) => {
+      const input = {
+        max_chars: args.max_chars ?? GET_TEXT_DEFAULT_CHARS,
+        ...(args.selector ? { selector: args.selector } : { structured: true, main_first: true }),
+        ...(args.offset ? { offset: args.offset } : {}),
+        ...(args.mode === "links" ? { mode: "links" } : {}),
+      };
+      const out = await direct(extra, "get_text", input, false);
+      const shownText = !out.isError && out.content.length === 1 && out.content[0]?.type === "text" ? out.content[0].text : "";
+      if (!/^(PAGE TEXT|PDF TEXT|PAGE LINKS) \(/.test(shownText) || shownText.length < UNCHANGED_MIN_CHARS) {
+        lastRead = null;
+        return out;
+      }
+      const hash = createHash("sha256").update(shownText).digest("hex");
+      if (lastRead?.hash === hash) {
+        return text(`UNCHANGED: the same ${lastRead.chars} characters as your last browser_get_text of this page; nothing new to read. Read another part (offset, selector, mode), or act on the page.`);
+      }
+      lastRead = { hash, chars: shownText.length };
+      return out;
+    },
   );
+
 
   tool(
     "browser_query",

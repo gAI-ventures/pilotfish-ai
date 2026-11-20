@@ -183,8 +183,13 @@ export class LocalBrowser {
     return this.call("browser_find", { query });
   }
   /** The page's readable text (PDFs too), or one element's (`selector`). */
-  getText(o: { maxChars?: number; selector?: string } = {}): Promise<ToolResult> {
-    return this.call("browser_get_text", { ...(o.maxChars !== undefined ? { max_chars: o.maxChars } : {}), ...(o.selector !== undefined ? { selector: o.selector } : {}) });
+  getText(o: { maxChars?: number; offset?: number; mode?: "text" | "links"; selector?: string } = {}): Promise<ToolResult> {
+    return this.call("browser_get_text", {
+      ...(o.maxChars !== undefined ? { max_chars: o.maxChars } : {}),
+      ...(o.offset !== undefined ? { offset: o.offset } : {}),
+      ...(o.mode !== undefined ? { mode: o.mode } : {}),
+      ...(o.selector !== undefined ? { selector: o.selector } : {}),
+    });
   }
   /** A JPEG of the viewport. */
   async screenshot(): Promise<Uint8Array> {

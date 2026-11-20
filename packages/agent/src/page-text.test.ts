@@ -1,6 +1,7 @@
 // The words a site uses to say it is still working, and that a search found nothing (agent.ts: SITE_WAIT_TEXT in
 // LOADING_INDICATOR_JS, EMPTY_RESULTS_TEXT in EMPTY_RESULTS_JS). Lines from real pages, and look-alikes that are not.
 import { describe, expect, it } from "vitest";
+import { cutPart } from "./agent.js";
 import { EMPTY_RESULTS_TEXT, SITE_WAIT_TEXT, loadingState } from "./agent.js";
 
 describe("SITE_WAIT_TEXT: the site says it is still working", () => {
@@ -75,5 +76,27 @@ describe("loadingState: what one read of the loading indicators means (16 Nov)",
     const stuck = new Set([`${tab1}Loading results`]);
     expect(loadingState("Loading results", stuck, tab2)).toEqual({ active: ["Loading results"], exempt: [], retire: [], unknown: false });
     expect(loadingState("", stuck, tab2).retire).toEqual([]);
+  });
+});
+
+describe("cutPart: a page's text read in parts (the open MCP's offset, 20 Nov)", () => {
+  const whole = Array.from({ length: 50 }, (_, i) => `line ${i} with a price of $${100 + i}`).join("\n");
+  it("parts meet end to start with no word cut in two and nothing lost", () => {
+    let off = 0;
+    const parts: string[] = [];
+    while (off < whole.length && parts.length < 100) {
+      const part = cutPart(whole, off, 200);
+      expect(part.length).toBeGreaterThan(0);
+      expect(part.length).toBeLessThanOrEqual(200);
+      parts.push(part);
+      off = whole.indexOf(part, off) + part.length;
+    }
+    const words = (x: string) => x.split(/\s+/).filter(Boolean);
+    expect(words(parts.join(" "))).toEqual(words(whole));
+    for (const p of parts) expect(p).not.toMatch(/^\S*\$\d?$/m);
+  });
+  it("an offset past the end is empty, and a short text comes whole", () => {
+    expect(cutPart(whole, whole.length + 5, 100)).toBe("");
+    expect(cutPart("short text", 0, 100)).toBe("short text");
   });
 });

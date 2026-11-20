@@ -793,13 +793,55 @@ export function shownHref(href: string, pageUrl = ""): string {
   return `${clip(where, 116)}?…`;
 }
 
+/** How pageText lays out the page. */
+export interface PageTextOptions {
+  maxChars?: number;
+  /**
+   * Lists and tables keep their shape: a list item starts "- " and a table row is "| a | b |", so a reader can tell
+   * which value sits in which column of a price list or a specs table (plain text runs the cells together).
+   */
+  structured?: boolean;
+  /**
+   * The page's main content (<main>, role=main, or a lone <article>) first, then the rest under a marked line: a
+   * capped read is then spent on the content, not on the menus above it. Nothing is dropped.
+   */
+  mainFirst?: boolean;
+}
+
+/** Printed text a main must give to go first; less and the page is read in its own order. */
+const MAIN_FIRST_MIN_CHARS = 200;
+
+/** The node holding a page's main content, when it has one worth leading with. */
+function mainNode(root: SnapNode): SnapNode | null {
+  const mains: SnapNode[] = [];
+  const articles: SnapNode[] = [];
+  const walk = (n: SnapNode) => {
+    for (const c of n.children) {
+      if (c.tag === "main" || c.role === "main") {
+        mains.push(c);
+        continue;
+      }
+      if (c.tag === "article") articles.push(c);
+      walk(c);
+    }
+  };
+  walk(root);
+  const pick = mains[0] ?? (articles.length === 1 ? articles[0] : undefined);
+  if (!pick) return null;
+  // A main that holds almost nothing (an app shell, a skip target) is no better a start than the page itself.
+  return textOf(pick, 400).length >= 200 ? pick : null;
+}
+
 /** Plain readable text of the page (for extraction), with headings marked. */
-export function pageText(snap: Snapshot, { maxChars = 60_000 } = {}): string {
+export function pageText(snap: Snapshot, { maxChars = 60_000, structured = false, mainFirst = false }: PageTextOptions = {}): string {
   const out: string[] = [];
   let chars = 0;
+  const skip = new Set<SnapNode>();
+  let inCell = 0;
   const walk = (n: SnapNode) => {
     for (const c of n.children) {
       if (chars > maxChars) return;
+      if (skip.has(c)) continue;
       if (!c.visible && !c.text && !c.boxless && (c.attrs["__clip"] || !hasVisibleDescendant(c))) continue;
       if (c.boxless || (!c.visible && !c.text)) {
         walk(c);
@@ -822,24 +864,90 @@ export function pageText(snap: Snapshot, { maxChars = 60_000 } = {}): string {
         const label = c.name || c.attrs["placeholder"] || c.attrs["name"] || c.tag;
         out.push(`[${label}: ${c.value ?? ""}]`);
         chars += label.length + 4;
+      } else if (structured && c.tag === "li") {
+        // Inside a table cell a list stays on the row's line, its items apart.
+        out.push(inCell ? "·" : "\n-");
+        chars += 2;
+        walk(c);
+      } else if (structured && c.tag === "tr") {
+        out.push("\n|");
+        chars += 2;
+        walk(c);
+        out.push("|");
+      } else if (structured && (c.tag === "td" || c.tag === "th")) {
+        const before = out.length;
+        inCell++;
+        walk(c);
+        inCell--;
+        // An empty cell still holds its column.
+        if (out.length === before) out.push(" ");
+        out.push("|");
+        chars += 2;
       } else {
-        if (["li", "tr", "p", "div", "section", "article", "br", "td", "th"].includes(c.tag)) out.push("\n");
+        if (["li", "tr", "p", "div", "section", "article", "br", "td", "th"].includes(c.tag)) out.push(inCell ? " " : "\n");
         walk(c);
       }
     }
   };
-  walk(snap.root);
-  const joined = out
+  const main = mainFirst ? mainNode(snap.root) : null;
+  if (main) walk({ ...main, children: [main] } as SnapNode);
+  if (main && chars >= MAIN_FIRST_MIN_CHARS) {
+    skip.add(main);
+    if (chars <= maxChars) {
+      out.push("\n\n---\n(Outside the main content:)\n");
+      walk(snap.root);
+    }
+  } else {
+    // No main, or one that printed almost nothing (hidden, drawn elsewhere): the page in its own order.
+    out.length = 0;
+    chars = 0;
+    walk(snap.root);
+  }
+  let joined = out
     .join(" ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  if (structured) joined = joined.replace(/\| +\|/g, "| |").replace(/\n- +\n/g, "\n");
   if (joined.length <= maxChars) return joined;
   // The cap can land between an emoji's surrogate pair; drop a trailing unpaired high surrogate so the
   // result stays valid JSON (the string was well-formed before the cut, so only the boundary is at risk).
   const cut = joined.slice(0, maxChars);
   return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * The page's links, one a line, "- [words](target)", each target once (its first words kept), in page order: for
+ * picking the next page to open on a site or a results list without reading all its text.
+ */
+export function pageLinks(snap: Snapshot, { maxChars = 60_000 } = {}): { text: string; total: number } {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  let chars = 0;
+  let total = 0;
+  const walk = (n: SnapNode) => {
+    for (const c of n.children) {
+      if (!c.visible && !c.boxless && !hasVisibleDescendant(c)) continue;
+      if (c.tag === "a" && c.attrs["href"] && !c.attrs["href"].startsWith("javascript:")) {
+        const href = shownHref(c.attrs["href"], snap.url);
+        const t = clip(textOf(c, 161), 160) || c.name || c.attrs["title"] || c.attrs["aria-label"] || "";
+        if (t && !seen.has(href)) {
+          seen.add(href);
+          total++;
+          const line = `- [${t}](${href})`;
+          if (chars + line.length + 1 <= maxChars) {
+            lines.push(line);
+            chars += line.length + 1;
+          }
+        }
+        continue;
+      }
+      walk(c);
+    }
+  };
+  walk(snap.root);
+  return { text: lines.join("\n"), total };
 }
 
 /** Search the snapshot for elements whose role/name/text/attributes contain all query words. */

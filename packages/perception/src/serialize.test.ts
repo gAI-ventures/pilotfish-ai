@@ -2,7 +2,7 @@
 // covers real snapshots).
 import { describe, expect, it } from "vitest";
 import type { FrameSession, Rect } from "@pilotfish/browser";
-import { choiceOf, controlStates, describeNode, findInSnapshot, findScored, serializeSnapshot } from "./serialize.js";
+import { choiceOf, controlStates, describeNode, findInSnapshot, findScored, pageLinks, pageText, serializeSnapshot } from "./serialize.js";
 import { formatEvidence } from "./evidence.js";
 import { nodeKey, type SnapNode, type Snapshot } from "./snapshot.js";
 
@@ -774,5 +774,66 @@ describe("serializeSnapshot sameNames: a suggestion list whose options share a n
     const list = S([E("ul", {}, [E("li", {}, ["North Ridge"]), E("li", {}, ["North ridge"])], { role: "list" })]);
     expect(serializeSnapshot(list, { sameNames: true })).not.toContain("share the name");
     expect(serializeSnapshot(S([box(option("North Ridge", "Westland"), option("North ridge", "Lakes"))]))).not.toContain("share the name");
+  });
+});
+
+describe("pageText for the open MCP's reads (20 Nov): lists and tables kept, main content first", () => {
+  const long = (w: string) => `${w} `.repeat(60).trim();
+  const page = () =>
+    S([
+      E("nav", {}, [E("ul", {}, [E("li", {}, [I("a", { href: "/home" }, ["Home"])]), E("li", {}, [I("a", { href: "/about" }, ["About"])])])]),
+      E("main", {}, [
+        E("h1", {}, ["Studio albums"], { role: "heading" }),
+        E("table", {}, [
+          E("tr", {}, [E("th", {}, ["Year"]), E("th", {}, ["Album"]), E("th", {}, [])]),
+          E("tr", {}, [E("td", {}, ["1962"]), E("td", {}, ["La Voz", E("ul", {}, [E("li", {}, ["Label: RCA"]), E("li", {}, ["Format: LP"])])]), E("td", {}, [])]),
+        ]),
+        E("ul", {}, [E("li", {}, ["First point"]), E("li", {}, ["Second point"])]),
+        E("p", {}, [long("body")]),
+      ]),
+      E("footer", {}, ["Footer words"]),
+    ]);
+
+  it("plain by default: the hosted agent's reads are unchanged", () => {
+    const t = pageText(page());
+    expect(t.startsWith("[Home](/home)")).toBe(true);
+    expect(t).not.toContain("| 1962 |");
+    expect(t).not.toContain("(Outside the main content:)");
+  });
+
+  it("structured: a table row on one line between bars, an empty cell kept, a cell's list on the row; list items as - lines", () => {
+    const t = pageText(page(), { structured: true });
+    expect(t).toContain("| Year | Album | |");
+    expect(t).toMatch(/\| 1962 \| La Voz · Label: RCA · Format: LP \| \|/);
+    expect(t).toMatch(/\n- First point\n- Second point/);
+  });
+
+  it("main first: the content leads, the rest follows under a marked line, nothing dropped", () => {
+    const t = pageText(page(), { structured: true, mainFirst: true });
+    expect(t.startsWith("# Studio albums")).toBe(true);
+    const mark = t.indexOf("(Outside the main content:)");
+    expect(mark).toBeGreaterThan(t.indexOf("body body"));
+    expect(t.indexOf("[Home](/home)")).toBeGreaterThan(mark);
+    expect(t).toContain("Footer words");
+  });
+
+  it("a main that prints almost nothing: the page in its own order, no marked line", () => {
+    const t = pageText(S([E("nav", {}, [long("menu")]), E("main", {}, [E("div", {}, [long("hidden")], { visible: false })]), E("p", {}, [long("text")])]), { mainFirst: true });
+    expect(t).not.toContain("(Outside the main content:)");
+    expect(t.startsWith("menu")).toBe(true);
+  });
+
+  it("no main: the page in its own order", () => {
+    const t = pageText(S([E("div", {}, [long("alpha")]), E("div", {}, [long("beta")])]), { mainFirst: true });
+    expect(t.startsWith("alpha")).toBe(true);
+    expect(t).not.toContain("(Outside the main content:)");
+  });
+
+  it("pageLinks: one a line, each target once, a total that counts those left out", () => {
+    const snap = S([I("a", { href: "/a" }, ["First"]), I("a", { href: "/a" }, ["First again"]), I("a", { href: "https://other.example/b" }, ["Other"]), I("a", { href: "javascript:void(0)" }, ["Script"]), I("a", { href: "/c" }, ["Third"])]);
+    expect(pageLinks(snap)).toEqual({ text: "- [First](/a)\n- [Other](other.example/b)\n- [Third](/c)", total: 3 });
+    const capped = pageLinks(snap, { maxChars: 20 });
+    expect(capped.total).toBe(3);
+    expect(capped.text).toBe("- [First](/a)");
   });
 });

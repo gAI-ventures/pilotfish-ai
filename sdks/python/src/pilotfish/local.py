@@ -233,9 +233,15 @@ class LocalBrowser:
         """Elements anywhere on the page by their words, best match first (comma-separate several targets)."""
         return self.call("browser_find", {"query": query})
 
-    def get_text(self, max_chars: Optional[int] = None, selector: Optional[str] = None) -> ToolResult:
-        """The page's readable text (PDFs too), or one element's (``selector``)."""
-        return self.call("browser_get_text", _args(max_chars=max_chars, selector=selector))
+    def get_text(
+        self,
+        max_chars: Optional[int] = None,
+        selector: Optional[str] = None,
+        offset: Optional[int] = None,
+        mode: Optional[str] = None,
+    ) -> ToolResult:
+        """The page's readable text (PDFs too), main content first, in parts of 8,000 characters (``offset``), or only its links (``mode="links"``); or one element's (``selector``)."""
+        return self.call("browser_get_text", _args(max_chars=max_chars, selector=selector, offset=offset, mode=mode))
 
     def screenshot(self) -> bytes:
         """A JPEG of the viewport."""

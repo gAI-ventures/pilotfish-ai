@@ -476,3 +476,70 @@ describe("output boundary scan (the executor stubbed: no browser; 18 Nov)", () =
     expect(JSON.stringify(r)).not.toContain(SECRET);
   });
 });
+
+describe("browser_get_text (the executor stubbed: no browser; 20 Nov)", () => {
+  let pf: PilotfishMcp;
+  let client: Client;
+  let next: ActOutcome = { ok: true, summary: "", text: "" };
+  const inputs: Record<string, unknown>[] = [];
+  const read = async (args: Record<string, unknown> = {}) => (await client.callTool({ name: "browser_get_text", arguments: args })) as CallToolResult;
+  const textOf = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+  const page = (body: string): ActOutcome => ({ ok: true, summary: "get_text", text: `PAGE TEXT (https://shop.example/):\n${body}` });
+
+  beforeAll(async () => {
+    pf = createMcpServer({ config: configFromEnv({}) });
+    pf.session.act = async (_name, input) => {
+      inputs.push(input);
+      return next;
+    };
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await pf.server.connect(serverSide);
+    client = new Client({ name: "get-text", version: "1" });
+    await client.connect(clientSide);
+  });
+
+  afterAll(async () => {
+    await client?.close();
+    await pf?.close();
+  });
+
+  it("asks for 8,000 characters laid out with the main content first; a selector reads that part only, as before", async () => {
+    next = page("x".repeat(700));
+    await read();
+    expect(inputs.at(-1)).toEqual({ max_chars: 8000, structured: true, main_first: true });
+    await read({ selector: "#results", max_chars: 3000 });
+    expect(inputs.at(-1)).toEqual({ max_chars: 3000, selector: "#results" });
+    await read({ offset: 8000 });
+    expect(inputs.at(-1)).toEqual({ max_chars: 8000, structured: true, main_first: true, offset: 8000 });
+    await read({ mode: "links" });
+    expect(inputs.at(-1)).toEqual({ max_chars: 8000, structured: true, main_first: true, mode: "links" });
+  });
+
+  it("the same long text twice in a row is one line the second time; a changed page or a short one comes whole", async () => {
+    next = page("a".repeat(900));
+    expect(textOf(await read())).toBe(`PAGE TEXT (https://shop.example/):\n${"a".repeat(900)}`);
+    const again = textOf(await read());
+    expect(again).toMatch(/^UNCHANGED: the same 935 characters as your last browser_get_text/);
+    next = page("b".repeat(900));
+    expect(textOf(await read())).toContain("bbbb");
+    next = page("short");
+    expect(textOf(await read())).toContain("short");
+    expect(textOf(await read())).toContain("short");
+  });
+
+  it("an error or another kind of reply is given as it is and resets the memory", async () => {
+    next = page("c".repeat(900));
+    await read();
+    next = { ok: false, summary: "failed", text: "Error: no page" };
+    const r = await read();
+    expect(r.isError).toBe(true);
+    next = page("c".repeat(900));
+    expect(textOf(await read())).toContain("cccc");
+  });
+
+  it("offset and mode are strict inputs", () => {
+    expect(Inputs.browser_get_text.safeParse({ offset: 100, mode: "links" }).success).toBe(true);
+    expect(Inputs.browser_get_text.safeParse({ offset: -1 }).success).toBe(false);
+    expect(Inputs.browser_get_text.safeParse({ mode: "html" }).success).toBe(false);
+  });
+});

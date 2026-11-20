@@ -28,7 +28,7 @@ import {
   handleFor,
   IDP_SIGNATURES,
   isAuthUrl,
-  pageText,
+  pageText, pageLinks,
   resolveHandle,
   serializeSnapshot,
   describeNode,
@@ -510,6 +510,31 @@ export interface ActFacts {
   expect?: { status: ExpectStatus; line: string };
   /** The action's own receipt lines: Chose/Selected, field read-back. */
   receipt: string[];
+}
+
+/** The longest page text laid out to read it in parts (get_text's offset); a part past it says so. */
+const READ_WHOLE_CHARS = 200_000;
+
+/**
+ * Characters [offset, offset+max) of a page's text, cut at a line or word break near each end when one is close, so a
+ * part never starts or stops mid-word (a price or a name cut in two reads as two wrong values).
+ */
+export function cutPart(whole: string, offset: number, max: number): string {
+  if (offset >= whole.length) return "";
+  let start = offset;
+  if (start > 0) {
+    const nl = whole.indexOf("\n", start);
+    if (nl !== -1 && nl - start < 200) start = nl + 1;
+  }
+  let end = Math.min(whole.length, start + max);
+  if (end < whole.length) {
+    const nl = whole.lastIndexOf("\n", end);
+    const sp = whole.lastIndexOf(" ", end);
+    const brk = nl > start + max * 0.8 ? nl : sp > start + max * 0.8 ? sp : -1;
+    if (brk !== -1) end = brk;
+  }
+  const part = whole.slice(start, end);
+  return /[\uD800-\uDBFF]$/.test(part) ? part.slice(0, -1) : part;
 }
 
 export interface ActOutcome {
@@ -2639,6 +2664,15 @@ export class Agent {
     // agent's own tool list, whose strict-tool budget is full (two more optional parameters would take strict from
     // drag), so they come through here as given.
     if (name === "wait") for (const k of ["until", "gone", "in"]) if (typeof rawInput[k] === "string" && rawInput[k]) input = { ...input, [k]: String(rawInput[k]).slice(0, 120) };
+    // The open MCP's browser_get_text reads in parts (offset), lists links (mode), and lays out lists and tables with the
+    // main content first (structured, main_first). Like wait's, they come through here as given.
+    if (name === "get_text") {
+      const off = Number(rawInput["offset"]);
+      if (Number.isFinite(off) && off > 0) input = { ...input, offset: Math.floor(off) };
+      if (rawInput["mode"] === "links") input = { ...input, mode: "links" };
+      if (rawInput["structured"] === true) input = { ...input, structured: true };
+      if (rawInput["main_first"] === true) input = { ...input, main_first: true };
+    }
     await this.recallRefs(input);
 
     // A plain click on a link that opens a new tab (Amazon results: target=_blank) would leave this
@@ -3222,14 +3256,22 @@ export class Agent {
           if ((await this.page.loadState()).contentType === "application/pdf") {
             const bytes = new Uint8Array(await this.page.documentBytes());
             // pdf.js detaches the buffer it is given: it reads a copy, and `bytes` stays whole for the host.
-            const r = await pdfText(bytes.slice(), Number(input["max_chars"] ?? 20_000));
-            this.note("get_text");
+            const pdfMax = Number(input["max_chars"] ?? 20_000);
+            const pdfOffset = typeof input["offset"] === "number" ? input["offset"] : 0;
+            // Read in parts like a page (the open MCP's offset): the document is read once, then cut.
+            const parted = pdfOffset > 0 || input["structured"] === true;
+            const whole = await pdfText(bytes.slice(), parted ? Math.max(READ_WHOLE_CHARS, pdfOffset + pdfMax + 1) : pdfMax);
+            const partText = parted ? cutPart(whole.text, pdfOffset, pdfMax) : whole.text;
+            const partEnd = pdfOffset + partText.length;
+            const r = parted ? { pages: whole.pages, text: partText, truncated: whole.truncated || whole.text.length > partEnd } : whole;
+            const pdfSpan = parted && (pdfOffset || whole.text.length > partEnd) ? `, characters ${pdfOffset}-${partEnd} of ${whole.text.length}${whole.text.length > partEnd ? `; more with offset ${partEnd}` : ", the end"}` : "";
+            this.note(pdfOffset ? readKey("get_text", input) : "get_text");
             this.keepRead("get_text", this.secrets.scrub(r.text));
             // Viewed, not downloaded: the host may keep it for the person (a failure only loses the copy).
             const kept = this.opts.onDocumentRead ? await this.opts.onDocumentRead({ url: this.page.url, name: pdfNameOf(this.page.url), bytes }).catch(() => null) : null;
             // The action log the end check reads carries the keep too: "opened, but not downloaded" failed a run that
             // kept it (18 Nov).
-            return ok(this.secrets.scrub(`PDF TEXT (${this.page.url}, ${r.pages} page(s)${r.truncated ? ", truncated" : ""})${kept ? `. ${kept}` : ""}:\n${r.text}`), `get_text: pdf ${r.pages} pages${kept ? ` (${kept})` : ""}`);
+            return ok(this.secrets.scrub(`PDF TEXT (${this.page.url}, ${r.pages} page(s)${pdfSpan || (r.truncated ? ", truncated" : "")})${kept ? `. ${kept}` : ""}:\n${r.text}`), `get_text: pdf ${r.pages} pages${kept ? ` (${kept})` : ""}`);
           }
           const maxChars = Number(input["max_chars"] ?? 20_000);
           if (typeof input["selector"] === "string" && input["selector"].trim()) {
@@ -3257,15 +3299,37 @@ export class Agent {
             return ok(this.secrets.scrub(`PAGE TEXT (${this.page.url}, ${sel}):\n${shown}`), `get_text: ${shown.length} chars of ${sel}`);
           }
           const snap = await captureSnapshot(this.page, { viewportBand: Infinity });
-          const text = pageText(snap, { maxChars });
-          this.note("get_text");
+          const offset = typeof input["offset"] === "number" ? input["offset"] : 0;
+          if (input["mode"] === "links") {
+            const links = pageLinks(snap, { maxChars });
+            this.note(readKey("get_text", input));
+            this.keepRead("get_text", this.secrets.scrub(links.text));
+            const shownCount = links.text ? links.text.split("\n").length : 0;
+            const more = links.total > shownCount ? `, the first ${shownCount} shown` : "";
+            return ok(this.secrets.scrub(`PAGE LINKS (${snap.url}, ${links.total} link(s)${more}):\n${links.text}`), `get_text: ${shownCount} links`);
+          }
+          const layout = { structured: input["structured"] === true, mainFirst: input["main_first"] === true };
+          // A part of a longer read: the whole is laid out once, then cut where this part starts and ends.
+          const whole = offset || layout.structured ? pageText(snap, { maxChars: Math.max(READ_WHOLE_CHARS, offset + maxChars + 1), ...layout }) : null;
+          const text = whole === null ? pageText(snap, { maxChars }) : cutPart(whole, offset, maxChars);
+          this.note(offset ? readKey("get_text", input) : "get_text");
           this.keepRead("get_text", this.secrets.scrub(text));
           // An embedded frame opened as a page of its own often draws nothing there, and a model that opened one lost steps on a blank page.
           const frameHint =
             !text.trim() && this.openedFrameUrl && this.openedFrameUrl === this.page.url
               ? "\n(No text: this address is a frame embedded in another page, and its content is drawn there. Go back to that page and read the frame's content from it, with query or get_text.)"
               : "";
-          return ok(this.secrets.scrub(`PAGE TEXT (${snap.url}):\n${text}${frameHint}`), `get_text: ${text.length} chars`);
+          // How much of the page this is, and where the rest starts, so a long page is read in parts rather than whole.
+          const end = offset + text.length;
+          const span =
+            whole === null
+              ? ""
+              : whole.length > end
+                ? `, characters ${offset}-${end} of ${whole.length >= READ_WHOLE_CHARS ? `${READ_WHOLE_CHARS}+` : whole.length}; more with offset ${end}`
+                : offset
+                  ? `, characters ${offset}-${end} of ${whole.length}, the end`
+                  : "";
+          return ok(this.secrets.scrub(`PAGE TEXT (${snap.url}${span}):\n${text}${frameHint}`), `get_text: ${text.length} chars${offset ? ` from ${offset}` : ""}`);
         }
         case "screenshot": {
           const risk = await this.pictureRisk();
