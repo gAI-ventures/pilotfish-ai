@@ -26,13 +26,13 @@ describe("browser_search's web search (Keenable, no browser)", () => {
     const headers = calls[0]!.init.headers as Record<string, string>;
     expect(headers["X-Keenable-Title"]).toBe("pilotfish");
     expect(headers["X-API-Key"]).toBeUndefined();
-    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ query: "paintball Cologne", max_results: 8, snippet_max_length: 500 });
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ query: "paintball Cologne", max_results: 10, snippet_max_length: 500 });
     expect(r.ok).toBe(true);
     expect(r.text).toContain('SEARCH RESULTS for "paintball Cologne" (2;');
     expect(r.text).toContain("1. Paintball Fun Cologne (2026-11-16)\n   https://pastimes.de/locations/paintball\n   Paintball Fun Cologne INDOOR Adresse Bruckner Straße 99");
     expect(r.text).toContain("2. adrenalinpark.de\n   https://adrenalinpark.de/koeln-paintball\n   Lasertag und Paintball");
     expect(r.text).not.toContain("javascript:");
-    expect(r.text).toMatch(/browser_navigate/);
+    expect(r.text).not.toMatch(/check a value|browser_navigate/);
   });
 
   it("a key goes to the keyed endpoint; a site and a count are passed on", async () => {

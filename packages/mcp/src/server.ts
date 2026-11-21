@@ -228,6 +228,29 @@ export const Inputs = {
 /** The website's docs: linked only where a person must act or a setting must change, never on a success path. */
 const DOCS = "https://pilotfish.gai.ventures/docs";
 
+/**
+ * A page browser_get_text was asked to open and read that failed to load: every line that says what happened and what
+ * to do (not found, blocked, a bot check, a person needed, a load error, the failed-addresses NOTE), without the page's
+ * EVIDENCE block (where it landed, its title, elements and text added or removed), which only describes the failure
+ * page. A reply with nothing outside that block is given whole.
+ */
+export function failedRead(out: CallToolResult): CallToolResult {
+  const kept: string[] = [];
+  for (const c of out.content) {
+    if (c.type !== "text") return out;
+    const lines = c.text.split("\n");
+    const start = lines.findIndex((l) => l.trim() === "EVIDENCE:");
+    if (start >= 0) {
+      let end = lines.findIndex((l, i) => i > start && /^\(No page snapshot/.test(l.trim()));
+      if (end < 0) end = lines.findIndex((l, i) => i > start && l.trim() === "");
+      lines.splice(start, (end < 0 ? lines.length : end + 1) - start);
+    }
+    kept.push(...lines.map((l) => l.trim()).filter(Boolean));
+  }
+  if (!kept.length) return out;
+  return { content: [{ type: "text", text: `NOT READ: ${kept.join("\n")}` }], isError: out.isError === true };
+}
+
 function text(t: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) };
 }
@@ -357,7 +380,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       o = after;
     }
     if (o.neverAutomate) return withNote(r, `STOP: ${session.scrubReply(o.host)} shows a bot check, and this site is never automated past one (ticket sellers: the US BOTS Act; UIDAI: the Aadhaar Act). Do not continue on it; tell the user.`);
-    if (o.category === "hard_block" || o.needs === "none_possible") return withNote(r, `BLOCKED: ${session.scrubReply(forWindow(o.message))} A person cannot fix this from the browser window: try another way (another page or site), or tell the user.`);
+    if (o.category === "hard_block" || o.needs === "none_possible") return withNote(r, `BLOCKED: ${session.scrubReply(forWindow(o.message).replace(/\s*A person cannot fix this from the live view\./, ""))} A person cannot fix this from the browser window: try another way (another page or site), or tell the user.`);
     if (canElicit() && !(byHand(o) && config.headless)) {
       const answer = await mcp.server
         .elicitInput(
@@ -836,8 +859,11 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     async (args, extra) => {
       if (args.url) {
         const opened = await openPage({ url: args.url, snapshot: false }, extra);
-        // A failed load is said as browser_navigate says it; a search engine's address is answered by the search.
-        if (opened.failed || opened.searched) return opened.out;
+        // A search engine's address is answered by the search. A failed load is said in its own lines only (21 Nov: the
+        // page's evidence, about 1,000 characters for a block page, stayed in the client's context for nothing), but
+        // whole when a person is needed or the failure is of an unknown kind.
+        if (opened.searched) return opened.out;
+        if (opened.failed) return failedRead(opened.out);
       }
       const input = {
         max_chars: args.max_chars ?? GET_TEXT_DEFAULT_CHARS,
@@ -1029,7 +1055,7 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       {
         title: "Search the web",
         description:
-          "Search the web without the browser (a search API, so no bot check): a numbered list of title, address and snippet. Use it to find which site has what the task needs, then open the result with browser_navigate; a snippet can be out of date, so check a value on the page itself.",
+          "Search the web without the browser (a search API, so no bot check): a numbered list of title, address and snippet. To read a result, browser_get_text with its url; to act on one, browser_navigate.",
         inputSchema: Inputs.browser_search,
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       },

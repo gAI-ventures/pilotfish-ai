@@ -7,7 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ActOutcome } from "@pilotfish/agent";
 import { configFromEnv } from "./config.js";
-import { createMcpServer, Inputs, isBotWall, type PilotfishMcp } from "./server.js";
+import { createMcpServer, failedRead, Inputs, isBotWall, type PilotfishMcp } from "./server.js";
 import { VERSION } from "./version.js";
 
 const TOOLS = [
@@ -705,7 +705,7 @@ describe("open and read in one call, and search engines' addresses (21 Nov; the 
       calls.length = 0;
       const bad = (await c.client.callTool({ name: "browser_get_text", arguments: { url: "https://nope.example/" } })) as CallToolResult;
       expect(bad.isError).toBe(true);
-      expect(textOf(bad)).toMatch(/navigate failed/);
+      expect(textOf(bad)).toBe("NOT READ: navigate failed (navigation_failed): no such host");
       expect(calls.some((x) => x.startsWith("get_text"))).toBe(false);
       expect(Inputs.browser_get_text.safeParse({ url: "file:///etc/passwd" }).success).toBe(false);
     } finally {
@@ -749,3 +749,38 @@ describe("open and read in one call, and search engines' addresses (21 Nov; the 
     }
   });
 });
+
+describe("failedRead: a page browser_get_text could not open, in its own lines (21 Nov)", () => {
+  const out = (t: string, isError = false): CallToolResult => ({ content: [{ type: "text", text: t }], isError });
+  it("keeps what happened and what to do, not the page's evidence", () => {
+    const blocked = out(
+      ["EVIDENCE:", "- navigated: https://a.example/ → https://shop.example/x", '- title: "" → "Attention Required! | Cloudflare"', '- new text: "Sorry, you have been blocked"', "", "(No page snapshot, as asked.)", "BLOCKED: shop.example refused automated access (cloudflare)."].join("\n"),
+    );
+    expect(failedRead(blocked).content).toEqual([{ type: "text", text: "NOT READ: BLOCKED: shop.example refused automated access (cloudflare)." }]);
+    const notFound: CallToolResult = {
+      content: [
+        { type: "text", text: ["This URL does not exist on shop.example (HTTP 404). Do not guess URLs: use the site's own links.", "", "EVIDENCE:", "- navigated: x → y"].join("\n") },
+        { type: "text", text: "NOTE: 4 of your last 6 addresses failed." },
+      ],
+    };
+    expect((failedRead(notFound).content[0] as { text: string }).text).toBe(
+      "NOT READ: This URL does not exist on shop.example (HTTP 404). Do not guess URLs: use the site's own links.\nNOTE: 4 of your last 6 addresses failed.",
+    );
+    const wall: CallToolResult = { content: [{ type: "text", text: "EVIDENCE:\n- title: x" }, { type: "text", text: "BOT CHECK: shop.example answered with a bot check, which this headless browser cannot pass." }] };
+    expect((failedRead(wall).content[0] as { text: string }).text).toMatch(/^NOT READ: BOT CHECK: shop\.example/);
+  });
+  it("keeps a person's hand-off whole without the evidence; a reply that is only evidence comes whole", () => {
+    const person: CallToolResult = {
+      content: [
+        { type: "text", text: "EVIDENCE:\n- title: \"\" → \"yelp.com\"\n- new text: \"You have been blocked.\"\n\n(No page snapshot, as asked.)" },
+        { type: "text", text: "NEEDS A PERSON (captcha, datadome): www.yelp.com shows a CAPTCHA.\nThis browser is headless: get what you need another way." },
+      ],
+    };
+    expect((failedRead(person).content[0] as { text: string }).text).toBe(
+      "NOT READ: NEEDS A PERSON (captcha, datadome): www.yelp.com shows a CAPTCHA.\nThis browser is headless: get what you need another way.",
+    );
+    const odd = out("EVIDENCE:\n- something else", true);
+    expect(failedRead(odd)).toBe(odd);
+  });
+});
+
