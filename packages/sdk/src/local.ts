@@ -136,7 +136,7 @@ export class LocalBrowser {
 
   // ----------------------------------------------------------------------------------------- the tools
 
-  /** Open an http(s) URL; returns what happened and the visible screen (`snapshot: false` leaves the screen out). */
+  /** Open an http(s) URL; returns what happened and the visible screen (`snapshot: false` returns the start of the page's text instead). */
   navigate(url: string, o: ActOpts = {}): Promise<ToolResult> {
     return this.call("browser_navigate", { url, ...o });
   }

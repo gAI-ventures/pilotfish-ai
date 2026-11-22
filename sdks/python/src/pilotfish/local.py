@@ -184,7 +184,7 @@ class LocalBrowser:
     # ------------------------------------------------------------------------------------------- the tools
 
     def navigate(self, url: str, snapshot: Optional[bool] = None, expect: Optional[Mapping[str, Any]] = None, escalate: Optional[bool] = None) -> ToolResult:
-        """Open an http(s) URL; returns what happened and the visible screen (``snapshot=False`` leaves the screen out).
+        """Open an http(s) URL; returns what happened and the visible screen (``snapshot=False`` returns the start of the page's text instead).
         ``expect`` names what should follow: ``{"text", "gone", "url", "in", "within"}``."""
         return self.call("browser_navigate", _args(url=url, snapshot=snapshot, expect=expect, escalate=escalate))
 

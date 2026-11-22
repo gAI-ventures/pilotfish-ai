@@ -7,7 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ActOutcome } from "@pilotfish/agent";
 import { configFromEnv } from "./config.js";
-import { createMcpServer, failedRead, Inputs, isBotWall, type PilotfishMcp } from "./server.js";
+import { createMcpServer, failedRead, Inputs, isBotWall, NAV_TEXT_CHARS, slimNavEvidence, type PilotfishMcp } from "./server.js";
 import { VERSION } from "./version.js";
 
 const TOOLS = [
@@ -681,7 +681,10 @@ describe("open and read in one call, and search engines' addresses (21 Nov; the 
     const pf = createMcpServer({ config: configFromEnv(env), searchFetch });
     pf.session.act = async (name, input) => {
       calls.push(`${name} ${JSON.stringify(input)}`);
-      if (name === "navigate") return navOk ? { ok: true, summary: "navigate", text: "EVIDENCE:\n- navigated: https://site.example/a" } : { ok: false, summary: "navigate", text: "navigate failed (navigation_failed): no such host" };
+      if (name === "navigate")
+        return navOk
+          ? { ok: true, summary: "navigate", text: 'EVIDENCE:\n- navigated: about:blank → https://site.example/a\n- title: "" → "Site A"\n- 84 new interactive element(s): [e1]<a href="#main">Skip to main content</a>\n- new text: "Skip to main content", "Menu"\n- 17 request(s), 1 failed; network idle, DOM quiet\n\n(No page snapshot, as asked.)' }
+          : { ok: false, summary: "navigate", text: "navigate failed (navigation_failed): no such host" };
       if (name === "query") return { ok: false, summary: "query", text: "" };
       return { ok: true, summary: "get_text", text: `PAGE TEXT (https://site.example/a):\n${"words ".repeat(150)}` };
     };
@@ -711,6 +714,60 @@ describe("open and read in one call, and search engines' addresses (21 Nov; the 
     } finally {
       navOk = true;
       await c.close();
+    }
+  });
+
+  it("browser_navigate with snapshot:false returns where it landed and the start of the page's text, not its first elements (22 Nov); snapshot true and a failed load are as before", async () => {
+    const c = await connect({ PILOTFISH_HEADLESS: "1" });
+    try {
+      calls.length = 0;
+      const quiet = textOf((await c.client.callTool({ name: "browser_navigate", arguments: { url: "https://site.example/a", snapshot: false } })) as CallToolResult);
+      // (The bot-check look in between is a read-only query.)
+      expect(calls.filter((x) => !x.startsWith("query "))).toEqual(['navigate {"url":"https://site.example/a"}', `get_text {"max_chars":${NAV_TEXT_CHARS},"structured":true,"main_first":true}`]);
+      expect(quiet).toContain("- navigated: about:blank → https://site.example/a");
+      expect(quiet).toContain('- title: "" → "Site A"');
+      expect(quiet).toMatch(/\n\nPAGE TEXT \(https:\/\/site\.example\/a\):\nwords /);
+      expect(quiet).not.toMatch(/new interactive element|new text:|request\(s\)|No page snapshot/);
+      // A get_text of the same page right after is read, never answered as UNCHANGED against the navigate's part.
+      expect(textOf((await c.client.callTool({ name: "browser_get_text", arguments: {} })) as CallToolResult)).toMatch(/^PAGE TEXT/);
+      calls.length = 0;
+      await c.client.callTool({ name: "browser_navigate", arguments: { url: "https://site.example/a" } });
+      expect(calls.filter((x) => !x.startsWith("query "))).toEqual(['navigate {"url":"https://site.example/a"}']);
+      navOk = false;
+      calls.length = 0;
+      const bad = (await c.client.callTool({ name: "browser_navigate", arguments: { url: "https://nope.example/", snapshot: false } })) as CallToolResult;
+      expect(bad.isError).toBe(true);
+      expect(textOf(bad)).toBe("navigate failed (navigation_failed): no such host");
+      expect(calls.filter((x) => !x.startsWith("query "))).toEqual(['navigate {"url":"https://nope.example/"}']);
+    } finally {
+      navOk = true;
+      await c.close();
+    }
+  });
+
+  it("browser_get_text with the url of the page already open reads it where it is; another url opens it (22 Nov)", async () => {
+    const pf = createMcpServer({ config: configFromEnv({ PILOTFISH_HEADLESS: "1" }), searchFetch });
+    const seen: string[] = [];
+    pf.session.act = async (name, input) => {
+      seen.push(`${name} ${JSON.stringify(input)}`);
+      if (name === "navigate") return { ok: true, summary: "navigate", text: "EVIDENCE:\n- navigated: https://site.example/a → https://site.example/b" };
+      return { ok: true, summary: "get_text", text: `PAGE TEXT (https://site.example/a):\n${"words ".repeat(150)}` };
+    };
+    Object.defineProperty(pf.session, "launched", { get: () => true });
+    pf.session.page = (async () => ({ url: "https://site.example/a#paper", webmcp: { list: () => [] } })) as unknown as typeof pf.session.page;
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "open-read-here", version: "1" });
+    await pf.server.connect(serverSide);
+    await client.connect(clientSide);
+    try {
+      await client.callTool({ name: "browser_get_text", arguments: { url: "https://site.example/a#paper", offset: 8000 } });
+      expect(seen).toEqual(['get_text {"max_chars":8000,"structured":true,"main_first":true,"offset":8000}']);
+      seen.length = 0;
+      await client.callTool({ name: "browser_get_text", arguments: { url: "https://site.example/b" } });
+      expect(seen[0]).toBe('navigate {"url":"https://site.example/b"}');
+    } finally {
+      await client.close();
+      await pf.close();
     }
   });
 
@@ -747,6 +804,31 @@ describe("open and read in one call, and search engines' addresses (21 Nov; the 
     } finally {
       await off.close();
     }
+  });
+});
+
+describe("slimNavEvidence: a navigation's evidence beside the page's own text (22 Nov)", () => {
+  it("keeps where it landed, title, heading, dialogs, downloads and notes; leaves out the first-elements lists, request count and no-snapshot line", () => {
+    const ev = [
+      "EVIDENCE:",
+      "- navigated: https://a.example/ → https://b.example/x",
+      '- title: "A" → "B"',
+      '- page heading: "Results"',
+      "- focus: e141 → none",
+      "- 124 new interactive element(s): [e85]<a href=\"/\">Logo</a>",
+      "- 4 new tab(s) not listed above: [e105]<@tab>Tabletop</@tab>",
+      "- 83 element(s) removed (the earlier page's)",
+      '- new text: "Printings", "Search Bar"',
+      '- dialog opened: "Accept cookies?"',
+      "- 293 request(s), 32 failed; network idle, DOM quiet",
+      "",
+      "(page still loading: readyState=interactive, 29 request(s) pending; consider wait 2-3s and read_page)",
+      "",
+      "(No page snapshot, as asked.)",
+    ].join("\n");
+    expect(slimNavEvidence(ev)).toBe(
+      ["EVIDENCE:", "- navigated: https://a.example/ → https://b.example/x", '- title: "A" → "B"', '- page heading: "Results"', '- dialog opened: "Accept cookies?"', "", "(page still loading: readyState=interactive, 29 request(s) pending; consider wait 2-3s and read_page)"].join("\n"),
+    );
   });
 });
 

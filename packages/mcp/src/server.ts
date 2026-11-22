@@ -132,6 +132,14 @@ const Step = z
 export const GET_TEXT_DEFAULT_CHARS = 8_000;
 /** A re-read shorter than this is given again (cheaper than explaining it is unchanged). */
 const UNCHANGED_MIN_CHARS = 600;
+/**
+ * browser_navigate with snapshot:false: the start of the page's readable text it returns in place of the screen. 22 Nov
+ * (the full AssistantBench run on 0.1.72 against Lightpanda's on the same 8 tasks): the same accuracy, but 40 calls a task
+ * against 20, 12 of them navigates, mostly snapshot:false, whose reply (about 900 characters) listed the new page's skip
+ * links, menu items and request counts and nothing of what it says; a turn costs the whole context again, so a peek that
+ * shows nothing and a second call to read cost more than a reply that shows the page's start.
+ */
+export const NAV_TEXT_CHARS = 3_000;
 
 /** Navigations looked back over for repeated failures, and how many of them failing earns the nudge. */
 const NAV_WINDOW = 6;
@@ -161,7 +169,7 @@ export const Inputs = {
         .boolean()
         .optional()
         .describe(
-          "Default true. Choose by your next step on this page: false when you will only read it (browser_query, browser_get_text) or go on to another URL; keep true when you will click, type or choose on it (you need its refs). false still returns the evidence (where it landed, the title, what was added or removed), loading notes and anything that needs a person; browser_snapshot shows the screen at any time.",
+          "Default true. Choose by your next step on this page: false returns the start of the page's readable text in place of the screen (no refs), for a page you will read or leave; keep true when you will click, type or choose on it (you need its refs). Both say where it landed, the title, loading notes and anything that needs a person; browser_snapshot shows the screen at any time.",
         ),
     })
     .strict(),
@@ -234,7 +242,7 @@ const DOCS = "https://pilotfish.gai.ventures/docs";
  * EVIDENCE block (where it landed, its title, elements and text added or removed), which only describes the failure
  * page. A reply with nothing outside that block is given whole.
  */
-export function failedRead(out: CallToolResult): CallToolResult {
+export function failedRead(out: CallToolResult, head = "NOT READ: "): CallToolResult {
   const kept: string[] = [];
   for (const c of out.content) {
     if (c.type !== "text") return out;
@@ -248,7 +256,23 @@ export function failedRead(out: CallToolResult): CallToolResult {
     kept.push(...lines.map((l) => l.trim()).filter(Boolean));
   }
   if (!kept.length) return out;
-  return { content: [{ type: "text", text: `NOT READ: ${kept.join("\n")}` }], isError: out.isError === true };
+  return { content: [{ type: "text", text: `${head}${kept.join("\n")}` }], isError: out.isError === true };
+}
+
+/**
+ * A navigation's EVIDENCE for a reply that carries the new page's text: where it landed, its title and heading, dialogs,
+ * downloads, tabs and every note kept; the lines that only list the new document's first elements and texts (skip links,
+ * menus), what the earlier page lost, its request count, focus moves (refs this reply does not show) and the "no page
+ * snapshot" line left out, since the page's own
+ * text follows.
+ */
+export function slimNavEvidence(t: string): string {
+  return t
+    .split("\n")
+    .filter((l) => !/^- (\d+ new interactive element\(s\)|new text: |\d+ element\(s\) removed|\d+ new tab\(s\) not listed above|\d+ request\(s\)|no network|focus: )/.test(l.trim()) && !/^\(No page snapshot, as asked\.\)$/.test(l.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function text(t: string, isError = false): CallToolResult {
@@ -577,6 +601,18 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     if (p && p.webmcp.list().length) pageToolEntry.enable();
   };
 
+  /** Whether the current tab's document is at exactly this address (a browser already running; no new one launched). */
+  const isOpenAt = async (url: string): Promise<boolean> => {
+    if (!session.launched) return false;
+    const p = await session.page().catch(() => null);
+    if (!p) return false;
+    try {
+      return new URL(url).href === new URL(p.url).href;
+    } catch {
+      return false;
+    }
+  };
+
   /** A direct tool: one executor action. Acting tools then look for an obstacle. */
   /** An acting tool's options for the executor: snapshot, expectation, escalation (only what the client sent). */
   const actOpts = (a: { snapshot?: boolean; expect?: ActOptions["expect"]; escalate?: boolean }): ActOptions => ({
@@ -719,14 +755,37 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
     {
       title: "Open a URL",
       description:
-        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false leaves the screen out for a page you will only read or leave; to only read a page, browser_get_text with its url opens and reads it in one call. Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. A search the site's form takes several steps for (a place, dates, guests, a sort, filters) is usually one call as such an address, where the form takes a call and a screen for each step. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first " +
+        "Open an http(s) URL in the current tab. Returns evidence and a snapshot of the visible screen (elements carry refs like e12), with counts of what is above and below; snapshot:false returns the start of the page's text instead, for a page you will read or leave (browser_get_text reads on from where it stops). Words like cheapest, latest, highest-rated or most mean the site's own sort or tab for that order (a list's default order is usually something else, e.g. 'Best' or 'Featured'): open that tab or choose that sort (a label naming its best value is not the list), read the top, and say in the answer which sort, tab and filters it came from. The top is the answer only when that order ranks by what the task asks over everything inside its bounds; otherwise say how much was read and call the pick the best of those read, not the best. Break a tie in that order only by what the task asks; otherwise report the tie. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, a sort, a bound) or change a parameter this site has shown you in an address or link (browser_query gives a link's full href), its page number included. A search the site's form takes several steps for (a place, dates, guests, a sort, filters) is usually one call as such an address, where the form takes a call and a screen for each step. Before you use its results, check on the page that what you meant was applied: the heading, breadcrumb, selected sort or filter, and the results themselves (each one you count inside the bound); never the address or a search box, which can repeat a value the site ignored. When they do not match or a bound cannot be checked, use the site's own form, or say in the answer what could not be applied. Never write a sign-in, session, account, identity or tracking value yourself (tokens, ids, codes): keep one only as the site gave it, or leave it out. Over several sites, finish one and note the values the next needs before opening it. A task that names no site: search the web first " +
           (searchEnabled ? "with browser_search, not a search engine's own page," : "with your own search tool") +
           " to pick the site, or answer from the search when that is enough; when search engines show a bot check, search inside a site that answers (its search box, or a search address it has shown you) rather than guessing addresses; open a site when the task needs one (a price for dates, a form, an account).",
       inputSchema: Inputs.browser_navigate,
       annotations: acting,
     },
-    async (args, extra) => (await openPage(args, extra)).out,
+    async (args, extra) => {
+      const opened = await openPage(args, extra);
+      if (args.snapshot !== false || opened.searched) return opened.out;
+      // A failed load in its own lines, as browser_get_text gives it (the failure page's evidence describes only it).
+      if (opened.failed) return failedRead(opened.out, "");
+      return withPageStart(opened.out, extra);
+    },
   );
+
+  /**
+   * A snapshot:false navigation that landed on a new document: its evidence slimmed (slimNavEvidence) and the start of
+   * the page's readable text (NAV_TEXT_CHARS, main content first, as browser_get_text reads it) in place of the lists of
+   * its first elements. Anything else (no new document, a read that failed or came back as something other than page
+   * text) is given as it was.
+   */
+  const withPageStart = async (out: CallToolResult, extra: Extra): Promise<CallToolResult> => {
+    const first = out.content[0];
+    if (out.isError || first?.type !== "text" || !/^- navigated: /m.test(first.text)) return out;
+    const read = await direct(extra, "get_text", { max_chars: NAV_TEXT_CHARS, structured: true, main_first: true }, false);
+    const readText = !read.isError && read.content.length === 1 && read.content[0]?.type === "text" ? read.content[0].text : "";
+    if (!/^(PAGE TEXT|PDF TEXT) \(/.test(readText)) return out;
+    // Not a browser_get_text of the page: the next one is never answered as UNCHANGED against this.
+    lastRead = null;
+    return { ...out, content: [{ type: "text", text: `${slimNavEvidence(first.text)}\n\n${readText}` }, ...out.content.slice(1)] };
+  };
 
   /**
    * Open a URL (browser_navigate, and browser_get_text with a url): the reply, and whether the page failed (an error, a
@@ -857,7 +916,9 @@ export function createMcpServer(opts: PilotfishMcpOptions = {}): PilotfishMcp {
       annotations: readOnly,
     },
     async (args, extra) => {
-      if (args.url) {
+      // The page already open at that address is read where it is, not loaded again (22 Nov: 13 of 33 AssistantBench
+      // tasks' navigates were followed by a get_text with the same url, each a second load of the page).
+      if (args.url && !(await isOpenAt(args.url))) {
         const opened = await openPage({ url: args.url, snapshot: false }, extra);
         // A search engine's address is answered by the search. A failed load is said in its own lines only (21 Nov: the
         // page's evidence, about 1,000 characters for a block page, stayed in the client's context for nothing), but

@@ -620,14 +620,14 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
     expect(click).not.toContain("Access token");
     const size = /\[(e\d+)\]<select/.exec(home)![1]!;
     expect((await client.callTool({ name: "browser_select", arguments: { ref: size, values: ["Large"] } })).isError).toBeFalsy();
-    // snapshot:false: what happened, no screen; browser_snapshot shows it.
+    // snapshot:false: where it landed and the start of the page's text, no screen and no refs (22 Nov); browser_snapshot shows the screen.
     const quiet = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/results`, snapshot: false } }));
     expect(quiet).toContain(`navigated: ${origin}/ → ${origin}/results`);
-    expect(quiet).toContain("No page snapshot, as asked");
     expect(quiet).not.toContain("PAGE SNAPSHOT");
-    // The evidence keeps its bounded lists (the first five new elements and texts), not the screen.
-    expect(quiet).toContain("120 new interactive element(s)");
-    expect(quiet).not.toContain("Result 6 ");
+    expect(quiet).not.toMatch(/new interactive element|No page snapshot|\[e\d+\]/);
+    expect(quiet).toMatch(/PAGE TEXT \([^)]*\/results/);
+    expect(quiet).toContain("Result 1");
+    expect(quiet.length).toBeLessThan(4_500);
     expect(textOf(await client.callTool({ name: "browser_snapshot", arguments: {} }))).toContain("Result 1 ");
   }, 60_000);
 
@@ -636,11 +636,10 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
     expect(quiet).toContain(`→ ${origin}/loading?q=2`);
     expect(quiet).toMatch(/title: [^\n]*"Flights"/);
     expect(quiet).toMatch(/Waited \d+\.\d s for the page's own loading indicator to finish/);
-    expect(quiet).toContain("No page snapshot, as asked");
     expect(quiet).not.toContain("PAGE SNAPSHOT");
-    // The evidence is as without a page: its lists (new elements, new text) are kept, bounded as always.
-    expect(quiet).toMatch(/- 3 new interactive element\(s\): \[e\d+\]/);
-    expect(quiet).toContain('new text: "Flights"');
+    // In place of the lists of its first elements and texts, the page's own text (22 Nov).
+    expect(quiet).not.toMatch(/new interactive element|No page snapshot/);
+    expect(quiet).toMatch(/PAGE TEXT \([^)]*\/loading\?q=2/);
   }, 60_000);
 
   it("snapshot:false on an acting tool leaves out only the printed page; the next page is a change list against the last one shown (17 Nov)", async () => {
@@ -700,10 +699,10 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
     expect(steps).toMatch(/^1\. [^\n]*\n(?: {3}[^\n]*\n)*2\. /);
     expect(steps).toContain("EVIDENCE");
     expect(steps).not.toContain("PAGE SNAPSHOT");
-    // navigate's quiet reply: the evidence's counts and lists; the screen's above/below counts are not in it.
+    // navigate's quiet reply: where it landed and the start of the page's text (22 Nov); no element lists, no above/below counts.
     const quietNav = textOf(await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/results?quiet`, snapshot: false } }));
-    expect(quietNav).toMatch(/- \d+ new interactive element\(s\): \[e\d+\]/);
-    expect(quietNav).not.toMatch(/below the viewport|above the viewport/);
+    expect(quietNav).toMatch(/PAGE TEXT \([^)]*\/results\?quiet[^)]*\):\n# Results/);
+    expect(quietNav).not.toMatch(/new interactive element|focus: |below the viewport|above the viewport/);
   }, 90_000);
 
   it("a pick between look-alike suggestions is said in the page's words; the results page's heading and breadcrumb come with the evidence (17 Nov)", async () => {
@@ -858,8 +857,10 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
     expect(qnav).toContain(`navigated: ${origin}/quiet → ${origin}/pick?quiet`);
     expect(qnav).toMatch(/title: "Filters" → "Stays"|page heading: "Find a stay"/);
     expect(qnav).toContain('page heading: "Find a stay"');
-    // A quiet action there; its ref came from quiet evidence, never from a printed screen.
-    const opt = ref(/\[(e\d+)\]<@option[^;\n]*Lakes/, qnav);
+    // A quiet action there; its ref came from browser_find, never from a printed screen (the quiet navigate gives the
+    // page's text and no refs: 22 Nov).
+    expect(qnav).toContain("PAGE TEXT (");
+    const opt = ref(/\[(e\d+)\]<@option[^;\n]*Lakes/, textOf(await client.callTool({ name: "browser_find", arguments: { query: "Lakes" } })));
     const qclick = textOf(await client.callTool({ name: "browser_click", arguments: { ref: opt, snapshot: false } }));
     expect(qclick).toContain("Chose option 2 of 3");
     // The next printed reply is a whole screen: the client's base is /quiet, another document; no change list across.
@@ -1968,7 +1969,8 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
       const bravo = /\[(e\d+)\]<button[^\n]*>Bravo/.exec(read)![1]!;
       await c.callTool({ name: "browser_actions", arguments: { actions: [{ action: "click", ref: bravo }, { action: "wait", seconds: 0.5 }], snapshot: false } });
       const rows = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
-      expect(rows.map((r) => r["tool"])).toEqual(["navigate", "query", "find", "read_page", "actions"]);
+      // A quiet navigate reads the page's start too (22 Nov): its own get_text row.
+      expect(rows.map((r) => r["tool"])).toEqual(["navigate", "get_text", "query", "find", "read_page", "actions"]);
       const by = (t: string) => rows.find((r) => r["tool"] === t)!;
       expect(by("navigate")["captures"]).toBeGreaterThanOrEqual(1);
       expect(by("query")["captures"]).toBe(0);
