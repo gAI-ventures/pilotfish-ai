@@ -892,7 +892,33 @@ export function loadingState(read: string | null, stuck: ReadonlySet<string>, pr
  * the model reported 0 on 9 Nov). Read in the isolated world after a settled action.
  */
 export const EMPTY_RESULTS_TEXT = /^(?:sorry[,.!]?\s*)?(?:no|0|zero)\s+(?:results?|matches|matching\s+\w+|items?\s+found|products?\s+found|properties|listings|flights|hotels|records|articles|papers|jobs|entries)\b|\b(?:returned|found|produced|yielded)\s+no\s+(?:results|matches)\b|\bno\s+results\s+(?:found|for|match)|\bdid\s+not\s+match\s+any\b|\b(?:couldn'?t|could\s+not|can'?t|cannot)\s+find\s+any\s+(?:results|matches)\b|\bnothing\s+(?:found|matched)\b/i;
+
+/**
+ * Page JS: `function shownToEye(el)`, whether an element's text is drawn for the eye, not only read out to a screen
+ * reader. Screen-reader-only text (the "sr-only" pattern: clipped to nothing, `clip-path: inset(50%)`, a box of a pixel
+ * or less with its overflow hidden, or placed off the page) is in the DOM and the accessibility tree, and so in the
+ * snapshot's text, but nobody sees it. Sites put status announcements there: Google Flights keeps an `aria-live`
+ * "No results returned." beside every list of results it draws (23 Nov, a production run: read as an empty search
+ * and as the site failing, three times, and the run was sent off the site).
+ */
+const SHOWN_TO_EYE_FN = `function shownToEye(el) {
+  for (let e = el, depth = 0; e && e.nodeType === 1 && depth < 12; e = e.parentElement, depth++) {
+    const s = getComputedStyle(e);
+    if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
+    if ((s.position === "absolute" || s.position === "fixed") && /^rect\\(/.test(s.clip)) {
+      const n = (s.clip.match(/-?[\\d.]+/g) || []).map(Number);
+      if (n.length === 4 && (n[2] - n[0] <= 1 || n[1] - n[3] <= 1)) return false;
+    }
+    if (/inset\\(\\s*(?:50|100)%/.test(s.clipPath)) return false;
+    const r = e.getBoundingClientRect();
+    if ((r.width <= 1 || r.height <= 1) && s.overflow === "hidden") return false;
+    if (depth === 0 && (r.right <= 0 || r.bottom + scrollY <= 0)) return false;
+  }
+  return true;
+}`;
+
 const EMPTY_RESULTS_JS = `(() => {
+  ${SHOWN_TO_EYE_FN}
   const empty = new RegExp(${JSON.stringify(EMPTY_RESULTS_TEXT.source)}, "i");
   const vh = innerHeight;
   const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
@@ -903,11 +929,34 @@ const EMPTY_RESULTS_JS = `(() => {
     if (!el || el.closest("script,style,noscript,template,option,a,button,label,[hidden],[aria-hidden=true]")) continue;
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0 || r.bottom <= 0 || r.top >= vh * 2) continue;
-    const s = getComputedStyle(el);
-    if (s.visibility === "hidden" || s.display === "none" || Number(s.opacity) === 0) continue;
+    if (!shownToEye(el)) continue;
     return t;
   }
   return "";
+})()`;
+
+/**
+ * Page JS: of the given failure lines (lowercased, spacing normalised, as `failureLines` gives them), those the main
+ * document carries only in text nobody sees (`shownToEye`). A line it does not carry at all (in a frame, split over
+ * elements) is not returned: only a line found and found hidden everywhere is left out of the count.
+ */
+const heardOnlyJs = (lines: string[]): string => `(() => {
+  ${SHOWN_TO_EYE_FN}
+  const want = new Set(${JSON.stringify(lines)});
+  const found = new Map();
+  const norm = (t) => t.replace(/\\s+/g, " ").trim().toLowerCase();
+  const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  for (let n = tw.nextNode(), k = 0; n && k < 20000; n = tw.nextNode(), k++) {
+    if (!n.data.trim()) continue;
+    for (let el = n.parentElement, up = 0; el && up < 4; el = el.parentElement, up++) {
+      const t = norm(el.textContent || "");
+      if (t.length > 200) break;
+      if (!want.has(t)) continue;
+      found.set(t, (found.get(t) || false) || shownToEye(el));
+      break;
+    }
+  }
+  return [...found].filter(([, shown]) => !shown).map(([t]) => t);
 })()`;
 
 /** Case-insensitive count of a text in an element's rendered text; -1 when the element left the page. */
@@ -1788,7 +1837,7 @@ export class Agent {
       }
       // Any turn that brought a fresh view of the page counts, a look included: a site's error drawn after its request
       // came back (a flight search's, 0.9 s after the search) is seen only on the next read of the page.
-      const repeated = this.lastSnapshot && this.lastSnapshot !== this.turnSnapshot ? this.failureNudge(turnLoaded, turnRetried) : null;
+      const repeated = this.lastSnapshot && this.lastSnapshot !== this.turnSnapshot ? await this.failureNudge(turnLoaded, turnRetried) : null;
       const nudge = this.loopNudge() ?? repeated;
       let directive = nudge ?? "";
       // Stalls hand the same conversation to a stronger model (once per kind of stall). The budget
@@ -2455,7 +2504,7 @@ export class Agent {
    * Counts the failure messages on the page a turn ended on (repeat-failure.ts) and returns the nudge the first time
    * one site's message has come back `FAILURE_REPEATS` times.
    */
-  private failureNudge(loaded: boolean, retried: boolean): string | null {
+  private async failureNudge(loaded: boolean, retried: boolean): Promise<string | null> {
     const after = this.lastSnapshot;
     if (!after) return null;
     // A page that cannot be read counts nothing: this check never stops a run.
@@ -2468,7 +2517,15 @@ export class Agent {
     };
     const site = siteOf(safeHost(after.url));
     const before = this.turnSnapshot && siteOf(safeHost(this.turnSnapshot.url)) === site ? lines(this.turnSnapshot) : [];
-    const hit = this.repeatFailures.turn({ site, before, after: lines(after), loaded, retried }).find((h) => !this.failureTold.has(h.site));
+    // A failure is what the site shows: a line the page keeps only for screen readers (a status region's stale
+    // announcement) is not counted. Read only when the snapshot has a candidate line (3 of 142 mid-task pages, 9 Nov),
+    // so no other turn pays for it; a read that fails keeps every line, as before.
+    let shown = lines(after);
+    if (shown.length && this.page.url === after.url) {
+      const heard = await this.page.main.evaluate<string[]>(heardOnlyJs(shown), { timeoutMs: 1_000 }).catch(() => [] as string[]);
+      if (Array.isArray(heard) && heard.length) shown = shown.filter((l) => !heard.includes(l));
+    }
+    const hit = this.repeatFailures.turn({ site, before, after: shown, loaded, retried }).find((h) => !this.failureTold.has(h.site));
     if (!hit) return null;
     this.failureTold.add(hit.site);
     this.opts.onStep?.({ type: "repeated_failure", ...hit });
