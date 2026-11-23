@@ -1099,8 +1099,11 @@ export function findScored(snap: Snapshot, query: string, { limit = 20 } = {}): 
       if (!prev || s.score > prev.score) best.set(s.n, { score: s.score, exact: exact || !!prev?.exact, order: order.get(s.n) ?? 0 });
     }
   }
+  // A match the page does not draw (inside a collapsed part: `folded`) comes after every drawn one of its kind: a
+  // click cannot land on it, and the first hit is the one taken (23 Nov: "Mosaic" on a Wikipedia article was first
+  // the link in a collapsed navbox, and its click only scrolled).
   return [...best.entries()]
-    .sort((a, b) => Number(b[1].exact) - Number(a[1].exact) || b[1].score - a[1].score || a[1].order - b[1].order)
+    .sort((a, b) => Number(b[1].exact) - Number(a[1].exact) || Number(!!a[0].folded) - Number(!!b[0].folded) || b[1].score - a[1].score || a[1].order - b[1].order)
     .slice(0, limit)
     .map(([node, s]) => ({ node, exact: s.exact }));
 }

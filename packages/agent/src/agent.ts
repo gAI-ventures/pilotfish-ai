@@ -520,12 +520,30 @@ const READ_WHOLE_CHARS = 200_000;
  * part never starts or stops mid-word (a price or a name cut in two reads as two wrong values).
  */
 export function cutPart(whole: string, offset: number, max: number): string {
-  if (offset >= whole.length) return "";
+  return cutPartAt(whole, offset, max).text;
+}
+
+/**
+ * cutPart with where the part really starts and ends in `whole` (a start moved past a line break, an end cut back
+ * to one), and `more`: whether anything but whitespace is left after it. 23 Nov: the reply counted from the offset
+ * asked for, so a part that skipped one line break ended a character short, said "more with offset 88912" of
+ * 88,913, and that read gave one newline. A start inside a word goes back to the word's start (within 200
+ * characters); a start at a break goes past its spaces and one line break, never further: it used to go on to the
+ * next line break (up to 200 characters), so after a part cut at a space the rest of that line was in no part.
+ */
+export function cutPartAt(whole: string, offset: number, max: number): { text: string; start: number; end: number; more: boolean } {
   let start = offset;
-  if (start > 0) {
-    const nl = whole.indexOf("\n", start);
-    if (nl !== -1 && nl - start < 200) start = nl + 1;
+  if (start > 0 && start < whole.length) {
+    if (/\S/.test(whole[start - 1]!) && /\S/.test(whole[start]!)) {
+      const before = whole.slice(Math.max(0, start - 200), start);
+      const ws = before.search(/\s\S*$/);
+      if (ws !== -1) start -= before.length - ws - 1;
+      else if (start <= 200) start = 0;
+    } else {
+      start += /^[ \t]*\n?/.exec(whole.slice(start, start + 400))![0].length;
+    }
   }
+  if (start >= whole.length) return { text: "", start: Math.min(offset, whole.length), end: Math.min(offset, whole.length), more: false };
   let end = Math.min(whole.length, start + max);
   if (end < whole.length) {
     const nl = whole.lastIndexOf("\n", end);
@@ -533,8 +551,8 @@ export function cutPart(whole: string, offset: number, max: number): string {
     const brk = nl > start + max * 0.8 ? nl : sp > start + max * 0.8 ? sp : -1;
     if (brk !== -1) end = brk;
   }
-  const part = whole.slice(start, end);
-  return /[\uD800-\uDBFF]$/.test(part) ? part.slice(0, -1) : part;
+  if (/[\uD800-\uDBFF]$/.test(whole.slice(start, end))) end--;
+  return { text: whole.slice(start, end), start, end, more: /\S/.test(whole.slice(end)) };
 }
 
 export interface ActOutcome {
@@ -3243,7 +3261,7 @@ export class Agent {
           const compactFor = this.inAct && this.opts.compactSnapshots ? snap.url : undefined;
           const lines = hits.map((n) => {
             const where = n.rect ? (n.rect.y + snap.scroll.y > snap.scroll.y + snap.viewport.height ? " (below viewport)" : n.rect.y + snap.scroll.y + n.rect.height < snap.scroll.y ? " (above viewport)" : "") : "";
-            return `${describeNode(n, compactFor, compactFor !== undefined && this.opts.roleTags)}${section(n)}${where}${partial.has(n) ? " (partial match)" : ""}`;
+            return `${describeNode(n, compactFor, compactFor !== undefined && this.opts.roleTags)}${section(n)}${n.folded ? " (hidden: in a collapsed part of the page)" : where}${partial.has(n) ? " (partial match)" : ""}`;
           });
           const exactCount = hits.length - partial.size;
           const head = partial.size
@@ -3261,10 +3279,9 @@ export class Agent {
             // Read in parts like a page (the open MCP's offset): the document is read once, then cut.
             const parted = pdfOffset > 0 || input["structured"] === true;
             const whole = await pdfText(bytes.slice(), parted ? Math.max(READ_WHOLE_CHARS, pdfOffset + pdfMax + 1) : pdfMax);
-            const partText = parted ? cutPart(whole.text, pdfOffset, pdfMax) : whole.text;
-            const partEnd = pdfOffset + partText.length;
-            const r = parted ? { pages: whole.pages, text: partText, truncated: whole.truncated || whole.text.length > partEnd } : whole;
-            const pdfSpan = parted && (pdfOffset || whole.text.length > partEnd) ? `, characters ${pdfOffset}-${partEnd} of ${whole.text.length}${whole.text.length > partEnd ? `; more with offset ${partEnd}` : ", the end"}` : "";
+            const part = parted ? cutPartAt(whole.text, pdfOffset, pdfMax) : null;
+            const r = part ? { pages: whole.pages, text: part.text, truncated: whole.truncated || part.more } : whole;
+            const pdfSpan = part && (pdfOffset || part.more) ? `, characters ${part.start}-${part.end} of ${whole.text.length}${part.more ? `; more with offset ${part.end}` : ", the end"}` : "";
             this.note(pdfOffset ? readKey("get_text", input) : "get_text");
             this.keepRead("get_text", this.secrets.scrub(r.text));
             // Viewed, not downloaded: the host may keep it for the person (a failure only loses the copy).
@@ -3311,7 +3328,8 @@ export class Agent {
           const layout = { structured: input["structured"] === true, mainFirst: input["main_first"] === true };
           // A part of a longer read: the whole is laid out once, then cut where this part starts and ends.
           const whole = offset || layout.structured ? pageText(snap, { maxChars: Math.max(READ_WHOLE_CHARS, offset + maxChars + 1), ...layout }) : null;
-          const text = whole === null ? pageText(snap, { maxChars }) : cutPart(whole, offset, maxChars);
+          const part = whole === null ? null : cutPartAt(whole, offset, maxChars);
+          const text = part ? part.text : pageText(snap, { maxChars });
           this.note(offset ? readKey("get_text", input) : "get_text");
           this.keepRead("get_text", this.secrets.scrub(text));
           // An embedded frame opened as a page of its own often draws nothing there, and a model that opened one lost steps on a blank page.
@@ -3319,15 +3337,15 @@ export class Agent {
             !text.trim() && this.openedFrameUrl && this.openedFrameUrl === this.page.url
               ? "\n(No text: this address is a frame embedded in another page, and its content is drawn there. Go back to that page and read the frame's content from it, with query or get_text.)"
               : "";
-          // How much of the page this is, and where the rest starts, so a long page is read in parts rather than whole.
-          const end = offset + text.length;
+          // How much of the page this is, and where the rest starts, so a long page is read in parts rather than whole;
+          // only whitespace left after a part is its end.
           const span =
-            whole === null
+            whole === null || part === null
               ? ""
-              : whole.length > end
-                ? `, characters ${offset}-${end} of ${whole.length >= READ_WHOLE_CHARS ? `${READ_WHOLE_CHARS}+` : whole.length}; more with offset ${end}`
+              : part.more
+                ? `, characters ${part.start}-${part.end} of ${whole.length >= READ_WHOLE_CHARS ? `${READ_WHOLE_CHARS}+` : whole.length}; more with offset ${part.end}`
                 : offset
-                  ? `, characters ${offset}-${end} of ${whole.length}, the end`
+                  ? `, characters ${part.start}-${part.end} of ${whole.length}, the end`
                   : "";
           return ok(this.secrets.scrub(`PAGE TEXT (${snap.url}${span}):\n${text}${frameHint}`), `get_text: ${text.length} chars${offset ? ` from ${offset}` : ""}`);
         }
@@ -5988,6 +6006,8 @@ export class Agent {
           ? " Take a fresh read_page and use the new refs."
           : e.code === "obscured"
             ? " Something is covering the target (modal, banner, dropdown). Deal with it first, or scroll so the element is unobstructed."
+            : e.code === "not_visible"
+              ? " Open the part of the page that holds it first (its show, expand, tab or menu control), or, for a link, open its address with navigate."
             : e.code === "crashed"
               ? " The tab crashed; it will be reloaded on the next navigate."
               : "";

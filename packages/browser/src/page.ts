@@ -1304,6 +1304,15 @@ export class Page {
   async locate(frame: FrameSession, backendNodeId: number): Promise<{ point: Point; rect: Rect }> {
     this.assertUsable();
     if (this.openDialog) throw new ActionError("dialog_open", `A ${this.openDialog.type} dialog is open: ${this.openDialog.message}`);
+    // A box is not enough: an element in a part of the page that is not drawn (an ancestor with content-visibility:
+    // hidden, as a collapsed section's hidden="until-found", or a closed <details>) still measures, and the hit test at
+    // its point finds the hidden part, its ancestor, so the click went there and did nothing but scroll (23 Nov: a
+    // link in a collapsed Wikipedia navbox). Refused before anything scrolls; checkVisibility leaves out opacity and
+    // visibility, so a native input drawn over by its own label is still clicked through that label.
+    const drawn = await frame
+      .callOnNode<boolean>(backendNodeId, "function(){ var e = this.nodeType === 1 ? this : this.parentElement; return !e || typeof e.checkVisibility !== 'function' || e.checkVisibility(); }", [], { isolated: true })
+      .catch(() => true);
+    if (!drawn) throw new ActionError("not_visible", "Element is not shown: it is inside a collapsed or hidden part of the page");
     // A driver may wheel a target below the fold toward the viewport; the jump below then only finishes the job.
     if (this.driver?.wheelIntoView && frame === this.main) {
       const wheeling = Date.now();

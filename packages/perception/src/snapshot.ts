@@ -64,6 +64,12 @@ export interface SnapNode {
   rect?: Rect;
   paintOrder?: number;
   visible: boolean;
+  /**
+   * Inside a part of the page that is not drawn though its elements keep their boxes: an ancestor with
+   * `content-visibility: hidden` (a collapsed section's `hidden="until-found"`). `visible` stays as it was (its text
+   * is still read, as find-in-page finds it); a click there lands on nothing (23 Nov: a collapsed navbox's link).
+   */
+  folded?: boolean;
   /** No layout box of its own but laid-out descendants (`display: contents`): invisible itself, walk through it. */
   boxless?: boolean;
   /** Has an effective click handler / is natively interactive / focusable. */
@@ -159,7 +165,7 @@ export interface SnapshotOptions {
   previous?: Snapshot | null;
 }
 
-const COMPUTED_STYLES = ["display", "visibility", "opacity", "overflow-x", "overflow-y", "cursor", "pointer-events"] as const;
+const COMPUTED_STYLES = ["display", "visibility", "opacity", "overflow-x", "overflow-y", "cursor", "pointer-events", "content-visibility"] as const;
 
 const INTERACTIVE_ROLES = new Set([
   "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox", "option", "menuitem",
@@ -642,6 +648,8 @@ function buildDocument(
   const docFrameId = str(doc.frameId as number) || frame.frameId;
   const built: Array<SnapNode | null> = new Array(count).fill(null);
   const hiddenSubtree: boolean[] = new Array(count).fill(false);
+  /** Elements whose content is not drawn (`content-visibility: hidden`): their descendants are `folded`. */
+  const foldsBelow: boolean[] = new Array(count).fill(false);
 
   for (let i = 0; i < count; i++) {
     const parentIdx = N.parentIndex![i]!;
@@ -679,6 +687,7 @@ function buildDocument(
       identity: "",
       groupSize: 1,
     };
+    if (parent?.folded || (parentIdx >= 0 && foldsBelow[parentIdx])) node.folded = true;
 
     if (nodeType === 3) {
       const t = str(N.nodeValue![i]).replace(/\s+/g, " ").trim();
@@ -719,6 +728,8 @@ function buildDocument(
           node.visible = false;
           hiddenSubtree[i] = true; // opacity hides descendants too
         }
+        // Only where it applies: not on a plain inline box, an internal table box (a row) or a ruby box.
+        if (styleIdx(li, "content-visibility") === "hidden" && !/^(inline$|table-|ruby)/.test(display ?? "")) foldsBelow[i] = true;
         if (styleIdx(li, "cursor") === "pointer") node.attrs["__cursor"] = "pointer";
         if (styleIdx(li, "pointer-events") === "none") node.attrs["__pe"] = "none";
         const ox = styleIdx(li, "overflow-x");

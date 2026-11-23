@@ -120,6 +120,20 @@ const staysHtml = (q: URLSearchParams) => {
 };
 // A page that hides its background from assistive tech (aria-hidden) while its listbox is open, as Google Flights does,
 // and a modal dialog (showModal: the background inert), with text enough that a listbox is a small part of it (17 Nov).
+// A link named twice: shown in the text, and in a collapsed section (hidden="until-found" on a block, as a script folds
+// a navbox after load: laid out first, so it keeps its box) and a closed <details> (23 Nov: Wikipedia's "Mosaic").
+const FOLDED_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Browsers</title></head><body><h1>Browsers</h1>
+<div style="height:1400px"></div>
+<h2>External links</h2><div id="navbox"><a href="/second?via=folded">Mosaic</a> <a href="/second?via=folded">VMS Mosaic</a></div>
+<details><summary>More</summary><a href="/second?via=closed">Spyglass Mosaic</a></details>
+<h2>History</h2><p>The <a href="/second?via=shown">Mosaic</a> browser came first.</p>
+<script>document.body.offsetHeight; document.getElementById('navbox').setAttribute('hidden', 'until-found')</script></body></html>`;
+
+// A page whose text ends in whitespace-only lines, read in parts (23 Nov: the last part was one newline).
+const LONGTEXT_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Long</title></head><body><main>
+${Array.from({ length: 40 }, (_, i) => `<p>Paragraph ${i + 1} says the price is $${100 + i} and the stock is ${i * 3} units.</p>`).join("\n")}
+<p> </p><div>\n</div></main></body></html>`;
+
 const ARIA_HIDDEN_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Trips</title></head><body>
 <header><nav aria-label="Main"><a href="/" aria-label="Home">Logo</a><button onclick="this.textContent='Signed out'">Sign in</button></nav></header>
 <main id="bg"><h1>Find a trip</h1>
@@ -398,7 +412,7 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
       if (u.startsWith("/scope2")) return void res.end(scopeHtml(true));
       if (u.startsWith("/scope1")) return void res.end(scopeHtml(false));
       if (u.startsWith("/reground")) return void res.end(regroundHtml(new URL(u, "http://x").searchParams.get("mode") ?? "reorder"));
-      res.end(u.startsWith("/tablag") ? TABSORT_HTML : u.startsWith("/waitq") ? WAITQ_HTML : u.startsWith("/aria-hidden") ? ARIA_HIDDEN_HTML : u.startsWith("/pick") ? PICK_HTML : u.startsWith("/quiet") ? QUIET_HTML : u.startsWith("/widget") ? WIDGET_HTML : u.startsWith("/suggest") ? SUGGEST_HTML : u.startsWith("/fares") ? FARES_HTML : u.startsWith("/sort") ? SORT_HTML : u.startsWith("/loading") ? LOADING_HTML : u.startsWith("/spinner") ? SPINNER_HTML : u.startsWith("/otp") ? OTP_HTML : u.startsWith("/results") ? RESULTS_HTML : u.startsWith("/signin") ? SIGNIN_HTML : u.startsWith("/robot") ? ROBOT_HTML : u.startsWith("/blocked") ? BLOCKED_HTML : HOME_HTML);
+      res.end(u.startsWith("/tablag") ? TABSORT_HTML : u.startsWith("/waitq") ? WAITQ_HTML : u.startsWith("/aria-hidden") ? ARIA_HIDDEN_HTML : u.startsWith("/folded") ? FOLDED_HTML : u.startsWith("/longtext") ? LONGTEXT_HTML : u.startsWith("/pick") ? PICK_HTML : u.startsWith("/quiet") ? QUIET_HTML : u.startsWith("/widget") ? WIDGET_HTML : u.startsWith("/suggest") ? SUGGEST_HTML : u.startsWith("/fares") ? FARES_HTML : u.startsWith("/sort") ? SORT_HTML : u.startsWith("/loading") ? LOADING_HTML : u.startsWith("/spinner") ? SPINNER_HTML : u.startsWith("/otp") ? OTP_HTML : u.startsWith("/results") ? RESULTS_HTML : u.startsWith("/signin") ? SIGNIN_HTML : u.startsWith("/robot") ? ROBOT_HTML : u.startsWith("/blocked") ? BLOCKED_HTML : HOME_HTML);
     });
     await new Promise<void>((r) => site.listen(0, "127.0.0.1", () => r()));
     origin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
@@ -517,6 +531,51 @@ describe.skipIf(!E2E)("mcp server e2e", () => {
     expect(blocked.isError).toBe(true);
     expect(textOf(blocked)).toContain("Blocked by policy");
   }, 90_000);
+
+  it("find puts a match the page does not draw after the shown one, says so, and a click on it is refused before anything scrolls (23 Nov)", async () => {
+    await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/folded`, snapshot: false } });
+    const found = textOf(await client.callTool({ name: "browser_find", arguments: { query: "Mosaic" } }));
+    const lines = found.split("\n").slice(1);
+    expect(lines[0]).toMatch(/via=shown[^\n]*in section "History"/);
+    const folded = lines.filter((l) => l.includes("via=folded"));
+    expect(folded.length).toBe(2);
+    for (const l of folded) expect(l).toContain("(hidden: in a collapsed part of the page)");
+    expect(lines.findIndex((l) => l.includes("via=folded"))).toBeGreaterThan(0);
+    const ref = /\[(e\d+)\]/.exec(folded[0]!)![1]!;
+    const refused = await client.callTool({ name: "browser_click", arguments: { ref, snapshot: false } });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toMatch(/not_visible[^\n]*collapsed or hidden part of the page[^\n]*open its address with navigate/);
+    expect(textOf(refused)).not.toContain("scrolled by");
+    const shown = textOf(await client.callTool({ name: "browser_click", arguments: { ref: /\[(e\d+)\]/.exec(lines[0]!)![1]!, snapshot: false } }));
+    expect(shown).toMatch(/navigated:[^\n]*via=shown/);
+  });
+
+  it("get_text in parts: each part's span is where it really starts and ends, and only whitespace left is the end (23 Nov)", async () => {
+    await client.callTool({ name: "browser_navigate", arguments: { url: `${origin}/longtext`, snapshot: false } });
+    // The whole text in one read, to hold each part's span against.
+    const whole = textOf(await client.callTool({ name: "browser_get_text", arguments: { max_chars: 60_000 } })).replace(/^PAGE TEXT \([^)]*\):\n/, "");
+    let offset = 0;
+    const parts: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const out = textOf(await client.callTool({ name: "browser_get_text", arguments: { max_chars: 500, ...(offset ? { offset } : {}) } }));
+      const head = /^PAGE TEXT \([^,]+, characters (\d+)-(\d+) of (\d+)(?:; more with offset (\d+)|, the end)\):\n([\s\S]*)$/.exec(out);
+      expect(head, out.slice(0, 200)).not.toBeNull();
+      const [, start, end, total, next, body] = head!;
+      expect(whole.slice(Number(start), Number(end))).toBe(body);
+      expect(body!.trim()).not.toBe("");
+      parts.push(body!);
+      if (!next) {
+        expect(out).toContain(", the end)");
+        expect(Number(total)).toBe(whole.length);
+        expect(whole.slice(Number(end)).trim()).toBe("");
+        break;
+      }
+      expect(Number(next)).toBe(Number(end));
+      offset = Number(next);
+    }
+    expect(parts.length).toBeGreaterThan(2);
+    expect(parts.join(" ")).toContain("Paragraph 40 says the price is $139");
+  });
 
   it("asks the person through elicitation when the client supports it: an irreversible click goes ahead on their yes", async () => {
     // A second connection (same browser) whose client can show forms to its user.

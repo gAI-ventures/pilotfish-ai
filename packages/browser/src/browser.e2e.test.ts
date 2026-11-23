@@ -107,6 +107,15 @@ describe.skipIf(!E2E)("browser e2e", () => {
           <div style="height:1500px"></div><button id="buy" style="display:block;width:200px;height:40px" onclick="document.title='bought'">Add to cart</button><div style="height:1500px"></div>
           <script>scrollTo(0, document.getElementById('buy').offsetTop - 20)</script>`),
       }),
+      // Links in parts of the page that are not drawn but keep their boxes: a collapsed section (hidden="until-found",
+      // content-visibility: hidden) laid out first and then folded, as a script folds a navbox; a closed <details>.
+      // (On a table row content-visibility does nothing: Wikipedia's folded rows are display:block.)
+      "/folded": () => ({
+        body: page(`<div style="height:1500px"></div><div id="row"><a id="folded" href="#f" onclick="document.title='folded'">Folded link</a></div>
+          <details><summary>More</summary><a id="closed" href="#c" onclick="document.title='closed'">Closed link</a></details>
+          <a id="shown" href="#s" onclick="document.title='shown'">Shown link</a><div style="height:1500px"></div>
+          <script>document.body.offsetHeight; document.getElementById('row').setAttribute('hidden', 'until-found')</script>`),
+      }),
       "/slow": () => ({ body: "slow-done", type: "text/plain", delayMs: 800 }),
       "/slow-page": () => ({ body: page(`<h1 id="late">arrived</h1>`), delayMs: 1500 }),
       // A client-side redirect before the first document is parsed (it waits on a slow script).
@@ -240,6 +249,21 @@ describe.skipIf(!E2E)("browser e2e", () => {
       await p.navigate(`${a.origin}/pseudo?k=${k}`);
       await expect(p.click(p.main, await nodeId(p, "#b")), k).rejects.toMatchObject({ name: "ActionError", code: "obscured" });
     }
+    await p.close();
+  });
+
+  it("refuses a click on an element in a part of the page that is not drawn, before scrolling (23 Nov)", async () => {
+    const p = await browser.newPage();
+    await p.navigate(`${a.origin}/folded`);
+    // The folded link still measures: the size check alone let its click through to the hidden row.
+    expect(await p.main.evaluate<number>("document.getElementById('folded').getBoundingClientRect().height")).toBeGreaterThan(0);
+    for (const sel of ["#folded", "#closed"]) {
+      await expect(p.click(p.main, await nodeId(p, sel)), sel).rejects.toMatchObject({ name: "ActionError", code: "not_visible" });
+      expect(await p.main.evaluate<number>("scrollY"), sel).toBe(0);
+    }
+    await p.click(p.main, await nodeId(p, "#shown"));
+    await p.settle();
+    expect(await p.main.evaluate<string>("document.title")).toBe("shown");
     await p.close();
   });
 
