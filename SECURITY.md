@@ -14,3 +14,8 @@ The latest version of `@gaiventures/pilotfish-mcp` and `@gaiventures/pilotfish-m
 
 This repository holds the local MCP (it drives a Chrome on your own machine) and the managed relay (it carries MCP
 messages to pilotfish's hosted service). Issues with the hosted service itself go to the same address.
+
+## Compliance
+
+pilotfish's hosted service is SOC 2 Type II compliant. How to get a copy of the report is on
+<https://pilotfish.gai.ventures/security#soc-2>.

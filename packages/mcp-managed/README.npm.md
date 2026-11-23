@@ -45,6 +45,8 @@ Want a browser on your own computer for free, driven by your agent's own model, 
 - **You can see everything.** Watch any task live or take control, replay it afterwards, and see what each one cost.
 - **Safe with money and messages.** Payments, orders and messages wait for a person's yes unless the task's own words
   allow them, and codes and passwords never pass through the agent.
+- **SOC 2 Type II compliant.** How to get a copy of the report is on the
+  [security page](https://pilotfish.gai.ventures/security#soc-2).
 
 ## Get started
 
