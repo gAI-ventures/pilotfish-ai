@@ -998,6 +998,17 @@ const findTokens = (s: string): string[] => s.toLowerCase().split(/[^\p{L}\p{N}$
  * the description as written made 210 of 272 finds return nothing in a sample of recorded runs: models describe ("Charity
  * Foundations category checkbox in Filter by") rather than quote.
  */
+/**
+ * The text of the `<label>` an unnamed control sits in (at most 3 levels up), or "". A label wrapping a custom control
+ * (a div with a radio's role and no name of its own) names it for the person, though not in the accessibility tree:
+ * Google Flights' currency dialog lists "Vietnamese Dong VND" as such a label around an unnamed div, and `find` matched
+ * nothing for it (23 Nov: two runs spent 20 steps or more on that dialog and one gave up).
+ */
+function labelOf(n: SnapNode): string {
+  for (let p = n.parent, up = 0; p && up < 3; p = p.parent, up++) if (p.tag === "label") return textOf(p, 200);
+  return "";
+}
+
 export function findScored(snap: Snapshot, query: string, { limit = 20 } = {}): FindHit[] {
   const targets = query
     .split(/[,;|\n]+|\s+(?:or|\/)\s+/i)
@@ -1009,7 +1020,8 @@ export function findScored(snap: Snapshot, query: string, { limit = 20 } = {}): 
     let h = hay.get(n);
     if (!h) {
       // The page's own attributes only: the capture's metadata ("1", "pointer", "none") is no evidence to match.
-      const s = `${n.tag} ${n.role} ${n.name} ${textOf(n, 200)} ${pageAttrs(n).map(([, v]) => v).join(" ")}`.toLowerCase();
+      const own = `${n.name} ${textOf(n, 200)}`;
+      const s = `${n.tag} ${n.role} ${own} ${own.trim() ? "" : labelOf(n)} ${pageAttrs(n).map(([, v]) => v).join(" ")}`.toLowerCase();
       h = { tokens: findTokens(s), flat: ` ${findTokens(s).join(" ")} `, name: n.name.trim().toLowerCase() };
       hay.set(n, h);
     }

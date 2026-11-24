@@ -351,6 +351,19 @@ describe("findScored: how models describe elements", () => {
     expect(hits[0]?.exact).toBe(false);
   });
 
+  it("finds an unnamed control by the label it sits in (a custom radio in a long dialog list, 23 Nov)", () => {
+    const radio = (label: string) => E("label", {}, [label, I("div", {}, [], { role: "radio" })]);
+    const s = S([E("div", { role: "dialog" }, [radio("Singapore Dollar SGD"), radio("US Dollar USD"), radio("Vietnamese Dong VND")])]);
+    const hits = findScored(s, "Vietnamese Dong");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.node.role).toBe("radio");
+    expect(hits[0]?.exact).toBe(true);
+    // A control with a name of its own keeps matching by it alone.
+    const named = S([E("label", {}, ["Newsletter", I("input", { type: "checkbox" }, [], { role: "checkbox", name: "Subscribe" })])]);
+    expect(findScored(named, "Newsletter")).toHaveLength(0);
+    expect(findScored(named, "Subscribe")).toHaveLength(1);
+  });
+
   it("keeps exact matches alone when there are some (no partial noise)", () => {
     const hits = findScored(results(), "Free cancellation");
     expect(hits.every((h) => h.exact)).toBe(true);

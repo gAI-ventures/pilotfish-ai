@@ -262,6 +262,28 @@ ${req.url.includes("modal") ? "<script>document.getElementById('dlg').showModal(
     expect([...shells.byRef.values()].some((n) => n.tag === "html" || n.tag === "body")).toBe(false);
   });
 
+  it("re-grounds an element whose name grew as the page filled it in: a calendar day redrawn with its price (23 Nov)", async () => {
+    // Two months, each with a day "1" and a day "10": the second "1" is December's.
+    await page.main.evaluate(`document.body.insertAdjacentHTML('beforeend', '<div id="cal">' + ['Nov', 'Dec'].map((m) => '<div role="grid">' + [1, 10].map((d) => '<div role="button" tabindex="0" data-m="' + m + '">' + d + '</div>').join('') + '</div>').join('') + '</div>')`);
+    const snap = await captureSnapshot(page, { viewportBand: Infinity });
+    const dec1 = [...snap.byRef.values()].filter((n) => n.role === "button" && n.name === "1")[1]!;
+    expect(dec1.attrs["data-m"]).toBe("Dec");
+    const h = handleFor(dec1);
+    // Prices load: every cell is drawn again with its price after its day.
+    await page.main.evaluate(`document.querySelectorAll('#cal [role=button]').forEach((b, i) => { const c = b.cloneNode(true); c.textContent = b.textContent + ' ' + (6 + i / 10).toFixed(1) + 'M₫'; b.replaceWith(c); })`);
+    const r = await resolveHandle(page, h);
+    expect(r.how).toBe("regrounded");
+    const back = await r.handle.frame.callOnNode<{ m: string; t: string }>(r.handle.backendNodeId, "function(){ return { m: this.dataset.m, t: this.textContent }; }");
+    expect(back).toEqual({ m: "Dec", t: "1 6.2M₫" });
+    // A redraw that changes how many such days there are is refused, as for any look-alike.
+    await page.main.evaluate(`document.querySelectorAll('#cal [role=button]').forEach((b) => { b.textContent = b.textContent.split(' ')[0]; })`);
+    const h2 = handleFor([...(await captureSnapshot(page, { viewportBand: Infinity })).byRef.values()].filter((n) => n.role === "button" && n.name === "1")[1]!);
+    expect(h2.groupSize).toBe(2);
+    await page.main.evaluate(`document.querySelector('#cal [role=button]').remove(); document.querySelectorAll('#cal [role=button]').forEach((b) => { const c = b.cloneNode(true); c.textContent = b.textContent + ' 6.0M₫'; b.replaceWith(c); })`);
+    await expect(resolveHandle(page, h2)).rejects.toMatchObject({ code: "stale" });
+    await page.main.evaluate(`document.getElementById('cal').remove()`);
+  });
+
   it("refuses to re-ground a positional handle when look-alikes were added or removed", async () => {
     await page.main.evaluate(`document.body.insertAdjacentHTML('beforeend', '<div id="dup"><button>Same</button><button>Same</button></div>')`);
     const snap = await captureSnapshot(page, { viewportBand: Infinity });

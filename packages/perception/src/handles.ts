@@ -110,7 +110,18 @@ export async function resolveHandle(
   // often shared across rows, so a distinguishing attribute does not by itself make the match unique.
   // Whenever the look-alike group had siblings and its size changed, position no longer means the same
   // element: refuse rather than act on a neighbour.
-  const ambiguous = !!match && h.groupSize > 1 && match.groupSize !== h.groupSize;
+  let ambiguous = !!match && h.groupSize > 1 && match.groupSize !== h.groupSize;
+  if (!match && h.name.trim()) {
+    // Its name grew as the page filled it in: a calendar's day "1" drawn again as "1 6.3M₫" once its price loaded
+    // (23 Nov, Google Flights: a click on a freshly opened calendar's day failed as stale run after run). The same
+    // element is the one at its position among the elements of its frame, tag, role and identity whose name is its old
+    // name or that name and more after a space, and only while that group has as many as its old one had.
+    const grown = fresh.nodes.filter((n) => n.nodeType === 1 && (n.interactive || n.scrollable) && n.frameId === h.frameId && n.tag === h.tag && n.role === h.role && n.identity === h.identity && (n.name === h.name || n.name.startsWith(`${h.name} `)));
+    if (grown.length === h.groupSize) {
+      match = grown[h.nth];
+      ambiguous = false;
+    }
+  }
   if (!match || ambiguous) {
     throw new ActionError("stale", ambiguous
       ? `${h.ref} (${h.description}) was re-rendered and similar-looking elements were added or removed, so it can't be identified safely; take a new snapshot.`

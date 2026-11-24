@@ -160,7 +160,8 @@ export type ToolName = keyof typeof ToolInputs;
 export type ToolInput<N extends ToolName> = z.infer<(typeof ToolInputs)[N]>;
 
 const DESCRIPTIONS: Record<ToolName, string> = {
-  navigate: "Open a URL in the current tab. Returns evidence and a fresh page snapshot.",
+  navigate:
+    "Open a URL in the current tab. Returns evidence and a fresh page snapshot. Search, sort and filter addresses: you may build one from the task's own words (a query, a place, dates, travellers, a sort, a bound) or change a parameter the site has shown you in an address or link. A search the site's form takes several steps for (places, dates, guests, a sort, filters) is usually one navigate to such an address, and the same search for several inputs (dates, places, items) is one navigate each, changing only that input. Before using its results, check on the page that what you meant was applied (its fields, heading, selected options and the results themselves), never the address alone; when it was not, use the site's own form.",
   click: "Click an element by ref. Fails with a reason (obscured, stale, not visible) instead of clicking the wrong thing. Returns evidence + snapshot when the page changed. After a filter click, read the results in the same turn.",
   type: "Focus an element and enter text (clears existing text by default). Use submit:true to press Enter afterwards.",
   fill: "Fill several form fields in one action, then optionally click submit_ref. Every value is read back afterwards; if a field did not take its value the submit is NOT clicked and the field is reported. One evidence for the whole form. Use it for any form with 2+ fields.",

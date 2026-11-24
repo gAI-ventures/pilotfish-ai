@@ -891,6 +891,79 @@ export function loadingState(read: string | null, stuck: ReadonlySet<string>, pr
  * the filter, not the answer (arXiv's date range returned "no results" for SimCSE where its plain search lists 4, and
  * the model reported 0 on 9 Nov). Read in the isolated world after a settled action.
  */
+const MONTH_LOCALES = ["en", "de", "fr", "es", "it", "pt", "nl", "sv", "pl", "tr", "id", "ms", "vi", "ru", "uk", "cs", "ro", "hu", "da", "nb", "fi", "el"];
+let monthNames: string[][] | null = null;
+/** Each month's names (long and short, lower case, dots dropped) in the main languages, from the runtime's own data. */
+function monthNamesOf(m: number): string[] {
+  if (!monthNames) {
+    monthNames = Array.from({ length: 12 }, (_, i) => {
+      const d = new Date(Date.UTC(2026, i, 15));
+      const out = new Set<string>();
+      for (const loc of MONTH_LOCALES) {
+        for (const month of ["long", "short"] as const) {
+          try {
+            const s = new Intl.DateTimeFormat(loc, { month, timeZone: "UTC" }).format(d).toLowerCase().replace(/\./g, "").trim();
+            if (s && !/^\d+$/.test(s)) out.add(s);
+          } catch {
+            // a runtime without that locale: its names are left out
+          }
+        }
+      }
+      return [...out];
+    });
+  }
+  return monthNames[m - 1] ?? [];
+}
+
+/** The day and month a typed date names: "Dec 27, 2026", "27 December", "2026-12-27", "27/12/2026" or "12/27/2026" (both readings). */
+function typedDates(text: string): Array<{ d: number; m: number }> {
+  const t = text.trim().toLowerCase();
+  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(t);
+  if (iso) return [{ m: Number(iso[2]), d: Number(iso[3]) }];
+  const num = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-]\d{2,4})?$/.exec(t);
+  if (num) return [{ d: Number(num[1]), m: Number(num[2]) }, { d: Number(num[2]), m: Number(num[1]) }].filter((x) => x.m >= 1 && x.m <= 12 && x.d >= 1 && x.d <= 31);
+  const en = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b|\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/.exec(t);
+  if (!en) return [];
+  const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  return [{ m: months.indexOf((en[1] ?? en[4])!) + 1, d: Number(en[2] ?? en[3]) }];
+}
+
+/**
+ * The field took a typed date and shows it in its own words: the same day of the month and the same month, the month as
+ * a number or a month's name in a main language. 23 Nov: Google Flights in Vietnamese took "Dec 27, 2026", showed
+ * "CN, 27 thg 12", and fill reported NOT FILLED and skipped its submit on every date pair of a run.
+ */
+export function dateTaken(typed: string, shown: string): boolean {
+  const want = typedDates(typed);
+  if (!want.length) return false;
+  const s = shown.toLowerCase().replace(/\./g, "");
+  const nums = (s.match(/\d+/g) ?? []).map(Number);
+  const words: string[] = s.match(/\p{L}+/gu) ?? [];
+  return want.some(({ d, m }) => nums.includes(d) && (nums.filter((x) => x !== d || d === m).includes(m) || monthNamesOf(m).some((name) => (name.includes(" ") ? s.includes(name) : words.includes(name)))));
+}
+
+/**
+ * "en" when the person's own words lead the task text in English (the words before the harness's TODAY, PLAN or
+ * DONE WHEN lines: common English function words, mostly Latin letters), else null. Only English is read: a page in
+ * another language than an English task is what `languageNote` is for.
+ */
+export function taskLanguage(task: string): "en" | null {
+  const own = task.replace(/^(?:\s*TASK:\s*)+/i, "").split(/\n(?:TODAY|PLAN|DONE WHEN|EVERY ITEM|A WEB SEARCH)\b/)[0]!.slice(0, 1_200);
+  const letters = own.match(/\p{L}/gu) ?? [];
+  if (letters.length < 20) return null;
+  const latin = letters.filter((c) => /[a-z]/i.test(c)).length;
+  const words = own.match(/\b(?:the|and|for|to|of|in|is|are|with|from|on|me|my|please|find|search|what|which|how|book|order|get|check|show|cheapest|best)\b/gi) ?? [];
+  return latin / letters.length > 0.9 && words.length >= 4 ? "en" : null;
+}
+
+/** Steps a leg must have left for a done(success=false) to be sent back once (`keepGoingNote`). */
+export const KEEP_GOING_STEPS = 12;
+/**
+ * A done(success=false) result that names what stopped the work: a sign-in or account, a block, a check, an error, a
+ * limit, nothing found or offered, the person's own choice. Such a result is taken as it is.
+ */
+export const STOPPED_BY = /\b(sign(?:ed|ing)?[ -]?in|log(?:ged|ging)?[ -]?in|login|account|password|captcha|bot check|verify (?:you|that you)|blocked|block page|access denied|forbidden|denied|not available|unavailable|not offered|isn['’]?t offered|doesn['’]?t (?:offer|exist|support|list|show)|does not (?:offer|exist|support|list|show)|no longer|sold out|out of stock|no results|no availability|nothing (?:found|matched|listed|available)|error|problem|went wrong|not working|doesn['’]?t work|failed to load|won['’]?t load|could not load|timed out|rate limit|too many requests|limit reached|declined|refused|not allowed|not permitted|requires? (?:payment|a subscription|membership)|paywall|subscribe|geo|country|region|closed|expired|cancel(?:led|ed)|the person|you asked|asked me not|not supported)\b/i;
+
 export const EMPTY_RESULTS_TEXT = /^(?:sorry[,.!]?\s*)?(?:no|0|zero)\s+(?:results?|matches|matching\s+\w+|items?\s+found|products?\s+found|properties|listings|flights|hotels|records|articles|papers|jobs|entries)\b|\b(?:returned|found|produced|yielded)\s+no\s+(?:results|matches)\b|\bno\s+results\s+(?:found|for|match)|\bdid\s+not\s+match\s+any\b|\b(?:couldn'?t|could\s+not|can'?t|cannot)\s+find\s+any\s+(?:results|matches)\b|\bnothing\s+(?:found|matched)\b/i;
 
 /**
@@ -1251,6 +1324,12 @@ export class Agent {
   private stepCount = 0;
   /** Step number this leg of the run may not pass (resume's maxNewSteps). */
   private stepCap = Infinity;
+  /** The step the loop is on now (`stepCount` is written back only when a leg ends). */
+  private liveStep = 0;
+  /** Sites whose page language was looked at (`languageNote`): once a site. */
+  private readonly langNoted = new Set<string>();
+  /** A done(success=false) of this leg was sent back to carry on (`keepGoingNote`): once a leg. */
+  private keepGoingSent = false;
   /** The cap is run's `reserve`: steps kept for a stronger model, given back when a stall hands the leg to one. */
   private reserved = false;
   /** Kinds of stall that may hand the current leg to a stronger model. */
@@ -1571,6 +1650,7 @@ export class Agent {
     const view = await this.observe(this.lastSnapshot);
     this.messages.push({ role: "user", content: [{ type: "text", text: `${message}\n\nCURRENT PAGE: ${this.secrets.scrub(this.page.url)}\n${view}` }] });
     this.stepCap = maxNewSteps ? this.stepCount + maxNewSteps : Infinity;
+    this.keepGoingSent = false;
     this.reserved = false;
     this.legStalls = new Set(stalls ?? (maxNewSteps ? [] : ALL_STALLS));
     return this.loop();
@@ -1584,6 +1664,7 @@ export class Agent {
   async takeOver(model: string, effort: AgentOptions["effort"] | undefined, progress: string, message: string, reason = ""): Promise<AgentResult> {
     await this.restart(model, effort, progress, message, reason);
     this.stepCap = Infinity;
+    this.keepGoingSent = false;
     this.reserved = false;
     this.legStalls = new Set(ALL_STALLS);
     return this.loop();
@@ -1607,6 +1688,45 @@ export class Agent {
     });
   }
 
+  /**
+   * Once a site: a page in another language than the person's task, which is in English, gets a line saying so and to
+   * switch the site to English when it offers that. 23 Nov: Google Flights from a Vietnamese exit was in Vietnamese,
+   * and the executor typed dates as "Thứ 6, 20 thg 12" with the wrong weekday, read its own date as six days and gave up;
+   * the same rule in the system prompt alone was never acted on (live, gpt-6-luna, 5 runs).
+   */
+  private languageNote(snap: Snapshot): string {
+    const site = siteOf(safeHost(snap.url));
+    if (!site || this.langNoted.has(site)) return "";
+    const html = snap.nodes.find((n) => n.tag === "html" && n.frameId === snap.root.frameId);
+    const lang = (html?.attrs["lang"] ?? "").trim().toLowerCase().split(/[-_]/)[0] ?? "";
+    if (!lang) return "";
+    this.langNoted.add(site);
+    if (lang === "en" || taskLanguage(this.currentTask) !== "en") return "";
+    let name = lang;
+    try {
+      name = new Intl.DisplayNames(["en"], { type: "language" }).of(lang) ?? lang;
+    } catch {
+      // an unknown code: the code itself
+    }
+    return `(This site is in ${name}, and the task is in English. Switch it to English first if it offers English, so forms take dates, places and options as the task writes them: quickest, open this address again with its language parameter set to English where the site's own links carry one (such as ${lang} in a "hl", "lang" or "locale" parameter); else its language setting or link. Report prices and values as the site shows them.)\n`;
+  }
+
+  /**
+   * The note sending back a done(success=false) that gives up early, or "" to take it: once a leg, when at least
+   * `KEEP_GOING_STEPS` of the leg's steps are left and the result names nothing that stopped the work (a sign-in, a
+   * block or check, an error, nothing found, not offered). 23 Nov: a month-wide fare comparison on gpt-6-luna called
+   * done(false) after one or two of the plan's ten date pairs, with 40 or more of 60 steps unused and every search it had
+   * made working, three runs out of three, and its retry legs did the same.
+   */
+  private keepGoingNote(input: Record<string, unknown>): string {
+    if (input["success"] !== false || this.keepGoingSent) return "";
+    const left = Math.min((this.opts.maxSteps ?? 50) + (this.budgetExtended ? 10 : 0), this.stepCap) - this.liveStep;
+    if (!(left >= KEEP_GOING_STEPS)) return "";
+    if (STOPPED_BY.test(String(input["result"] ?? ""))) return "";
+    this.keepGoingSent = true;
+    return `Not yet: ${Number.isFinite(left) ? `${left} of your steps are left` : "you have steps left"} and your result names nothing on the site that stopped you. Carry on with what the task still needs (the next item, input or part of the plan), noting each result as you get it, and report what you have when it is done. If something on the site does stop you (a sign-in, a block, an error, nothing offered), call done(success=false) again saying what it is; that ends the run.`;
+  }
+
   /** Secrets and files the model may use, for the first message of a conversation. */
   private introLines(): string {
     return (
@@ -1626,6 +1746,7 @@ export class Agent {
     if (this.humanizing) this.page.humanize = true;
     this.messages = [];
     this.stepCount = 0;
+    this.keepGoingSent = false;
     this.deadline = this.opts.timeoutMs ? Date.now() + this.opts.timeoutMs : Infinity;
     const messages = this.messages;
 
@@ -1662,6 +1783,7 @@ export class Agent {
     let maxSteps = Math.min((this.opts.maxSteps ?? 50) + (this.budgetExtended ? 10 : 0), this.stepCap);
     const maxFailures = this.opts.maxFailures ?? 6;
     let step = this.stepCount;
+    this.liveStep = step;
     const legStart = step;
     // The steps left when the run was last told to finish (0: not yet).
     let wrapUpAt = 0;
@@ -1764,6 +1886,7 @@ export class Agent {
           continue;
         }
         step++;
+        this.liveStep = step;
         const name = use.name as ToolName;
         const input = (use.input ?? {}) as Record<string, unknown>;
         this.opts.onStep?.({ type: "tool_call", step, name, input: this.redact(input) });
@@ -2571,7 +2694,7 @@ export class Agent {
     const text = serializeSnapshot(snap, { maxChars, previous, interactiveOnly, rootRef, ...(this.opts.snapshotMoreHint ? { moreHint: this.opts.snapshotMoreHint } : {}), ...(this.opts.compactSnapshots ? { compactAttrs: true, compactMarkup: true, ...(this.opts.roleTags ? { roleTags: true } : {}) } : {}), ...(this.opts.screenOnly && !wholePage ? { screenOnly: true } : {}), ...(this.opts.sameNameNotes ? { sameNames: true } : {}) });
     if (!wholePage && !interactiveOnly && !rootRef) this.obsBase = { url: snap.url, text, uses: 0, fresh: true };
     const tabs = this.tabHeader();
-    const noted = await this.withLoadNote(text);
+    const noted = `${this.languageNote(snap)}${await this.withLoadNote(text)}`;
     // The plain read through act(), in parts (ActOutcome.read), printed as readView() says.
     if (record && !wholePage && !interactiveOnly && !rootRef && maxChars === (this.opts.snapshotMaxChars ?? 24_000))
       this.readRendered = {
@@ -3680,6 +3803,9 @@ export class Agent {
         case "done": {
           // A held download or the traffic limit is being put to the person: their answer comes first.
           if (this.opts.control?.gated) return err("Not yet: something is being checked with the person (a held download or the traffic limit). Their answer comes at your next turn; finish after it.");
+          // Giving up with most of the leg's steps unused and nothing named that stopped it: sent back once to carry on.
+          const keepGoing = this.keepGoingNote(input);
+          if (keepGoing) return err(keepGoing);
           let data: Record<string, unknown> | undefined;
           if (typeof input["data_json"] === "string" && input["data_json"].trim()) {
             try {
@@ -4288,6 +4414,11 @@ export class Agent {
           const p = await this.fillField(t, false);
           if (p) problems.push(p);
         }
+        // Each field is left as a person leaves it (the next one's click moves focus on), and so is the last: a widget
+        // that takes a typed value when its field is left (a date picker) took every field but the last. 23 Nov: Google
+        // Flights kept "12/27/2026" as typed in its return field, the read-back passed it, and the next click dropped it.
+        const last = [...targets].reverse().find((t) => t.kind === "text");
+        if (last && !submit) await last.h.frame.callOnNode(last.h.backendNodeId, "function(){ if (this.getRootNode().activeElement === this && this.blur) this.blur(); }").catch(() => undefined);
         problems = [...problems, ...(await this.unfilled(targets))];
         const wiped = targets.filter((t) => t.kind === "text" && problems.some((p) => p.startsWith(`${t.ref}:`)));
         if (wiped.length) {
@@ -4375,6 +4506,8 @@ export class Agent {
       }
       const want = n(t.text);
       if (got.v.some((v) => n(v) === want || (want.length > 0 && n(v).includes(want)))) continue;
+      // A date the field took and wrote its own way ("Dec 27, 2026" shown as "CN, 27 thg 12" or "Sun, Dec 27").
+      if (got.v.some((v) => dateTaken(t.text, v))) continue;
       const shown = t.secret ? "(hidden)" : `"${this.secrets.scrub(got.v[0] ?? "").slice(0, 40)}"`;
       out.push(`${t.ref}: shows ${shown} instead of "${t.secret ? "(the secret)" : t.value.slice(0, 40)}"`);
     }

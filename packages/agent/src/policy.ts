@@ -400,6 +400,8 @@ export function approvedByWords(text: string): WriteKind[] {
   return out;
 }
 
+/** Words just before a verb that rule it out: "do not book", "don't order", "never buy", "without booking", "no need to". */
+const NEGATED = /(?:\bnot|n['’]t|\bnever|\bwithout|\bno need to)\s+(?:(?:need|needs|want|have|going|try|trying|to|and|or|yet|actually|please|even|go|ahead)\s+){0,3}$/i;
 /** A request to book, order or buy something: what it is for follows the verb. */
 const OBJECT_VERB = /\b(?:book(?:ing)?|order|buy|purchase|reserve|get me|pay for)\b/gi;
 /** Where the words of what is asked for end: a sentence, a dash, how it is paid for, the next step. */
@@ -419,7 +421,7 @@ const GENERIC = new Set(
     "desk desks seat seats room rooms table tables slot slots spot spots ticket tickets pass passes booking bookings reservation reservations " +
     "order orders item items thing things stuff place places venue venues location office space workspace coworking cowork center centre " +
     "dedicated hot flexi flexible day-pass meeting conference cabin private open plan membership " +
-    "book reserve buy purchase get pay ordering booked bought same usual favourite favorite regular " +
+    "book reserve buy purchase get pay ordering booked bought same usual favourite favorite regular anything everything something nothing " +
     "cheapest cheaper cheap best better top latest newest new highest lowest rated popular good nice great any first second last nearest closest " +
     "quantity qty pack packs piece pieces pcs unit units size sizes person people pax adult adults guest guests"
   ).split(" "),
@@ -433,6 +435,8 @@ const GENERIC = new Set(
 export function namedObject(text: string): string[] {
   // The first request that names something: "order amul gold milk and place the order with cod" is the milk.
   for (const v of text.matchAll(OBJECT_VERB)) {
+    // A step the words rule out names nothing: "DO NOT book or pay anything" read as a booking of "anything" (23 Nov).
+    if (NEGATED.test(text.slice(Math.max(0, v.index! - 40), v.index!))) continue;
     const after = text.slice(v.index! + v[0].length);
     const end = OBJECT_END.exec(after);
     const words = objectWords(end ? after.slice(0, end.index) : after);
@@ -491,9 +495,16 @@ export function namedFor(newest: string, carried = ""): string[] {
   if (own.length || asksForWrite(newest)) return own;
   if (!carried.trim()) return [];
   if (SCOPE_ONLY.test(newest)) return namedObject(carried);
+  // A correction names a thing in a few words ("lvp", "the LVP one", "no, rmz"). A longer message that asks for no step
+  // is new instructions, not a name: every new word of "Finish the remaining gaps, be efficient with steps…" became the
+  // name the pay step had to show (23 Nov, five follow-ups of a flight search that books nothing).
+  if (objectWords(newest).filter((w) => !STOP_WORDS.test(w)).length > NAME_WORDS) return namedObject(carried);
   const fresh = objectWords(newest).filter((w) => !objectWords(carried).includes(w) && !STOP_WORDS.test(w));
   return fresh.length ? fresh : namedObject(carried);
 }
+
+/** At most this many distinctive words in a correction that only names a thing. */
+const NAME_WORDS = 6;
 
 /** Words of a correction that are no name: what it says about the earlier turn ("no", "wrong", "checking"). */
 const STOP_WORDS = /^(?:no|nope|yes|ok|okay|wrong|not|instead|actually|rather|correct|checking|chekcing|check|looking|searching|showing|you|are|were|did|do|done|said|meant|mean|want|wanted|need|like|go|ahead|proceed|try|that|right|one|other|new|old|first|second|last|from|there|here|go|with|and|or|but|so|then|still|yet|already)$/i;

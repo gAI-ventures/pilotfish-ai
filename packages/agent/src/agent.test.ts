@@ -3,7 +3,7 @@ import { buildTools, DEFAULT_TOOLS, MAX_STRICT_OPTIONAL, optionalParams, ToolInp
 import { SecretBroker } from "./secrets.js";
 import { DefaultPolicy, isPrivateHost, parseMoney, totalFromText, type PreApproval } from "./policy.js";
 import { hostMatches, InterruptionStats, neverAutomate } from "./interventions.js";
-import { missingPage, nearMisses, proseAnswer, StallTracker } from "./agent.js";
+import { dateTaken, missingPage, nearMisses, proseAnswer, StallTracker, STOPPED_BY, taskLanguage } from "./agent.js";
 import { challengePolicy, DEFAULT_CHALLENGE_POLICY, vendorClearMs } from "./challenge-policy.js";
 import type { Snapshot, SnapNode } from "@pilotfish/perception";
 
@@ -301,5 +301,33 @@ describe("DefaultPolicy", () => {
     // 172.31.255.255 is the last address of 172.16.0.0/12; 198.51.100.1 (a documentation address) is public to the classifier.
     for (const h of ["localhost", "127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.1.1", "[::1]", "foo.internal"]) expect(isPrivateHost(h)).toBe(true);
     for (const h of ["example.com", "8.8.8.8", "198.51.100.1"]) expect(isPrivateHost(h)).toBe(false);
+  });
+});
+
+describe("a real user's flight session (23-24 Nov): dates the site rewrote, the task's language, giving up early", () => {
+  it("a typed date the field took and wrote its own way counts as filled; another date does not", () => {
+    expect(dateTaken("Dec 27, 2026", "CN, 27 thg 12")).toBe(true);
+    expect(dateTaken("Dec 27, 2026", "Sun, Dec 27")).toBe(true);
+    expect(dateTaken("2026-12-08", "Tue, Dec 8")).toBe(true);
+    expect(dateTaken("27/12/2026", "So., 27. Dez.")).toBe(true);
+    expect(dateTaken("12/01/2026", "Thứ 3, 1 thg 12")).toBe(true);
+    expect(dateTaken("Dec 12, 2026", "12月12日")).toBe(true);
+    expect(dateTaken("Dec 27, 2026", "CN, 20 thg 12")).toBe(false);
+    expect(dateTaken("Dec 27, 2026", "Sun, Nov 27")).toBe(false);
+    expect(dateTaken("Hanoi", "Hà Nội")).toBe(false);
+  });
+
+  it("reads an English task from the person's words before the harness's own lines", () => {
+    expect(taskLanguage("TASK:\nFind the cheapest round trip from Hanoi to Ho Chi Minh City in December for me\nTODAY: Tuesday")).toBe("en");
+    expect(taskLanguage("Tìm vé máy bay khứ hồi rẻ nhất từ Hà Nội đến Thành phố Hồ Chí Minh vào tháng 12\nPLAN (a guide):\n1. Open the site and find the cheapest one")).toBeNull();
+    expect(taskLanguage("Book it")).toBeNull();
+  });
+
+  it("a result that names what stopped it is taken; one that only says it could not finish is not", () => {
+    expect(STOPPED_BY.test("The site asks me to sign in before it shows prices.")).toBe(true);
+    expect(STOPPED_BY.test("Google Flights showed “Oops, something went wrong” after Reload.")).toBe(true);
+    expect(STOPPED_BY.test("The page says it is not available in your country or region.")).toBe(true);
+    expect(STOPPED_BY.test("I could not complete a reliable comparison of the 10 date pairs or verify three cheapest options. No booking or payment was made.")).toBe(false);
+    expect(STOPPED_BY.test("no flight results with specific times were reached")).toBe(false);
   });
 });

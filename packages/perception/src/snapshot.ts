@@ -165,7 +165,14 @@ export interface SnapshotOptions {
   previous?: Snapshot | null;
 }
 
-const COMPUTED_STYLES = ["display", "visibility", "opacity", "overflow-x", "overflow-y", "cursor", "pointer-events", "content-visibility"] as const;
+const COMPUTED_STYLES = ["display", "visibility", "opacity", "overflow-x", "overflow-y", "cursor", "pointer-events", "content-visibility", "position", "clip"] as const;
+
+/** A `clip: rect(…)` that leaves nothing to draw (the sr-only pattern: rect(0 0 0 0), rect(1px 1px 1px 1px)). */
+function clipsToNothing(clip: string): boolean {
+  if (!/^rect\(/.test(clip)) return false;
+  const n = (clip.match(/-?[\d.]+/g) ?? []).map(Number);
+  return n.length === 4 && (n[2]! - n[0]! <= 1 || n[1]! - n[3]! <= 1);
+}
 
 const INTERACTIVE_ROLES = new Set([
   "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox", "option", "menuitem",
@@ -727,6 +734,15 @@ function buildDocument(
         if (opacity === 0) {
           node.visible = false;
           hiddenSubtree[i] = true; // opacity hides descendants too
+        }
+        // A status region only a screen reader gets: an aria-live (or status, alert) element clipped to nothing. What it
+        // says is an announcement, often a stale one, never what the page shows: Google Flights keeps "No results
+        // returned." (in Vietnamese "Không tìm thấy kết quả nào") in one beside every list of results, and on 23 Nov the
+        // executor and the end check both read it as no round trips found and refused prices on the screen.
+        const live = (node.attrs["aria-live"] && node.attrs["aria-live"] !== "off") || /^(status|alert)$/.test(node.attrs["role"] ?? "");
+        if (live && /^(absolute|fixed)$/.test(styleIdx(li, "position")) && clipsToNothing(styleIdx(li, "clip"))) {
+          node.visible = false;
+          hiddenSubtree[i] = true;
         }
         // Only where it applies: not on a plain inline box, an internal table box (a row) or a ruby box.
         if (styleIdx(li, "content-visibility") === "hidden" && !/^(inline$|table-|ruby)/.test(display ?? "")) foldsBelow[i] = true;

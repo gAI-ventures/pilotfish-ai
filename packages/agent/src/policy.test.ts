@@ -522,6 +522,19 @@ describe("a final step is on what the person named (19 Nov)", () => {
     expect(namedFor("lvp")).toEqual([]);
   });
 
+  it("a step the words rule out names nothing, and a long follow-up is instructions, not a name (23 Nov)", async () => {
+    const { namedObject, namedFor } = await import("./policy.js");
+    expect(namedObject("DO NOT book or pay anything - search and report prices only.")).toEqual([]);
+    expect(namedObject("I don't want to order the milk, just tell me the price")).toEqual([]);
+    expect(namedObject("Find flights; never book anything.")).toEqual([]);
+    // Still a request: the negation is about something else.
+    expect(namedObject("don't forget to book lvp for me today")).toEqual(["lvp"]);
+    const carried = "Find the cheapest ROUND-TRIP flights for 2 adults. DO NOT book or pay anything - search and report prices only.";
+    expect(namedFor("Finish the remaining gaps, be efficient with steps. You already observed these cheapest round-trip totals for 2 adults (VND): Dec 2-7: 6,073,204", carried)).toEqual([]);
+    // A long message continuing a request that names something keeps that request's name, not its own words.
+    expect(namedFor("you are checking the wrong city, the place is in the riverside district near the old bus stand, check the map and the opening hours carefully", "book northgate for me today")).toEqual(["northgate"]);
+  });
+
   it("matches a page by every named word, a plural, a one-letter typo or a city's other name", async () => {
     const { objectShown } = await import("./policy.js");
     const northgate = "Northgate Tower, Hillside, Bengaluru — Day pass ₹750. Pay & Confirm Booking";
