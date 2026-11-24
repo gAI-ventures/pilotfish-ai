@@ -513,6 +513,14 @@ describe("a check at a sign-in address", () => {
     const u = "https://www.amazon.in/ap/cvf/request?arb=e8b2";
     const puzzle = S(u, [E("h1", {}, ["Solve this puzzle to protect your account"]), E("a", { href: "#" }, ["Need help?"])], { title: "Authentication required" });
     expect(classify({ url: u, snapshot: puzzle })).toMatchObject({ category: "captcha", blocking: true, needs: "solve_in_live_view" });
+    // Its puzzle's service is named by where the puzzle loaded from (24 Nov: AWS WAF's, so the solver can take it).
+    const v = "https://www.example.in/ap/verify";
+    const drawn = S(v, [E("h1", {}, ["Solve this puzzle to protect your account"]), E("a", { href: "#" }, ["Need help?"])], { title: "Authentication required" });
+    const named = classify({ url: v, snapshot: drawn, resourceHosts: ["www.example.in", "ait.x.eu-west-1.captcha.awswaf.com", "y.ap-south-1.token.awswaf.com"] });
+    expect(named).toMatchObject({ category: "captcha", vendor: "aws-waf" });
+    expect(named.signals.join(" ")).toMatch(/loaded from ait\.x\.eu-west-1\.captcha\.awswaf\.com/);
+    // Only the silent token loaded: no vendor, as before.
+    expect(classify({ url: v, snapshot: drawn, resourceHosts: ["y.ap-south-1.token.awswaf.com"] }).vendor).toBeUndefined();
     // Its "Verifying your device" moment before the puzzle is drawn waits like any interstitial.
     const verifying = S(u, [E("h1", {}, ["Verifying your device"])], { title: "Authentication required" });
     expect(classify({ url: u, snapshot: verifying })).toMatchObject({ category: "bot_challenge", autoResolvable: true });

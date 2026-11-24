@@ -119,6 +119,9 @@ export interface GatherOptions {
 }
 
 /** Everything `classifyInterruption` reads, from a live page. Cookie values are reduced to short hashes (clearance cookies only). */
+/** The distinct hosts of the document's loaded resources (its Resource Timing entries). */
+const RESOURCE_HOSTS = `(() => { const s = new Set(); for (const e of performance.getEntriesByType('resource')) { try { s.add(new URL(e.name).hostname); } catch {} } return [...s]; })()`;
+
 export async function gatherInterruptInput(page: Page, opts: GatherOptions = {}): Promise<InterruptInput> {
   // Read for one document: the page's own account of its committed document must name it before and after the whole
   // read, else nothing read here is that document's for sure (fifth review, v6: Node may hear of a commit only after).
@@ -129,16 +132,23 @@ export async function gatherInterruptInput(page: Page, opts: GatherOptions = {})
     if (now !== bound) throw new DocumentChangedError(now !== undefined);
   };
   await confirm();
-  const [frames, cookies] = await Promise.all([
+  const [frames, cookies, resourceHosts] = await Promise.all([
     frameUrls(page).catch(() => [page.url]),
     page.session
       .send("Network.getCookies", { urls: [page.url] }, { timeoutMs: 3_000 })
       .then((r) => r.cookies.map((c): CookieInfo => (CLEARANCE_COOKIES.includes(c.name) ? { name: c.name, value: hashValue(c.value) } : { name: c.name })))
       .catch(() => [] as CookieInfo[]),
+    // The hosts the document loaded from, read in the isolated world (nothing runs in the page's own): a check a script
+    // draws in no frame is named by where its puzzle came from (`vendorByResources`).
+    Promise.resolve()
+      .then(() => page.main.evaluate<string[]>(RESOURCE_HOSTS, { timeoutMs: 1_500 }))
+      .then((h) => (Array.isArray(h) ? h.filter((x) => typeof x === "string").slice(0, 300) : []))
+      .catch(() => [] as string[]),
   ]);
   const input: InterruptInput = {
     url: page.url,
     frameUrls: frames,
+    ...(resourceHosts.length ? { resourceHosts } : {}),
     cookies,
     navigatedAt: page.lastNavigationAt,
     response: opts.response ?? (opts.document !== undefined ? (opts.document ? opts.tracker?.forDocument(opts.document) : null) : opts.tracker?.latest) ?? null,

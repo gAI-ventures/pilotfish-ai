@@ -157,6 +157,8 @@ export interface InterruptInput {
   response?: MainResponse | null;
   /** Every frame URL in the page: main first, then all child frames (incl. cross-origin and closed shadow roots). */
   frameUrls?: string[];
+  /** Hosts the page's document loaded resources from (scripts, images, requests): names a check drawn in no frame. */
+  resourceHosts?: string[];
   /** Cookies for the site: names, or {name, value}. */
   cookies?: Array<string | CookieInfo>;
   snapshot?: InterruptSnapshot | null;
@@ -1574,6 +1576,31 @@ const DEFAULT_NEEDS: Record<InterruptCategory, InterruptNeeds> = {
   fedcm: "nothing",
 };
 
+/**
+ * The services whose interactive check a page shows, by the hosts their puzzle loads from. Only hosts that serve the
+ * puzzle itself: AWS WAF's silent token (token.awswaf.com) and reCAPTCHA's invisible v3 load on pages with no puzzle.
+ */
+const PUZZLE_HOSTS: ReadonlyArray<{ vendor: string; re: RegExp }> = [
+  { vendor: "aws-waf", re: /(^|\.)captcha(-sdk)?\.awswaf\.com$/ },
+  { vendor: "arkose", re: /(^|\.)(arkoselabs\.com|funcaptcha\.com)$/ },
+  { vendor: "hcaptcha", re: /(^|\.)hcaptcha\.com$/ },
+  { vendor: "geetest", re: /(^|\.)geetest\.com$/ },
+  { vendor: "mtcaptcha", re: /(^|\.)mtcaptcha\.com$/ },
+];
+
+/** The vendor of a check drawn on the page, by the hosts the page loaded (`PUZZLE_HOSTS`); null when none or several. */
+export function vendorByResources(hosts: readonly string[]): { vendor: string; host: string } | null {
+  const found = new Map<string, string>();
+  for (const h of hosts) {
+    const host = h.toLowerCase();
+    const v = PUZZLE_HOSTS.find((p) => p.re.test(host));
+    if (v && !found.has(v.vendor)) found.set(v.vendor, host);
+  }
+  if (found.size !== 1) return null;
+  const [vendor, host] = [...found][0]!;
+  return { vendor, host };
+}
+
 function finalize(hit: Hit, m: Model): Interruption {
   const signals = [...hit.signals, ...m.presence.filter((p) => !hit.signals.includes(p))].slice(0, 16);
   const out: Interruption = {
@@ -1584,6 +1611,16 @@ function finalize(hit: Hit, m: Model): Interruption {
     needs: hit.needs ?? DEFAULT_NEEDS[hit.category],
   };
   if (hit.vendor) out.vendor = hit.vendor;
+  else if (hit.category === "captcha" || hit.category === "bot_challenge") {
+    // Read from its words alone: the check's own service, by what the page loaded (a widget drawn by a script, in no
+    // frame a signature knows). 24 Nov: a sign-in's "Solve this puzzle" grid was AWS WAF's, loaded from
+    // *.captcha.awswaf.com, and with no vendor the run asked the person without trying the solver.
+    const by = vendorByResources(m.input.resourceHosts ?? []);
+    if (by) {
+      out.vendor = by.vendor;
+      out.signals = [...signals, `loaded from ${by.host}`].slice(0, 16);
+    }
+  }
   if (hit.input) out.input = hit.input;
   if (hit.displayNumber) out.displayNumber = hit.displayNumber;
   if (hit.inPage) {
