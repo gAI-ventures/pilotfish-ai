@@ -1294,6 +1294,22 @@ function rememberBox(m: Model, field: InterruptNode): string | undefined {
   return undefined;
 }
 
+/** A one-character pattern on a code box: "[0-9]{1}", "\d", "[a-zA-Z0-9]". */
+export const ONE_CHAR_PATTERN = /^(?:\[[^\]]+\]|\\d|\\w|\.)(?:\{1\})?$/;
+
+/**
+ * One box of a split code: maxlength 1, or a narrow box (90 px at most) whose maxlength is 2 or whose pattern takes one
+ * character. Widgets set 2 so they can tell a key typed over a full box (24 Nov: a food-delivery site's six boxes, each
+ * maxlength 2 and pattern "[0-9]{1}", were no row: the whole code went into the first box, the widget spread and sent
+ * it, and the read-back of that box called it not taken).
+ */
+export function oneCharBox(i: Pick<InputInfo, "maxLength" | "node">): boolean {
+  if (i.maxLength === 1) return true;
+  const w = i.node.rect?.width ?? 0;
+  if (w <= 0 || w > 90) return false;
+  return i.maxLength === 2 || ((i.maxLength === null || i.maxLength <= 2) && ONE_CHAR_PATTERN.test((i.node.attrs["pattern"] ?? "").trim()));
+}
+
 function detectOtp(m: Model, v: View, inIssuerFrame = false): OtpFinding | null {
   const lower = v.lower;
   const candidates = v.inputs.filter(
@@ -1326,14 +1342,14 @@ function detectOtp(m: Model, v: View, inIssuerFrame = false): OtpFinding | null 
   // 1) autocomplete=one-time-code.
   const ac = candidates.filter((i) => i.ac.includes("one-time-code"));
   if (ac.length) {
-    const split = ac.length >= 4 && ac.every((i) => i.maxLength === 1);
+    const split = ac.length >= 4 && ac.every(oneCharBox);
     return build(ac, [`autocomplete=one-time-code${split ? ` ×${ac.length}` : ""}`], true, split ? ac.length : undefined);
   }
   // 2) 4–8 single-character boxes in one row. Boxes with no maxlength count when narrow (90 px at most) and the page's
   // text asks for a code (24 Nov: a shopping site's six boxes had none, so its code page was no code prompt and the
   // model typed the whole code into the first box).
   const narrow = (i: InputInfo) => i.maxLength === null && !!i.node.rect && i.node.rect.width > 0 && i.node.rect.width <= 90;
-  const singles = candidates.filter((i) => (i.maxLength === 1 || (!!textCue && narrow(i))) && ["text", "tel", "number", "password"].includes(i.type));
+  const singles = candidates.filter((i) => (oneCharBox(i) || (!!textCue && narrow(i))) && ["text", "tel", "number", "password"].includes(i.type));
   if (singles.length >= 4) {
     // Up to five levels: a box may sit in wrappers of its own (24 Nov: a shopping site's six boxes shared only their
     // fourth ancestor, each in div > div > div of its own).

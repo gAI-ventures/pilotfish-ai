@@ -38,6 +38,7 @@ import {
   choiceOf,
   nodeKey,
   textOf,
+  ONE_CHAR_PATTERN,
   type Snapshot,
   type SnapNode,
   type ActionEvidence,
@@ -6832,7 +6833,8 @@ function codeBox(n: SnapNode): boolean {
   if (n.tag !== "input" || !n.visible || !n.rect || n.rect.width <= 0 || n.rect.width > 90) return false;
   if (!["text", "tel", "number", "password", ""].includes((n.attrs["type"] ?? "").toLowerCase())) return false;
   const max = n.attrs["maxlength"];
-  return max === undefined || max === "" || max === "1";
+  // A widget may set 2 (to tell a key typed over a full box) or say one character by its pattern ("[0-9]{1}").
+  return max === undefined || max === "" || max === "1" || max === "2" || ONE_CHAR_PATTERN.test((n.attrs["pattern"] ?? "").trim());
 }
 
 /**

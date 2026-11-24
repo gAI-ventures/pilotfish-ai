@@ -126,6 +126,20 @@ const SHAPES: Record<string, Shape> = {
       document.getElementById('v').addEventListener('click', () => verify(cs.map((c) => c.value).join(''), () => cs.forEach((c) => (c.value = ''))));
       cs[0].focus();`,
   },
+  // Number boxes of maxlength 2 with a one-digit pattern (so a key typed over a full box can be told): the last digit a
+  // box gets is its own, focus moves on, and the code is sent once every box holds one.
+  "maxlen2-6": {
+    len: 6,
+    html: `<div id="w">${Array.from({ length: 6 }, (_, i) => `<input class="c" type="number" inputmode="numeric" maxlength="2" pattern="[0-9]{1}" aria-label="Digit ${i + 1}" style="${inputBox}">`).join("")}</div>`,
+    js: `const cs = [...document.querySelectorAll('#w .c')]; let sent = false;
+      cs.forEach((c, i) => c.addEventListener('input', () => {
+        const ch = String(c.value).replace(/\\D/g, '').slice(-1); c.value = ch;
+        if (ch && cs[i + 1]) cs[i + 1].focus();
+        const v = cs.map((x) => x.value).join('');
+        if (v.length === 6 && !sent) { sent = true; verify(v, () => { sent = false; cs.forEach((x) => (x.value = '')); }); }
+      }));
+      cs[0].focus();`,
+  },
   // One plain field.
   "single-6": {
     len: 6,
