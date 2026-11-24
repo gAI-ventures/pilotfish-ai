@@ -103,6 +103,38 @@ const inDialog = (n: SignInNode) => {
 };
 const controlName = (n: SignInNode) => (n.name || n.attrs["value"] || n.attrs["aria-label"] || n.attrs["title"] || "").replace(/\s+/g, " ").trim();
 
+/**
+ * The account providers a site's "Continue with …" button can sign in with, by the site whose own sign-in page takes
+ * that account's login: the person may give that login on pilotfish's form (sealed like any login, typed only there),
+ * and the run signs in on the provider's page the site's button opens. Others are done in the live browser.
+ */
+export const PROVIDER_SITES: Readonly<Record<string, { site: string; hosts: readonly string[] }>> = {
+  Google: { site: "google.com", hosts: ["google.com", "*.google.com"] },
+  Microsoft: { site: "live.com", hosts: ["live.com", "*.live.com", "microsoftonline.com", "*.microsoftonline.com", "microsoft.com", "*.microsoft.com"] },
+  Apple: { site: "apple.com", hosts: ["apple.com", "*.apple.com"] },
+  Facebook: { site: "facebook.com", hosts: ["facebook.com", "*.facebook.com"] },
+  GitHub: { site: "github.com", hosts: ["github.com", "*.github.com"] },
+  LinkedIn: { site: "linkedin.com", hosts: ["linkedin.com", "*.linkedin.com"] },
+  Amazon: { site: "amazon.com", hosts: ["amazon.com", "*.amazon.com"] },
+  Yahoo: { site: "yahoo.com", hosts: ["yahoo.com", "*.yahoo.com"] },
+};
+
+/** A provider pilotfish can sign in with from a login the person gives (`PROVIDER_SITES`), by its name as read; else null. */
+export function providerSite(name: string): { provider: string; site: string; hosts: readonly string[] } | null {
+  const key = Object.keys(PROVIDER_SITES).find((p) => p.toLowerCase() === name.trim().toLowerCase());
+  return key ? { provider: key, ...PROVIDER_SITES[key]! } : null;
+}
+
+/** The providers of a sign-in that pilotfish can sign in with from a login the person gives, in the page's order. */
+export const signInLoginProviders = (a: Pick<SignInSeen, "providers">): string[] => a.providers.filter((p) => providerSite(p));
+
+/**
+ * A page's words that the way it was signing in by is used up: too many codes or tries, or "try other login
+ * methods" (24 Nov: a food-delivery site's code dialog said "OTP attempts exhausted. Please try other login methods.").
+ */
+export const SIGN_IN_WAY_USED_UP =
+  /\b(?:(?:otp|code|verification|login|sign[- ]?in)\s+)?(?:attempts?|tries|limit)\s+(?:(?:have|has)\s+been\s+)?(?:exhausted|exceeded|used up|reached)\b|\btoo many (?:attempts|tries|requests|otps?|codes)\b|\btry (?:another|other|a different) (?:login|sign[- ]?in|log[- ]?in|way|method)/i;
+
 /** The provider a button names ("Continue with Google", a button named only "Apple"), or null. */
 function providerOf(name: string): string | null {
   const known = KNOWN_PROVIDERS.find((p) => p.toLowerCase() === name.toLowerCase());
@@ -257,20 +289,50 @@ export function asksSignInNumber(question: string, onAuthPage = false): boolean 
  * many sign-in forms show the country code beside the field and take the national number only, as digits, up to
  * their maxlength (a 10-digit field cuts "+91 98765 43210" to "+91 98765 " and the site refuses it). `dialCode`: a
  * country code the page shows by the field ("+91"); `numeric`: the field takes digits only (type=number, or
- * inputmode=numeric); `maxLength`: its maxlength. With none of these the number goes in as given.
+ * inputmode=numeric); `maxLength`: its maxlength; `national`: the field says it takes the national number
+ * (autocomplete=tel-national). With none of these the number goes in as given.
+ *
+ * A number given with its "+" and country code, for a field that takes digits only or the national number and shows
+ * no country code: the country code is left out (24 Nov: a shopping site's tel-national, inputmode=numeric field with
+ * no code beside it got "91" and the 10 digits; the site sent the code to another number).
  */
-export function fitPhone(value: string, f: { maxLength?: number; numeric?: boolean; dialCode?: string }): string {
+export function fitPhone(value: string, f: { maxLength?: number; numeric?: boolean; dialCode?: string; national?: boolean }): string {
   const t = value.trim();
   const plus = t.startsWith("+");
   let digits = t.replace(/\D/g, "");
   const dial = f.dialCode?.replace(/\D/g, "") ?? "";
   // The country code the page already shows is not typed again (given with its "+", or as a longer number led by it).
   if (dial && digits.startsWith(dial) && (plus || digits.length - dial.length >= 7)) digits = digits.slice(dial.length);
+  else if (!dial && plus && (f.numeric || f.national)) {
+    const cc = callingCode(digits);
+    if (cc && digits.length - cc.length >= 6) digits = digits.slice(cc.length);
+  }
   const max = f.maxLength && f.maxLength > 0 ? f.maxLength : undefined;
-  if (!dial && !f.numeric && !(max && t.length > max)) return t;
+  if (!dial && !f.numeric && !f.national && !(max && t.length > max)) return t;
   // Too long for the field: the national number is its last digits (a country code or a trunk 0 in front).
   if (max && digits.length > max) digits = digits.slice(digits.length - max);
   return digits;
+}
+
+/**
+ * The ITU country calling codes. They are a prefix code (no code begins another), so the one leading an international
+ * number is found by its first one, two or three digits.
+ */
+const CALLING_CODES = new Set(
+  (
+    "1 7 20 27 30 31 32 33 34 36 39 40 41 43 44 45 46 47 48 49 51 52 53 54 55 56 57 58 60 61 62 63 64 65 66 81 82 84 86 90 91 92 93 94 95 98 " +
+    "211 212 213 216 218 220 221 222 223 224 225 226 227 228 229 230 231 232 233 234 235 236 237 238 239 240 241 242 243 244 245 246 247 248 249 " +
+    "250 251 252 253 254 255 256 257 258 260 261 262 263 264 265 266 267 268 269 290 291 297 298 299 350 351 352 353 354 355 356 357 358 359 " +
+    "370 371 372 373 374 375 376 377 378 380 381 382 383 385 386 387 389 420 421 423 500 501 502 503 504 505 506 507 508 509 " +
+    "590 591 592 593 594 595 596 597 598 599 670 672 673 674 675 676 677 678 679 680 681 682 683 685 686 687 688 689 690 691 692 " +
+    "800 808 850 852 853 855 856 870 878 880 881 882 883 886 888 960 961 962 963 964 965 966 967 968 970 971 972 973 974 975 976 977 979 992 993 994 995 996 998"
+  ).split(" "),
+);
+
+/** The country calling code an international number's digits begin with ("91 98765 43210", spaces left out, → "91"), or "". */
+export function callingCode(digits: string): string {
+  for (const n of [1, 2, 3]) if (CALLING_CODES.has(digits.slice(0, n))) return digits.slice(0, n);
+  return "";
 }
 
 /** The country code a page shows by a phone field ("+91", "IN +91", "(+1)"), from the texts around it, or undefined. */
@@ -344,9 +406,16 @@ export const signInHasForm = (a: SignInSeen): boolean => a.ways.some((w) => FORM
  * first), a phone for a code the phone way (or …first), an email for a code the email way (or …first). The same rule
  * every surface draws its forms by, checked again where answers arrive.
  */
-export function signInAnswerProblem(a: SignInSeen, answer: { type: string; channel?: string }): string | null {
+export function signInAnswerProblem(a: SignInSeen, answer: { type: string; channel?: string; provider?: string }): string | null {
   const has = (...w: SignInWay[]) => w.some((x) => a.ways.includes(x));
   const offers = signInWaysText(a) || "no way pilotfish could read";
+  // A provider's login: the page must offer that provider, and pilotfish must know its sign-in page.
+  if (answer.type === "credentials" && answer.provider) {
+    const p = providerSite(answer.provider);
+    if (!p) return `pilotfish cannot sign in with ${answer.provider} from a login given here; sign in with it in the live browser.`;
+    if (!a.providers.some((x) => x.toLowerCase() === p.provider.toLowerCase())) return `This page does not offer ${p.provider} sign-in; it offers ${offers}.`;
+    return null;
+  }
   if (answer.type === "credentials" && !has("password", "identifier_first")) return `This page does not sign in with a password; it offers ${offers}.`;
   if (answer.type === "code_login" && answer.channel === "sms" && !has("phone_code", "identifier_first")) return `This page does not sign in with a phone number and a texted code; it offers ${offers}.`;
   if (answer.type === "code_login" && answer.channel === "email" && !has("email_code", "identifier_first")) return `This page does not sign in with an emailed code or link; it offers ${offers}.`;
@@ -364,7 +433,7 @@ export const SIGN_IN_WAY_WORDS: Record<SignInWay, string> = {
 
 /** The ways a page offers, in words, in its order: "a password (…); or Google, in the browser". "" when none. */
 export function signInWaysText(a: SignInSeen): string {
-  const parts = [...a.ways.map((w) => SIGN_IN_WAY_WORDS[w]), ...a.providers.map((p) => `${p}, in the browser`)];
+  const parts = [...a.ways.map((w) => SIGN_IN_WAY_WORDS[w]), ...a.providers.map((p) => (providerSite(p) ? `${p} (your ${p} account's email and password, or in the browser)` : `${p}, in the browser`))];
   return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join("; ")}; or ${parts[parts.length - 1]}`;
 }
 

@@ -32,6 +32,11 @@ export interface InterventionRequest {
   autoResume?: boolean;
   /** A sign-in the person may answer with their username and password typed on the host's page (`credentials`). */
   acceptsCredentials?: boolean;
+  /**
+   * A code the person may answer with "send it again" (`resend`): the run presses the page's resend control and asks
+   * again. A code's hand-off only.
+   */
+  acceptsResend?: boolean;
   /** A sign-in the person may answer with "create an account for me" (`signup`): the host makes the details. */
   acceptsSignup?: boolean;
   /**
@@ -60,7 +65,9 @@ export interface SignupDetails {
 }
 
 /**
- * `credentials`: the person typed their sign-in details on pilotfish's own page (never the model's chat).
+ * `credentials`: the person typed their sign-in details on pilotfish's own page (never the model's chat); with
+ * `provider` ("Google"), the login of that account, for the site's "Continue with Google" (`PROVIDER_SITES`).
+ * `resend`: the person did not get the code (`acceptsResend`), and asks for a new one.
  * `signup`: they have no account and approved creating one with these details. Only a sign-in hand-off takes either.
  */
 export type InterventionResponse =
@@ -68,7 +75,8 @@ export type InterventionResponse =
   | { status: "code"; code: string }
   | { status: "cancel"; reason?: string }
   | { status: "skip" }
-  | { status: "credentials"; username: string; password: string }
+  | { status: "credentials"; username: string; password: string; provider?: string }
+  | { status: "resend" }
   | ({ status: "signup" } & SignupDetails)
   | CodeLoginResponse
   | SignInHowResponse;

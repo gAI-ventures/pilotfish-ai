@@ -377,7 +377,7 @@ the monthly limit and spending by category and by model.
 | `list_jobs` `{status?, limit?}` | Your recent jobs, newest first, with their cost; `[replay]` marks recorded ones. `status`: `queued`, `running`, `needs_input`, `done`, `failed` or `cancelled`. |
 | `follow_up` `{id, text, model?, region?, files?, output_schema?, ask_mode?, wait?, wait_seconds?}` | Carry on in the same session: the same browser while it is kept, the same sign-ins, what earlier turns found ("now also…", "open the second one", "try again with…"). `model` changes this turn's model (`auto` routes again). `region` runs the turn from another country, in a new browser session there. `output_schema`: this turn's answer schema (omitted keeps the session's); `ask_mode` likewise. The session keeps its project and identity. |
 | `rerun_job` `{id, wait?, wait_seconds?}` | Run the same task again with the same settings, as a new job in a new session. To change the instructions or carry on, use `follow_up`. |
-| `answer_job` `{id, question_id, answer}` | Answer a job's question: `yes`, `no`, `done` (handled in the browser), `cancel`, or text. The id is in the job's `Question …` line, which also says what answer it takes. Codes and passwords go on the answer page, never here. |
+| `answer_job` `{id, question_id, answer}` | Answer a job's question: `yes`, `no`, `done` (handled in the browser), `cancel`, `resend` (a code that did not come: the run presses the site's resend and asks again), or text. The id is in the job's `Question …` line, which also says what answer it takes. Codes and passwords go on the answer page, never here. |
 | `message_job` `{id, text}` | Pass on what the person says while a job runs ("take the cheaper one", a detail it asked for), in their words. It reads the message before its next step, and the person's newest words win over the task; sent while the job waits on a question, it answers it. |
 | `take_control` `{id}` / `hand_back` `{id}` | Pause a running job and get a link to drive its browser yourself, then let it carry on from where you left it. |
 | `cancel_job` `{id}` | Stop a queued, running or waiting job for good: it can't be resumed, and what it spent stays charged. It is the only way to stop one: a tool call that is cancelled or times out stops waiting, and the job carries on. |
@@ -467,7 +467,11 @@ pass through the agent.
 
 A sign-in's `Question` line names the ways the site's page offers, read from the live page when it asked (a password, a
 phone number and a texted code, an email and a code or link, an email or username first, a passkey, Google and other
-providers in the browser), and the way its form opens on; the answer page shows those ways and no others. When pilotfish
+providers), and the way its form opens on; the answer page shows those ways and no others. For Google, Microsoft, Apple,
+Facebook, GitHub, LinkedIn, Amazon and Yahoo the answer page also takes that account's email and password: pilotfish
+presses the site's "Continue with Google" and signs in on Google's own page with them (typed only there), and once it
+works the login can be saved for any site that offers Google. A code page that says its tries are used up is not asked
+again: the run goes back to the site's sign-in options. When pilotfish
 could not tell how the page signs in, the line asks how instead: answer it with `answer_job` and the person's own words
 ("a code to my phone", "Google"), never a password or code.
 

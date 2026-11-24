@@ -71,7 +71,7 @@ import {
   type SignupDetails,
   type SolveChallenge,
 } from "./interventions.js";
-import { asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, readSignIn, signInHowWords, signInPreference, signInUnclear, type SignInSeen, type SignInWay } from "./sign-in.js";
+import { asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, providerSite, readSignIn, SIGN_IN_WAY_USED_UP, signInHowWords, signInPreference, signInUnclear, type SignInSeen, type SignInWay } from "./sign-in.js";
 import { failureLines, isRetryLabel, RepeatFailures, repeatFailureNudge } from "./repeat-failure.js";
 import type { ElementHandle, InterruptInput, Interruption } from "@pilotfish/perception";
 
@@ -1373,7 +1373,9 @@ export class Agent {
    * placeholders: a later sign-in question for the site gets them back instead of asking again, unless the page offers
    * only ways they cannot fill (24 Nov, a food-delivery site: a phone number given, then asked for twice more). `told`: how often.
    */
-  private readonly givenSignIn = new Map<string, { way: "password" | "phone" | "email"; names: string[]; told: number }>();
+  private readonly givenSignIn = new Map<string, { way: "password" | "phone" | "email" | "provider"; names: string[]; told: number; provider?: string; providerSite?: string }>();
+  /** Sites whose used-up sign-in way (too many codes, "try other login methods") the model was told about once. */
+  private readonly usedUpTold = new Set<string>();
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
   /** Sites a saved recovery code was typed on in this run: one per site, then the person. */
   private readonly recoveryTried = new Set<string>();
@@ -3163,6 +3165,8 @@ export class Agent {
           }
         }
         case "type": {
+          const row = this.codeRowFor(String(input["ref"]), String(input["text"]));
+          if (row) return await this.typeCodeRow(String(input["text"]), row, input["submit"] === true ? "enter" : undefined);
           const h = await this.handle(String(input["ref"]));
           const host = this.fieldHost(h.frame);
           const sub = this.secrets.substitute(String(input["text"]), host);
@@ -4419,6 +4423,9 @@ export class Agent {
   }
 
   private async fillForm(fields: Array<{ ref: string; value: string }>, submitRef?: string): Promise<ToolOutcome> {
+    // A code for a row of one-character boxes, given whole for one of them: one character per box.
+    const row = fields.length === 1 ? this.codeRowFor(fields[0]!.ref, fields[0]!.value) : null;
+    if (row) return await this.typeCodeRow(fields[0]!.value, row, submitRef);
     const seen = this.turnSnapshot ?? this.lastSnapshot;
     const used = new Set<string>();
     const targets: Array<FillTarget & { host: string }> = [];
@@ -4487,6 +4494,52 @@ export class Agent {
       submit: submitted ? submitNode : undefined,
     };
     return outcome;
+  }
+
+  /**
+   * The refs of the row of one-character code boxes `ref` is one of, in order, when `value` (a placeholder such as
+   * {{user_code}}, or the code itself) is a code of exactly as many characters; else null. 24 Nov: a shopping site's
+   * six boxes (no maxlength, not taken for a code prompt) got the person's whole code typed into the first; the site
+   * spread it over the boxes as it came, they held another code, the read-back failed and the code was typed into the
+   * first box again: the site refused four codes in a row.
+   */
+  private codeRowFor(ref: string, value: string): string[] | null {
+    const seen = this.turnSnapshot ?? this.lastSnapshot;
+    const node = seen?.byRef.get(ref) ?? this.lastSnapshot?.byRef.get(ref);
+    if (!node) return null;
+    let text: string;
+    try {
+      text = this.secrets.substitute(value, this.fieldHost(node.frame)).text;
+    } catch {
+      return null;
+    }
+    const chars = [...text.replace(/[\s-]/g, "")];
+    if (chars.length < 4 || chars.length > 8) return null;
+    const row = codeBoxRow(node);
+    if (!row || row.length !== chars.length || row.some((n) => !n.ref)) return null;
+    return row.map((n) => n.ref!);
+  }
+
+  /** A code typed one character per box (`fillCode`), then `submit` pressed: a button's ref, or "enter". */
+  private async typeCodeRow(value: string, refs: string[], submit?: string): Promise<ToolOutcome> {
+    const host = this.fieldHost((await this.handle(refs[0]!)).frame);
+    const used = this.secrets.substitute(value, host).used;
+    let typed: string | null = null;
+    const outcome = await this.withEvidence(
+      async () => {
+        typed = await this.fillCode(value, refs, undefined, { submit: false });
+        if (!typed || !submit) return;
+        if (submit === "enter") return void (await this.page.press("Enter"));
+        const s = await this.handle(submit);
+        await this.page.click(s.frame, s.backendNodeId);
+      },
+      `type code into ${refs.length} boxes ${refs[0]}..${refs[refs.length - 1]}${used.length ? ` (secrets: ${used.join(",")})` : ""}`,
+      () =>
+        typed
+          ? `The code went into the ${refs.length} boxes, one character each (${refs.join(", ")})${submit && submit !== "enter" ? `; clicked ${submit}` : ""}. Type it once only: if the page says it is wrong or expired, ask for a new one.`
+          : "The code was NOT typed (refused by the sign-in guards for this field).",
+    );
+    return typed ? outcome : { ...outcome, isError: true, summary: "type code: not typed" };
   }
 
   /** Put one value into one field. Returns a problem description, or "" when it went in. */
@@ -4997,6 +5050,18 @@ export class Agent {
     const kind = c.category === "magic_link" ? "link" : "code";
     if (kind === "link") message += " Opened on your own phone or computer, the link signs that device in, not pilotfish's browser: copy the link from the email and paste it here instead.";
     const codePage = c.category === "otp" || c.category === "magic_link";
+    // The page says its codes are used up ("OTP attempts exhausted. Please try other login methods."): another code
+    // would be refused too, so nobody is asked for one; the model goes back to the sign-in options (24 Nov).
+    if (codePage) {
+      const words = pageText(cur, { maxChars: 4_000 });
+      if (SIGN_IN_WAY_USED_UP.test(words)) {
+        const site = siteOf(host);
+        this.usedUpTold.add(site);
+        this.givenSignIn.delete(site);
+        event("unresolved");
+        return { note: usedUpBrief(site, words) };
+      }
+    }
     const key = promptKey(this.page.url);
     // A prompt that was passed is over: the same address asking again later (a re-check) is a new prompt.
     const passed = () => {
@@ -5135,7 +5200,7 @@ export class Agent {
       autoUsed = f;
     });
     const out = await this.handOff(
-      { id: `iv${++this.interventionSeq}`, category: c.category, vendor: c.vendor, needs: c.needs, input: c.input, displayNumber: c.displayNumber, url: this.secrets.scrub(this.page.url), host, title: cur.title, message, screenshot: shot, autoResume: true },
+      { id: `iv${++this.interventionSeq}`, category: c.category, vendor: c.vendor, needs: c.needs, input: c.input, displayNumber: c.displayNumber, url: this.secrets.scrub(this.page.url), host, title: cur.title, message, screenshot: shot, autoResume: true, ...(codePage ? { acceptsResend: true } : {}) },
       before,
       cur,
       true,
@@ -5167,6 +5232,7 @@ export class Agent {
           await this.fillCode("{{user_code}}", refs, c.input?.rememberRef).catch(() => null);
         });
       },
+      { acceptResend: codePage },
     );
     handedBack = true;
     stopAuto?.();
@@ -5192,6 +5258,10 @@ export class Agent {
       return { note: `Stopped: ${this.stopRequest.message}` };
     }
     if (out.kind === "credentials" || out.kind === "signup" || out.kind === "code_login") return { note: "" }; // not offered here (acceptCredentials is false)
+    if (out.kind === "resend") {
+      event("unresolved", out.waitedMs);
+      return { note: resendBrief(host, kind, resendControl(this.lastSnapshot ?? cur)) };
+    }
     if (out.kind === "still_there") {
       event("unresolved", out.waitedMs);
       // A code for a prompt with no field to fill: the model types it.
@@ -5562,7 +5632,7 @@ export class Agent {
     cur: Snapshot,
     armed: boolean,
     typeCode?: (code: string) => Promise<void>,
-    { acceptCredentials = false, acceptCodeLogin = false, acceptSkip = false, acceptHow = false }: { acceptCredentials?: boolean; acceptCodeLogin?: boolean; acceptSkip?: boolean; acceptHow?: boolean } = {},
+    { acceptCredentials = false, acceptCodeLogin = false, acceptSkip = false, acceptHow = false, acceptResend = false }: { acceptCredentials?: boolean; acceptCodeLogin?: boolean; acceptSkip?: boolean; acceptHow?: boolean; acceptResend?: boolean } = {},
   ): Promise<
     | { kind: "skipped"; waitedMs: number }
     | { kind: "cleared"; snap: Snapshot; waitedMs: number; code: boolean }
@@ -5570,9 +5640,10 @@ export class Agent {
     | { kind: "declined"; reason?: string; waitedMs: number }
     | { kind: "still_there"; waitedMs: number; verified: boolean }
     | { kind: "ended"; snap: Snapshot; result: Interruption; waitedMs: number }
-    | { kind: "credentials"; username: string; password: string; waitedMs: number }
+    | { kind: "credentials"; username: string; password: string; provider?: string; waitedMs: number }
     | ({ kind: "signup"; waitedMs: number } & SignupDetails)
     | { kind: "how"; text: string; waitedMs: number }
+    | { kind: "resend"; waitedMs: number }
   > {
     const t0 = Date.now();
     const ctl = new AbortController();
@@ -5669,7 +5740,8 @@ export class Agent {
       if (res.status === "skip" && acceptSkip) return { kind: "skipped", waitedMs: Date.now() - t0 };
       // Sign-in details typed on pilotfish's page: the caller has the model type them as placeholders.
       // Any other hand-off treats them as "done" and checks the page.
-      if (res.status === "credentials" && acceptCredentials) return { kind: "credentials", username: res.username, password: res.password, waitedMs: Date.now() - t0 };
+      if (res.status === "credentials" && acceptCredentials) return { kind: "credentials", username: res.username, password: res.password, ...(res.provider ? { provider: res.provider } : {}), waitedMs: Date.now() - t0 };
+      if (res.status === "resend" && acceptResend) return { kind: "resend", waitedMs: Date.now() - t0 };
       if (res.status === "code_login" && acceptCodeLogin) return { kind: "code_login", identifier: res.identifier, channel: res.channel, waitedMs: Date.now() - t0 };
       if (res.status === "signup" && acceptCredentials) return { kind: "signup", email: res.email, password: res.password, ...(res.name ? { name: res.name } : {}), waitedMs: Date.now() - t0 };
       // How the person signs in, for a sign-in whose ways could not be read: the caller has the model find that way.
@@ -5774,7 +5846,8 @@ export class Agent {
     const near = nearTexts(node);
     const max = Number(node.attrs["maxlength"]);
     const dial = dialCodeIn(near);
-    const fitted = fitPhone(sub.text, { ...(Number.isFinite(max) && max > 0 ? { maxLength: max } : {}), numeric: type === "number" || (node.attrs["inputmode"] ?? "").toLowerCase() === "numeric", ...(dial ? { dialCode: dial } : {}) });
+    const national = /\btel-national\b/i.test(node.attrs["autocomplete"] ?? "");
+    const fitted = fitPhone(sub.text, { ...(Number.isFinite(max) && max > 0 ? { maxLength: max } : {}), numeric: type === "number" || (node.attrs["inputmode"] ?? "").toLowerCase() === "numeric", ...(dial ? { dialCode: dial } : {}), ...(national ? { national } : {}) });
     // The field shows the number as fitted: masked as the placeholder it was typed from, never as another secret that
     // holds the same digits (24 Nov: a saved username of another site read back in a shopping site's phone field).
     if (fitted !== sub.text) this.secrets.addTypedForm(sub.used[0]!, fitted);
@@ -5938,6 +6011,19 @@ export class Agent {
       this.givenSignIn.set(site, { way: what, names: [name], told: 0 });
       return await this.withEvidence(async () => undefined, label, () => this.givenBrief(site, readSignIn((this.lastSnapshot ?? before).nodes)), { settle: false });
     }
+    if (out.kind === "credentials" && out.provider) {
+      // The login of the person's account with a provider ("Continue with Google"): placeholders typed only on the
+      // provider's own sign-in pages, which the site's button opens (a popup, a new tab, or this tab).
+      const p = providerSite(out.provider);
+      if (p) {
+        const site = siteOf(host);
+        const names = this.secrets.addLogin(p.site, out.username, out.password, "entered", p.hosts);
+        event("credentials", out.waitedMs);
+        this.signingIn.set(site, { by: "person", typed: true });
+        this.givenSignIn.set(site, { way: "provider", names: [names.username, names.password], told: 0, provider: p.provider, providerSite: p.site });
+        return await this.withEvidence(async () => undefined, label, () => this.givenBrief(site, null), { settle: false });
+      }
+    }
     if (out.kind === "credentials") {
       // The person typed their username and password on pilotfish's page instead of signing in in the
       // live view. They become placeholders scoped to this site: the model types {{...}} and never sees
@@ -6016,8 +6102,19 @@ export class Agent {
     const known = read.state === "known" ? read : null;
     const site = siteOf(safeHost(known ? known.input.url || known.snap.url : this.page.url));
     const seen = readSignIn(known ? known.snap.nodes : []);
-    const given = this.givenSignIn.get(site);
-    const codeShown = !!known && (known.result.category === "otp" || known.result.category === "magic_link" || seen.codeStep);
+    // The page says the way it was signing in by is used up (too many codes, "try other login methods"): no code is
+    // asked for; the model goes back to the site's sign-in options and asks again there, where the person can pick
+    // another way (Google, email, a password). Once a site.
+    const words = known ? pageText(known.snap, { maxChars: 4_000 }) : "";
+    const usedUp = !!known && SIGN_IN_WAY_USED_UP.test(words);
+    if (usedUp && !this.usedUpTold.has(site)) {
+      this.usedUpTold.add(site);
+      this.givenSignIn.delete(site);
+      this.note("ask_user");
+      return await this.withEvidence(async () => undefined, "ask_user: login (way used up)", () => `Not asked: ${usedUpBrief(site, words)}`, { settle: false });
+    }
+    const given = this.givenSignIn.get(site) ?? this.savedProviderLogin(site, seen);
+    const codeShown = !usedUp && !!known && (known.result.category === "otp" || known.result.category === "magic_link" || seen.codeStep);
     if (codeShown || (given && given.way !== "password" && signInUnclear(seen))) {
       const question = `Enter the code ${site} sent to sign in. ${clip(reason, 120)}`;
       const via = await this.askCodeOnPage(question);
@@ -6027,7 +6124,10 @@ export class Agent {
     }
     if (!given || given.told >= 2) return null;
     const has = (...w: SignInWay[]) => w.some((x) => seen.ways.includes(x));
-    const fits = signInUnclear(seen) || has("identifier_first") || (given.way === "password" ? has("password") : given.way === "phone" ? has("phone_code") : has("email_code"));
+    const fits =
+      given.way === "provider"
+        ? signInUnclear(seen) || seen.providers.some((p) => p.toLowerCase() === given.provider!.toLowerCase()) || !!(known && siteOf(safeHost(known.input.url || known.snap.url)) === given.providerSite)
+        : signInUnclear(seen) || has("identifier_first") || (given.way === "password" ? has("password") : given.way === "phone" ? has("phone_code") : has("email_code"));
     if (!fits) return null;
     given.told++;
     this.note("ask_user");
@@ -6047,11 +6147,43 @@ export class Agent {
     return ok(`The page asks for the code the site sent, so the person was asked for the code, not a login. Type it as {{user_code}} (valid for 5 minutes, on ${site} only) into the code field, then press its button.`, "ask_user: code received");
   }
 
+  /**
+   * A login saved for a provider the sign-in on screen offers ("Continue with Google" and a saved google.com login):
+   * used as if the person gave it in this run (their saved login is their standing yes for it), so they are not asked.
+   */
+  private savedProviderLogin(site: string, seen: SignInSeen): { way: "provider"; names: string[]; told: number; provider: string; providerSite: string } | undefined {
+    // The site's own saved login comes first.
+    if (this.secrets.namesFor(site).length) return undefined;
+    for (const name of seen.providers) {
+      const p = providerSite(name);
+      if (!p || p.site === site) continue;
+      const names = this.secrets.namesFor(`accounts.${p.site}`);
+      const u = names.find((n) => /user|email|login|entered_username/i.test(n));
+      const pw = names.find((n) => /pass/i.test(n));
+      if (!u || !pw) continue;
+      const g = { way: "provider" as const, names: [u, pw], told: 0, provider: p.provider, providerSite: p.site };
+      this.givenSignIn.set(site, g);
+      this.signingIn.set(site, { by: "person", typed: true });
+      return g;
+    }
+    return undefined;
+  }
+
   /** How to use the login the person gave for `site` (`givenSignIn`), and what to do when the page has no field for it. */
   private givenBrief(site: string, seen: SignInSeen | null): string {
     const g = this.givenSignIn.get(site);
     if (!g) return "";
     const where = "It may be inside a frame or a dialog on the page (look at the whole page).";
+    if (g.way === "provider") {
+      const [u, p] = g.names;
+      const who = g.provider!;
+      return (
+        `The person chose to sign in to ${site} with their ${who} account, and its login is at hand. Press ${site}'s own "Continue with ${who}" / "Sign in with ${who}" button (it may open a new tab or a popup: work in it). ` +
+        `On ${who}'s own sign-in page (${g.providerSite}), type {{${u}}} as the email or username and continue, then {{${p}}} as the password and continue (the values stay hidden from you; they work only on ${g.providerSite}). If ${who} lists the account already signed in, pick it. ` +
+        `When ${who} asks for a code, call ask_user with kind "code"; when it asks the person to approve on their phone, call ask_user with kind "login" saying so. A screen asking to let ${site} see the account's name and email is part of this sign-in: continue it. ` +
+        `Back on ${site}, carry on with the task. Never type these on ${site} itself. If ${who} refuses the sign-in, say what it showed.`
+      );
+    }
     if (g.way === "password") {
       const [u, p] = g.names;
       return `The person entered their sign-in details for ${site}. Type {{${u}}} into the username / email field and {{${p}}} into the password field (the values stay hidden from you; on a page that asks for the email or username first, type that and continue, then the password), then submit the form. ${where} Do not ask for them again.`;
@@ -6194,7 +6326,7 @@ export class Agent {
    * sign-in guards (where the form sends it; two tries per site for a saved authenticator key). Returns the
    * host of the field it was typed into, or null when it was not typed.
    */
-  private async fillCode(placeholder: string, refs: string[], rememberRef?: string): Promise<string | null> {
+  private async fillCode(placeholder: string, refs: string[], rememberRef?: string, { submit = true }: { submit?: boolean } = {}): Promise<string | null> {
     if (rememberRef) await this.tick(rememberRef).catch(() => undefined);
     const first = await this.handle(refs[0]!);
     const host = this.fieldHost(first.frame);
@@ -6229,11 +6361,21 @@ export class Agent {
     await this.page.type(first.frame, first.backendNodeId, chars.join(""), { clear: false, perKey: true });
     now = await held();
     if (!now) return host;
-    // A widget that does not move along by itself: each box that does not hold its character gets it on its own.
-    for (let i = 0; i < Math.min(boxes.length, chars.length); i++) {
-      if (now[i] === chars[i]) continue;
-      await this.page.type(boxes[i]!.frame, boxes[i]!.backendNodeId, chars[i]!, { clear: !!now[i], perKey: true });
+    // A widget that does not move along by itself, or that put a character twice (24 Nov: a shopping site's boxes held
+    // 444575 for 445753): each box that does not hold its character gets it on its own, read again before each (a fix
+    // may move the widget's own focus and write the next box), twice over at most.
+    for (let pass = 0; pass < 2; pass++) {
+      let fixed = false;
+      for (let i = 0; i < Math.min(boxes.length, chars.length); i++) {
+        const cur = await held();
+        if (!cur) return host;
+        if (cur[i] === chars[i]) continue;
+        await this.page.type(boxes[i]!.frame, boxes[i]!.backendNodeId, chars[i]!, { clear: !!cur[i], perKey: true });
+        fixed = true;
+      }
+      if (!fixed) break;
     }
+    if (!submit) return host;
     // Boxes submit nothing by themselves on many sites (a Verify button): the page still showing them a moment
     // later, filled, gets its submit button clicked, as Enter submits a single field.
     await sleep(1_200);
@@ -6594,6 +6736,76 @@ const AUTH_STEPS = new Set(["login", "otp", "push_approval", "magic_link", "pass
  */
 export function signInFinished({ category, url, passwordField }: { category?: string | null; url: string; passwordField: boolean }): boolean {
   return !AUTH_STEPS.has(category ?? "none") && !passwordField && !isAuthUrl(url);
+}
+
+/** An input that may be one box of a split code: a text, tel, number or password field at most 90 px wide, one character long when it says. */
+function codeBox(n: SnapNode): boolean {
+  if (n.tag !== "input" || !n.visible || !n.rect || n.rect.width <= 0 || n.rect.width > 90) return false;
+  if (!["text", "tel", "number", "password", ""].includes((n.attrs["type"] ?? "").toLowerCase())) return false;
+  const max = n.attrs["maxlength"];
+  return max === undefined || max === "" || max === "1";
+}
+
+/**
+ * The row of one-character code boxes `node` is one of, left to right: 4 to 8 such boxes (`codeBox`) under one of its
+ * nearest five ancestors (each box may sit in wrappers of its own), in one row, of one width (within half again).
+ * Null when `node` is no such box.
+ */
+export function codeBoxRow(node: SnapNode): SnapNode[] | null {
+  if (!codeBox(node)) return null;
+  let a = node.parent;
+  for (let up = 0; a && up < 5; up++, a = a.parent) {
+    const boxes: SnapNode[] = [];
+    const stack = [...a.children];
+    while (stack.length) {
+      const n = stack.pop()!;
+      if (n.tag === "input") {
+        if (n.frame === node.frame && codeBox(n)) boxes.push(n);
+        else if (n.visible && !["hidden", "checkbox", "radio", "submit", "button"].includes((n.attrs["type"] ?? "").toLowerCase())) return null;
+      }
+      stack.push(...n.children);
+    }
+    if (boxes.length > 8) return null;
+    if (boxes.length < 4) continue;
+    const h = Math.max(...boxes.map((b) => b.rect!.height));
+    const ys = boxes.map((b) => b.rect!.y);
+    const ws = boxes.map((b) => b.rect!.width);
+    if (Math.max(...ys) - Math.min(...ys) > h * 0.6 || Math.max(...ws) > Math.min(...ws) * 1.5) return null;
+    return boxes.sort((x, y) => x.rect!.x - y.rect!.x);
+  }
+  return null;
+}
+
+/** A control's name that sends a new code: "Resend", "Resend OTP", "Send again", "Get a new code", "Didn't get it?". */
+const RESEND = /\b(?:re-?send|send (?:it |the code |a new code |code )?again|(?:get|request|send) (?:a )?new (?:code|otp|link)|didn.?t (?:get|receive))/i;
+
+/** The page's resend control, as the model sees it: its ref, name and whether it can be pressed now; null when none shows. */
+export function resendControl(snap: Pick<Snapshot, "nodes">): { ref?: string; name: string; enabled: boolean } | null {
+  for (const n of snap.nodes) {
+    if (!n.visible || !(n.tag === "button" || n.tag === "a" || n.role === "button" || n.role === "link")) continue;
+    const name = (n.name || "").replace(/\s+/g, " ").trim();
+    if (!name || !RESEND.test(name)) continue;
+    return { ...(n.ref ? { ref: n.ref } : {}), name: name.slice(0, 60), enabled: !n.disabled && n.attrs["aria-disabled"] !== "true" };
+  }
+  return null;
+}
+
+/** What to do on a sign-in whose way the page says is used up (`SIGN_IN_WAY_USED_UP`), its words in `words`. */
+export function usedUpBrief(site: string, words: string): string {
+  const said = SIGN_IN_WAY_USED_UP.exec(words)?.[0] ?? "";
+  return `${site} says this way of signing in is used up${said ? ` ("${clip(said, 60)}")` : ""}, so another code would be refused too. Close this step (its close or back button, or "Edit" / "Change number") to get back to ${site}'s sign-in options, then call ask_user with kind "login" again, saying the code way is used up: the person can pick another way the page offers there (Google, email, a password).`;
+}
+
+/** What to do when the person asks for the code again. */
+export function resendBrief(host: string, kind: "code" | "link", control: { ref?: string; name: string; enabled: boolean } | null): string {
+  const what = kind === "link" ? "sign-in link" : "code";
+  const press = control
+    ? `Press its "${control.name}"${control.ref ? ` (${control.ref})` : ""}${control.enabled ? "" : `; it is not ready yet: wait for its countdown to end (the wait tool), then press it`}.`
+    : `Press its resend control ("Resend", "Resend code", "Send again", "Didn't get it?"); if it counts down, wait for the countdown to end first (the wait tool).`;
+  return (
+    `The person did not get the ${what} ${host} sent, and asks for a new one. ${press} Then call ask_user with kind "code" again for the new ${what}. Do not type an earlier one. ` +
+    `If the page says the tries are used up or to try another way, call ask_user with kind "login" instead, saying so: the person can pick another way the page offers.`
+  );
 }
 
 /** A button's name that sends a code (Verify, Continue, Submit, Sign in), and ones that never do (Resend, Back). */

@@ -119,7 +119,8 @@ describe("the sign-in question's field (signInAsk)", () => {
   });
 
   it("says the ways in words, and asks how when none could be read", () => {
-    expect(signInWaysText({ ways: ["password", "phone_code"], providers: ["Google"] })).toBe("a password (with an email, phone or username); a phone number and a code sent by text; or Google, in the browser");
+    expect(signInWaysText({ ways: ["password", "phone_code"], providers: ["Google"] })).toBe("a password (with an email, phone or username); a phone number and a code sent by text; or Google (your Google account's email and password, or in the browser)");
+    expect(signInWaysText({ ways: [], providers: ["Truecaller"] })).toBe("Truecaller, in the browser");
     expect(signInWaysText({ ways: [], providers: [] })).toBe("");
     expect(signInHowQuestion("food.example", { ways: [], providers: [], pageWords: "Login · Continue" })).toMatch(/^How do you sign in to food.example\? .*it shows: "Login · Continue".*Never a password or code here\.$/);
   });
@@ -209,6 +210,15 @@ describe("a phone number fitted to its field", () => {
     expect(fitPhone("7875710083", { maxLength: 15 })).toBe("7875710083");
     // A shown code that is not the number's own is not cut from it.
     expect(fitPhone("+44 7700 900123", { dialCode: "+91" })).toBe("447700900123");
+    // Given with "+" and its country code, for a digits-only or national field that shows no code: the national number
+    // (24 Nov: a tel-national, inputmode=numeric field with no code beside it got "91" and the 10 digits).
+    expect(fitPhone("+919876543210", { numeric: true })).toBe("9876543210");
+    expect(fitPhone("+91 98765 43210", { national: true })).toBe("9876543210");
+    expect(fitPhone("+1 (415) 555-0134", { numeric: true })).toBe("4155550134");
+    expect(fitPhone("+44 7700 900123", { national: true })).toBe("7700900123");
+    expect(fitPhone("+971 50 123 4567", { numeric: true })).toBe("501234567");
+    // Without its "+" the digits may be the national number itself: kept.
+    expect(fitPhone("9198765432", { numeric: true })).toBe("9198765432");
   });
 
   it("finds the country code shown by the field", async () => {

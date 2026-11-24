@@ -1329,10 +1329,15 @@ function detectOtp(m: Model, v: View, inIssuerFrame = false): OtpFinding | null 
     const split = ac.length >= 4 && ac.every((i) => i.maxLength === 1);
     return build(ac, [`autocomplete=one-time-code${split ? ` ×${ac.length}` : ""}`], true, split ? ac.length : undefined);
   }
-  // 2) 4–8 single-character boxes in one row.
-  const singles = candidates.filter((i) => i.maxLength === 1 && ["text", "tel", "number", "password"].includes(i.type));
+  // 2) 4–8 single-character boxes in one row. Boxes with no maxlength count when narrow (90 px at most) and the page's
+  // text asks for a code (24 Nov: a shopping site's six boxes had none, so its code page was no code prompt and the
+  // model typed the whole code into the first box).
+  const narrow = (i: InputInfo) => i.maxLength === null && !!i.node.rect && i.node.rect.width > 0 && i.node.rect.width <= 90;
+  const singles = candidates.filter((i) => (i.maxLength === 1 || (!!textCue && narrow(i))) && ["text", "tel", "number", "password"].includes(i.type));
   if (singles.length >= 4) {
-    for (let level = 1; level <= 3; level++) {
+    // Up to five levels: a box may sit in wrappers of its own (24 Nov: a shopping site's six boxes shared only their
+    // fourth ancestor, each in div > div > div of its own).
+    for (let level = 1; level <= 5; level++) {
       const groups = new Map<InterruptNode, InputInfo[]>();
       for (const s of singles) {
         const a = ancestors(s.node, level)[level - 1];
@@ -1346,6 +1351,9 @@ function detectOtp(m: Model, v: View, inIssuerFrame = false): OtpFinding | null 
         const ys = g.map((i) => i.node.rect!.y);
         const h = Math.max(...g.map((i) => i.node.rect!.height));
         if (Math.max(...ys) - Math.min(...ys) > h * 0.6) continue;
+        // Unsized boxes are one width (within half again), as a code's boxes are.
+        const ws = g.map((i) => i.node.rect!.width);
+        if (g.some(narrow) && Math.max(...ws) > Math.min(...ws) * 1.5) continue;
         const sorted = [...g].sort((a, b) => a.node.rect!.x - b.node.rect!.x);
         const ctx = textCue || authContext(m, v) || g.every(digitsOnlyOf) || inIssuerFrame;
         if (!ctx) continue;

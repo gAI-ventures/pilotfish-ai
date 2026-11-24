@@ -184,11 +184,12 @@ export class SecretBroker {
    * type, usable only on the site and its subdomains, masked like any secret. Replacing earlier ones
    * keeps the old values masked.
    */
-  addLogin(site: string, username: string, password: string, as: "entered" | "signup" = "entered"): { username: string; password: string } {
+  addLogin(site: string, username: string, password: string, as: "entered" | "signup" = "entered", hosts?: readonly string[]): { username: string; password: string } {
     const base = site.replace(/[^a-zA-Z0-9_.-]/g, "_");
     // A new account's details read as what they are in the form: its email and its password.
     const names = as === "signup" ? { username: `${base}.signup_email`, password: `${base}.signup_password` } : { username: `${base}.entered_username`, password: `${base}.entered_password` };
-    const allowedHosts = [site, `*.${site}`];
+    // `hosts`: a provider's sign-in pages (a Microsoft account's live.com and microsoftonline.com).
+    const allowedHosts = hosts?.length ? [...hosts] : [site, `*.${site}`];
     for (const [name, value] of [[names.username, username], [names.password, password]] as const) {
       const prev = this.secrets.get(name);
       if (prev?.value && prev.value !== value) this.retired.set(prev.value, name);

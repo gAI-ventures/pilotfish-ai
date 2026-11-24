@@ -258,6 +258,24 @@ describe("tier C: snapshot", () => {
     expect(r.input?.hint).toContain("•••1234");
   });
 
+  it("split boxes with no maxlength: a code prompt when narrow, one width, and the text asks for a code (24 Nov)", () => {
+    const boxes = (w: (i: number) => number) => Array.from({ length: 6 }, (_, i) => E("input", { type: "text" }, [], { ref: `e${i + 1}`, rect: { x: 400 + i * 50, y: 300, width: w(i), height: 40 } }));
+    const page = (b: InterruptNode[], words = "Please enter the verification code we've sent you on +91-98•••••210") =>
+      S("https://shop.example/login", [E("p", {}, [words]), E("div", { class: "otp" }, b), E("a", {}, ["Resend code"]), E("button", {}, ["Verify"])]);
+    const r = classify({ snapshot: page(boxes(() => 36)) });
+    expect(r).toMatchObject({ category: "otp", needs: "code" });
+    expect(r.input).toMatchObject({ kind: "code", length: 6, lengthFrom: "boxes", fieldRefs: ["e1", "e2", "e3", "e4", "e5", "e6"] });
+    // Each box in wrappers of its own, the row sharing only the boxes' fourth ancestor (a shopping site's, 24 Nov).
+    const deep = Array.from({ length: 6 }, (_, i) => E("div", { class: "cell" }, [E("div", {}, [E("div", { class: "wrap" }, [E("input", { type: "number" }, [], { ref: `d${i + 1}`, rect: { x: 400 + i * 60, y: 300, width: 33, height: 54 } })])])]));
+    const d = classify({ snapshot: S("https://shop.example/login", [E("p", {}, ["Please enter the verification code we've sent you on +91-98•••••210"]), E("div", { class: "row" }, deep), E("button", {}, ["Verify"])]) });
+    expect(d.input).toMatchObject({ length: 6, fieldRefs: ["d1", "d2", "d3", "d4", "d5", "d6"] });
+    // No code asked for in the page's words: six unsized boxes are no code prompt.
+    expect(classify({ snapshot: page(boxes(() => 36), "Enter your details") }).category).not.toBe("otp");
+    // Wide or of mixed widths (a form's fields): not a code's boxes.
+    expect(classify({ snapshot: page(boxes(() => 220)) }).input?.fieldRefs?.length ?? 0).not.toBe(6);
+    expect(classify({ snapshot: page(boxes((i) => (i === 2 ? 88 : 30))) }).input?.fieldRefs?.length ?? 0).not.toBe(6);
+  });
+
   it("says where a code's length came from: boxes and the page's text are exact, a lone field's maxlength only a bound (K6)", () => {
     const boxes = Array.from({ length: 6 }, (_, i) => E("input", { type: "text", maxlength: "1", inputmode: "numeric", "aria-label": `Digit ${i + 1}` }, [], { ref: `e${i + 1}`, rect: { x: 400 + i * 50, y: 300, width: 40, height: 48 } }));
     const split = S("https://a.example/verify", [E("h1", {}, ["Enter verification code"]), E("div", { class: "otp" }, boxes)]);
