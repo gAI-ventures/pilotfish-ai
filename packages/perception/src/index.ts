@@ -1,7 +1,7 @@
 // @pilotfish/perception — structure-first page perception for agents.
 export { captureSnapshot, withCaptureStats, currentCaptureStats, markSensitiveField, nodeKey, groupKey, textOf, pageAttrs, isCaptureMeta } from "./snapshot.js";
 export type { Snapshot, SnapNode, SnapshotOptions, SnapshotTimings } from "./snapshot.js";
-export { serializeSnapshot, pageText, pageLinks, findInSnapshot, findScored, describeNode, clip, controlStates, urlParams, choiceOf } from "./serialize.js";
+export { serializeSnapshot, pageText, openPanels, pageLinks, findInSnapshot, findScored, describeNode, clip, controlStates, urlParams, choiceOf } from "./serialize.js";
 export type { FindHit } from "./serialize.js";
 export type { SerializeOptions } from "./serialize.js";
 export { handleFor, resolveHandle } from "./handles.js";

@@ -2512,7 +2512,8 @@ export class Agent {
     if (opts.waitLoadingMs) await this.loadingDone(opts.waitLoadingMs);
     const snap = await captureSnapshot(this.page, { viewportBand: Infinity });
     return {
-      text: this.secrets.scrub(pageText(snap, { maxChars })),
+      // A drawer or dialog open on top is read first: what the person sees, before the long page under it.
+      text: this.secrets.scrub(pageText(snap, { maxChars, overlaysFirst: true })),
       controls: controlStates(snap).map((l) => this.secrets.scrub(l)),
       params: this.secrets.scrub(urlParams(snap.url)),
     };

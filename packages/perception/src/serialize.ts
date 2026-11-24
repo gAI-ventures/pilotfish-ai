@@ -796,6 +796,10 @@ export function shownHref(href: string, pageUrl = ""): string {
 /** How pageText lays out the page. */
 export interface PageTextOptions {
   maxChars?: number;
+  /** What is open on top of the page (`openPanels`: a dialog, or a drawer or panel drawn fixed over a good part of the screen) first. */
+  overlaysFirst?: boolean;
+  /** Elements left out of the read (with what is in them). */
+  leaveOut?: SnapNode[];
   /**
    * Lists and tables keep their shape: a list item starts "- " and a table row is "| a | b |", so a reader can tell
    * which value sits in which column of a price list or a specs table (plain text runs the cells together).
@@ -833,10 +837,22 @@ function mainNode(root: SnapNode): SnapNode | null {
 }
 
 /** Plain readable text of the page (for extraction), with headings marked. */
-export function pageText(snap: Snapshot, { maxChars = 60_000, structured = false, mainFirst = false }: PageTextOptions = {}): string {
+export function pageText(snap: Snapshot, { maxChars = 60_000, structured = false, mainFirst = false, overlaysFirst = false, leaveOut = [] }: PageTextOptions = {}): string {
+  if (overlaysFirst) {
+    // What is open on top of the page (a drawer, a side panel, a dialog) first, then the page under it without it: a
+    // capped read of a long page behind a drawer otherwise ends in the page's carousels before the drawer's own text
+    // (24 Nov: a cart drawer's "Pay ₹387" missing from the end check's PAGE TEXT).
+    const panels = openPanels(snap);
+    if (panels.length) {
+      const top = panels.map((p) => pageText({ ...snap, root: { ...p, children: [p] } as SnapNode }, { maxChars: Math.floor(maxChars / 2), structured })).filter(Boolean).join("\n\n");
+      const under = pageText(snap, { maxChars, structured, mainFirst, leaveOut: panels });
+      const joined = top ? `(Open on top of the page:)\n${top}\n\n---\n(The page under it:)\n${under}` : under;
+      return joined.length <= maxChars ? joined : joined.slice(0, maxChars).replace(/[\uD800-\uDBFF]$/, "");
+    }
+  }
   const out: string[] = [];
   let chars = 0;
-  const skip = new Set<SnapNode>();
+  const skip = new Set<SnapNode>(leaveOut);
   let inCell = 0;
   const walk = (n: SnapNode) => {
     for (const c of n.children) {
@@ -915,6 +931,34 @@ export function pageText(snap: Snapshot, { maxChars = 60_000, structured = false
   // result stays valid JSON (the string was well-formed before the cut, so only the boundary is at risk).
   const cut = joined.slice(0, maxChars);
   return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * What is open on top of the page, outermost first (at most 3): a dialog (`<dialog>`, role dialog or alertdialog,
+ * aria-modal), or an element drawn fixed (`__fixed`) that covers at least a sixth of the screen and holds some text
+ * (a cart drawer, a side panel). A fixed header or a cookie bar is too small to count.
+ */
+export function openPanels(snap: Snapshot): SnapNode[] {
+  const vw = snap.viewport.width || 1;
+  const vh = snap.viewport.height || 1;
+  const out: SnapNode[] = [];
+  const within = (n: SnapNode) => {
+    for (let a = n.parent; a; a = a.parent) if (out.includes(a)) return true;
+    return false;
+  };
+  for (const n of snap.nodes) {
+    if (out.length >= 3) break;
+    if (!n.visible || !n.rect || n.nodeType !== 1) continue;
+    const dialog = n.tag === "dialog" || n.role === "dialog" || n.role === "alertdialog" || n.attrs["aria-modal"] === "true";
+    if (!dialog && n.attrs["__fixed"] !== "1") continue;
+    const r = n.rect;
+    const w = Math.max(0, Math.min(r.x + r.width, vw) - Math.max(r.x, 0));
+    const h = Math.max(0, Math.min(r.y + r.height, vh) - Math.max(r.y, 0));
+    if (w * h < (vw * vh) / 6) continue;
+    if (within(n) || textOf(n, 41).length < 40) continue;
+    out.push(n);
+  }
+  return out;
 }
 
 /**

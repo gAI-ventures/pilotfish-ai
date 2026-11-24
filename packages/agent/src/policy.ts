@@ -382,6 +382,15 @@ const HELD: Record<WriteKind, RegExp> = {
   transfer: /\b(don'?t|do not|never|without) (transfer|transferring|send money|withdraw)\b|\bbefore (you )?(transfer|transferring)\b/i,
 };
 
+/**
+ * The person asks to be told at the pay step, to pay there themselves ("notify me at payment", "tell me when you reach
+ * checkout", "ping me before paying"): unlike "don't pay", the run ends at that step by handing it to them.
+ */
+const NOTIFY_AT_PAY = /\b(notify|tell|ping|alert|call|ask|wake|show)\b[^.\n]{0,12}\b(at|before|on|when (you )?(reach|get to|are at|come to))\s+(the\s+)?(payment|checkout|check out|pay(ment)? (page|step|screen|option)|paying)\b|\b(and|then)\s+(show|bring|hand)\s+(it|this|that)?\s*(here|to me)\s+(for|to)\s+(payment|pay)\b/i;
+export function notifyAtPay(text: string): boolean {
+  return NOTIFY_AT_PAY.test(text);
+}
+
 /** The message asks for a final step of its own (to pay, buy, book, send, delete, cancel, transfer). */
 export function asksForWrite(text: string): boolean {
   return PAY_INTENT.test(text) || Object.values(STEP_INTENT).some((re) => re.test(text));

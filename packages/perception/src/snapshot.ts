@@ -777,6 +777,9 @@ function buildDocument(
         // Only where it applies: not on a plain inline box, an internal table box (a row) or a ruby box.
         if (styleIdx(li, "content-visibility") === "hidden" && !/^(inline$|table-|ruby)/.test(display ?? "")) foldsBelow[i] = true;
         if (styleIdx(li, "cursor") === "pointer") node.attrs["__cursor"] = "pointer";
+        // Drawn over the page wherever it scrolls (a drawer, a side panel, a dialog's sheet): `pageText` reads an open
+        // one first.
+        if (styleIdx(li, "position") === "fixed") node.attrs["__fixed"] = "1";
         if (styleIdx(li, "pointer-events") === "none") node.attrs["__pe"] = "none";
         const ox = styleIdx(li, "overflow-x");
         const oy = styleIdx(li, "overflow-y");

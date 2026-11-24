@@ -594,3 +594,11 @@ describe("DefaultPolicy: a sign-in code sent to the person is not a send (24 Nov
     for (const words of ["Send message", "Send", "Send email", "Send gift code to a friend", "Post", "Share"]) expect(await onPage("click", words), words).toMatchObject({ kind: "confirm", write: "send" });
   });
 });
+
+describe("notifyAtPay", () => {
+  it("the person asks to be told at the pay step, to pay there themselves", async () => {
+    const { notifyAtPay } = await import("./policy.js");
+    for (const t of ["add 55% dark chocolate and notify me at payment", "tell me when you reach checkout", "ping me before paying", "select upi as payment and show here for payment", "alert me at the payment page"]) expect(notifyAtPay(t)).toBe(true);
+    for (const t of ["go to checkout and stop before paying", "don't pay", "pay with my saved card", "notify me when the price drops"]) expect(notifyAtPay(t)).toBe(false);
+  });
+});
