@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { SnapNode } from "@pilotfish/perception";
 import { codeMissNote, notAField, stillSigningIn } from "./agent.js";
+import { readSignIn, type SignInNode } from "./sign-in.js";
 
 type N = Pick<SnapNode, "visible" | "tag" | "role" | "name" | "text" | "attrs" | "parent">;
 const el = (tag: string, o: Partial<N> = {}): N => ({ visible: true, tag, role: "", name: "", attrs: {}, parent: null, ...o });
@@ -52,6 +53,33 @@ describe("stillSigningIn", () => {
     // A page's own notice about codes, not in a dialog or a heading (a bank's footer).
     expect(stillSigningIn([text("Never share the OTP sent to your phone with anyone.", el("footer"))])).toBe(false);
     expect(stillSigningIn([el("button", { role: "button", name: "Log in", visible: false })])).toBe(false);
+  });
+});
+
+describe("readSignIn on a code page", () => {
+  const dialog = { tag: "dialog", role: "dialog", attrs: {}, parent: null };
+  const inD = (n: Record<string, unknown>) => ({ attrs: {}, parent: dialog, ...n }) as unknown as SignInNode;
+  it("a code dialog whose field is not shown is the code step, not a sign-in form", () => {
+    const seen = readSignIn([
+      dialog as unknown as SignInNode,
+      inD({ tag: "h2", role: "heading", name: "OTP Verification" }),
+      inD({ tag: "button", role: "button", name: "Edit phone number" }),
+      inD({ tag: "#text", text: "OTP has been sent to +91 98•••••210" }),
+      inD({ tag: "button", role: "button", name: "Send SMS" }),
+    ]);
+    expect(seen.codeStep).toBe(true);
+    // A page with no field and no code words is not.
+    expect(readSignIn([{ tag: "h1", role: "heading", name: "Shop by Category", attrs: {} }]).codeStep).toBe(false);
+  });
+
+  it("a footer's follow-us links to a provider's own pages are no sign-in providers; its sign-in buttons and pages are", () => {
+    const seen = readSignIn([
+      { tag: "a", role: "link", name: "Facebook", attrs: { href: "https://www.facebook.com/someshop" } },
+      { tag: "a", role: "link", name: "LinkedIn", attrs: { href: "https://www.linkedin.com/company/someshop" } },
+      { tag: "a", role: "link", name: "Google", attrs: { href: "https://accounts.google.com/o/oauth2/v2/auth?client_id=x" } },
+      { tag: "button", role: "button", name: "Continue with Apple", attrs: {} },
+    ]);
+    expect(seen.providers).toEqual(["Google", "Apple"]);
   });
 });
 

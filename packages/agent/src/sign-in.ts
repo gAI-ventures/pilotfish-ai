@@ -149,6 +149,38 @@ function providerOf(name: string): string | null {
 }
 
 /**
+ * A link to an account provider's own page that is no sign-in (a "Facebook" or "LinkedIn" icon in a footer, to the
+ * site's profile there): named like a provider, it offers no way to sign in to this site (24 Nov: a code dialog's page
+ * offered Facebook and LinkedIn on the sign-in card from its footer's follow-us links).
+ */
+function profileLink(n: SignInNode, provider: string): boolean {
+  if (!(n.tag === "a" || n.role === "link")) return false;
+  let u: URL;
+  try {
+    u = new URL(n.attrs["href"] ?? "");
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(u.protocol)) return false;
+  const p = providerSite(provider);
+  const host = u.hostname.toLowerCase();
+  const theirs = p ? host === p.site || host.endsWith(`.${p.site}`) : host.includes(provider.toLowerCase());
+  return theirs && !/(^|\/)(oauth2?|o\/oauth2|dialog\/oauth|auth(orize)?|log-?in|sign-?in|sso|uas\/oauth2)(\/|$)/i.test(u.pathname);
+}
+
+/** Words asking for a sign-in code, or saying one was sent: in a heading or a dialog, a code step is open. */
+export const CODE_STEP_WORDS =
+  /\botp\b|\bone[- ]time (?:password|code|passcode|pin)\b|\b(?:verification|security|sign[- ]?in|log ?in|login|confirmation) code\b|\benter (?:the |your )?(?:\d[- ]digit )?(?:code|passcode|pin)\b|\b(?:code|passcode)\b[^.!?\n]{0,40}\b(?:sent|texted|emailed)\b|\b(?:sent|texted|emailed)\b[^.!?\n]{0,40}\b(?:code|passcode)\b|\bverify (?:your )?(?:phone|mobile|number|e-?mail|account|identity)\b/i;
+
+/** A shown heading, or a short line of text in a dialog, that asks for a sign-in code (`CODE_STEP_WORDS`). */
+export function asksForCode(n: SignInNode): boolean {
+  if (n.visible === false || n.folded) return false;
+  const heading = n.role === "heading" || /^h[1-4]$/i.test(n.tag);
+  const words = heading ? (n.name ?? "") : n.text && n.text.length <= 200 && inDialog(n) ? n.text : "";
+  return !!words && CODE_STEP_WORDS.test(words);
+}
+
+/**
  * The ways the sign-in on screen offers, read from its visible fields, buttons, links and words, in every frame the
  * snapshot holds (a sign-in form in a cross-origin iframe, accounts.<site>, is read like the page's own). A dialog with
  * a sign-in field in it is the sign-in; the page behind it is left out. A password field makes the form a password
@@ -192,7 +224,8 @@ export function readSignIn(all: Iterable<SignInNode>): SignInSeen & { codeStep: 
     if (EMAIL_CODE_SWITCH.test(name)) add("email_code", i);
     if (PASSWORD_SWITCH.test(name)) add("password", i);
     if (PASSKEY_SWITCH.test(name)) add("passkey", i);
-    const p = providerOf(name);
+    const found = providerOf(name);
+    const p = found && !profileLink(n, found) ? found : null;
     if (p && !providers.includes(p)) providers.push(p);
     if (p || PHONE_SWITCH.test(name) || EMAIL_CODE_SWITCH.test(name) || EMAIL_SWITCH.test(name) || PASSWORD_SWITCH.test(name) || /\b(sign ?in|log ?in|login|continue|next|otp|code)\b/i.test(name)) word(name);
   });
@@ -222,7 +255,9 @@ export function readSignIn(all: Iterable<SignInNode>): SignInSeen & { codeStep: 
   });
   const rest = [...at.entries()].filter(([w]) => w !== first).sort((a, b) => a[1] - b[1]).map(([w]) => w);
   const ways = [...(first ? [first] : []), ...rest];
-  const codeStep = !pw && !ids.length && fields.some((x) => x.f === "code");
+  // A code field, or (no field shows at all: one drawn over, in a widget of its own) a heading or dialog line asking
+  // for the code the site sent (24 Nov: a code dialog whose field was drawn over got a sign-in card, not a code box).
+  const codeStep = !pw && !ids.length && (fields.some((x) => x.f === "code") || (!fields.length && nodes.some(asksForCode)));
   const pageWords = words.join(" · ").slice(0, 200);
   return { ways, providers: providers.slice(0, 8), ...(pageWords ? { pageWords } : {}), codeStep };
 }

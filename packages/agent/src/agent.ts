@@ -71,7 +71,7 @@ import {
   type SignupDetails,
   type SolveChallenge,
 } from "./interventions.js";
-import { asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, providerSite, readSignIn, SIGN_IN_WAY_USED_UP, signInHowWords, signInPreference, signInUnclear, type SignInSeen, type SignInWay } from "./sign-in.js";
+import { asksForCode, asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, providerSite, readSignIn, SIGN_IN_WAY_USED_UP, signInHowWords, signInPreference, signInUnclear, type SignInSeen, type SignInWay } from "./sign-in.js";
 import { failureLines, isRetryLabel, RepeatFailures, repeatFailureNudge } from "./repeat-failure.js";
 import type { ElementHandle, InterruptInput, Interruption } from "@pilotfish/perception";
 
@@ -6780,27 +6780,17 @@ export function signInFinished({ category, url, passwordField }: { category?: st
 
 /** A control that only offers signing in ("Log in", "Sign in", "Login / Sign up"): a page showing one is not signed in. */
 const SIGN_IN_CONTROL = /^(?:log ?in|login|sign ?in|signin)(?: ?(?:\/|or|&|and) ?(?:sign ?up|register|join|create (?:an )?account))?$|^(?:sign ?up|register|join) ?(?:\/|or|&|and) ?(?:log ?in|login|sign ?in)$/i;
-/** Words asking for a sign-in code, or saying one was sent: in a heading or a dialog, a code step still open. */
-const CODE_STEP_WORDS =
-  /\botp\b|\bone[- ]time (?:password|code|passcode|pin)\b|\b(?:verification|security|sign[- ]?in|log ?in|login|confirmation) code\b|\benter (?:the |your )?(?:\d[- ]digit )?(?:code|passcode|pin)\b|\b(?:code|passcode)\b[^.!?\n]{0,40}\b(?:sent|texted|emailed)\b|\b(?:sent|texted|emailed)\b[^.!?\n]{0,40}\b(?:code|passcode)\b|\bverify (?:your )?(?:phone|mobile|number|e-?mail|account|identity)\b/i;
-
 /**
  * Whether a page still shows signing in under way, though no auth step was classified on it: a shown control that
  * only offers signing in, or a heading or dialog asking for a sign-in code. The evidence a sign-in finished is that
  * neither shows (`signInCheck`).
  */
 export function stillSigningIn(nodes: Iterable<Pick<SnapNode, "visible" | "tag" | "role" | "name" | "text" | "attrs" | "parent">>): boolean {
-  const inDialog = (n: { parent: Pick<SnapNode, "tag" | "role" | "attrs" | "parent"> | null }) => {
-    for (let a = n.parent; a; a = a.parent) if (a.tag === "dialog" || a.role === "dialog" || a.role === "alertdialog" || a.attrs["aria-modal"] === "true") return true;
-    return false;
-  };
   for (const n of nodes) {
     if (!n.visible) continue;
     const control = n.tag === "button" || n.tag === "a" || n.role === "button" || n.role === "link";
     if (control && SIGN_IN_CONTROL.test((n.name ?? "").replace(/\s+/g, " ").trim())) return true;
-    const heading = n.role === "heading" || /^h[1-4]$/.test(n.tag);
-    const words = heading ? n.name : n.text && n.text.length <= 200 && inDialog(n) ? n.text : "";
-    if (words && CODE_STEP_WORDS.test(words)) return true;
+    if (asksForCode(n)) return true;
   }
   return false;
 }
