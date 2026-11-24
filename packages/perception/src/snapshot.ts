@@ -174,6 +174,32 @@ function clipsToNothing(clip: string): boolean {
   return n.length === 4 && (n[2]! - n[0]! <= 1 || n[1]! - n[3]! <= 1);
 }
 
+/** Input types a person types text into. */
+const TEXT_INPUT_TYPES = new Set(["", "text", "tel", "number", "password", "email", "search"]);
+
+/**
+ * A transparent (opacity 0) text input laid over the box that draws it: positioned, taking pointer events, of a real
+ * size, and covering most of its nearest laid-out ancestor. Code entry widgets do this (one input for the whole code,
+ * invisible over a row of drawn boxes that only show its characters); hidden, the model had no field to type the code
+ * into, and the sign-in read as finished with the code page still up. A honeypot (off the page, tiny, or not over
+ * what its box shows) does not fit.
+ */
+export function transparentField(node: Pick<SnapNode, "tag" | "attrs" | "rect" | "parent">, position: string, pointerEvents: string): boolean {
+  if (node.tag !== "input" || !TEXT_INPUT_TYPES.has((node.attrs["type"] ?? "").toLowerCase())) return false;
+  if (!/^(absolute|fixed)$/.test(position) || pointerEvents === "none") return false;
+  const r = node.rect;
+  if (!r || r.width < 24 || r.height < 16) return false;
+  let box: Pick<SnapNode, "rect" | "visible" | "parent"> | null = node.parent;
+  while (box && !box.rect) box = box.parent;
+  const b = box?.rect;
+  if (!box?.visible || !b || b.width <= 0 || b.height <= 0) return false;
+  const w = Math.min(r.x + r.width, b.x + b.width) - Math.max(r.x, b.x);
+  const h = Math.min(r.y + r.height, b.y + b.height) - Math.max(r.y, b.y);
+  if (w <= 0 || h <= 0) return false;
+  // Almost all of the input is over its box, and it covers most of that box.
+  return w * h >= 0.8 * r.width * r.height && w * h >= 0.5 * b.width * b.height;
+}
+
 const INTERACTIVE_ROLES = new Set([
   "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox", "option", "menuitem",
   "menuitemcheckbox", "menuitemradio", "tab", "switch", "slider", "spinbutton", "treeitem", "scrollbar", "menubar", "menu",
@@ -731,7 +757,11 @@ function buildDocument(
         if (display === "none" || visibility === "hidden" || visibility === "collapse") node.visible = false;
         // A block-level box (capture metadata): with the box's position, where one element's text is stacked in parts.
         if (/^(block|flex|grid|list-item|table|flow-root)/.test(display ?? "")) node.attrs["__block"] = "1";
-        if (opacity === 0) {
+        if (opacity === 0 && transparentField(node, styleIdx(li, "position"), styleIdx(li, "pointer-events"))) {
+          // A field the page draws over with its own look (a row of code boxes): what the person sees is the page's
+          // drawing, what takes their keys is this input, so it stays a field the model can type into.
+          node.attrs["__overlay"] = "1";
+        } else if (opacity === 0) {
           node.visible = false;
           hiddenSubtree[i] = true; // opacity hides descendants too
         }

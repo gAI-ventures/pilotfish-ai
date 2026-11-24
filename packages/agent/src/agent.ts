@@ -1376,6 +1376,8 @@ export class Agent {
   private readonly givenSignIn = new Map<string, { way: "password" | "phone" | "email" | "provider"; names: string[]; told: number; provider?: string; providerSite?: string }>();
   /** Sites whose used-up sign-in way (too many codes, "try other login methods") the model was told about once. */
   private readonly usedUpTold = new Set<string>();
+  /** Why the last code `fillCode` typed was not submitted (the page's field or boxes did not hold it whole), else null. */
+  private codeMiss: string | null = null;
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
   /** Sites a saved recovery code was typed on in this run: one per site, then the person. */
   private readonly recoveryTried = new Set<string>();
@@ -3174,6 +3176,8 @@ export class Agent {
           const { used } = sub;
           // A phone number typed from a placeholder goes in as the field takes it (fitPhone).
           const text = this.phoneFor(String(input["text"]), sub, tn);
+          const pressed = used.length && tn ? notAField(tn, String(input["ref"]), used) : null;
+          if (pressed) return err(pressed);
           const refused = await this.guardSecrets(used, h, host, tn);
           if (refused) return err(refused);
           this.expectAsync = !!tn && (tn.role === "combobox" || tn.role === "searchbox" || !!tn.attrs["aria-autocomplete"] || !!tn.attrs["list"] || !!tn.attrs["aria-haspopup"] || input["submit"] === true);
@@ -4437,6 +4441,8 @@ export class Agent {
       const kind: FillTarget["kind"] =
         node?.tag === "select" ? "select" : type === "checkbox" || type === "radio" || ["checkbox", "radio", "switch"].includes(node?.role ?? "") ? "check" : "text";
       const sub = this.secrets.substitute(f.value, host);
+      const pressed = kind === "text" && sub.used.length && node ? notAField(node, f.ref, sub.used) : null;
+      if (pressed) return err(pressed);
       sub.used.forEach((u) => used.add(u));
       targets.push({ ref: f.ref, value: f.value, text: this.phoneFor(f.value, sub, node), kind, node, h, secret: sub.used.length > 0 || type === "password", host });
     }
@@ -4537,7 +4543,9 @@ export class Agent {
       () =>
         typed
           ? `The code went into the ${refs.length} boxes, one character each (${refs.join(", ")})${submit && submit !== "enter" ? `; clicked ${submit}` : ""}. Type it once only: if the page says it is wrong or expired, ask for a new one.`
-          : "The code was NOT typed (refused by the sign-in guards for this field).",
+          : this.codeMiss
+            ? codeMissNote(this.codeMiss)
+            : "The code was NOT typed (refused by the sign-in guards for this field).",
     );
     return typed ? outcome : { ...outcome, isError: true, summary: "type code: not typed" };
   }
@@ -4821,6 +4829,10 @@ export class Agent {
     // asked for): an email-then-code form counted as signed in before the code page came.
     if (s.typed && snap.nodes.some((n) => n.visible && n.tag === "input" && !!n.value && this.secrets.scrub(n.value) !== n.value)) return;
     if (!signInFinished({ category: c.category, url: snap.url, passwordField: hasPasswordField(snap) })) return;
+    // Past every auth step the classifier knows is not yet signed in: the page must not still offer signing in or ask
+    // for a code (24 Nov: a code page whose field the page drew over read as no auth step, and the run reported
+    // "Signed in" with the site's header still showing its login button and the code dialog still open).
+    if (stillSigningIn(snap.nodes)) return;
     // The sign-in under way is kept until this reading's document is still the page's after every read below: a page
     // that moves on meanwhile is decided on a later look, never with this one's address and another's cookies.
     if (s.cookies) {
@@ -5271,6 +5283,7 @@ export class Agent {
       // Typed for them, and the prompt still shows: the code may not have gone in whole, or the page wants its button.
       // One code from the person is used fully before another is asked for (three codes were once asked for one
       // sign-in, each typed short).
+      if (personGave && this.codeMiss) return { note: codeMissNote(this.codeMiss) };
       if (personGave)
         return {
           note: `The person's code was typed into the code field on ${host}, but ${out.verified ? "the page still asks for it" : "the page did not move on"}${unverified}. Look at the page: if the page says the code is wrong or has expired, call ask_user with kind "code" for a new one. Otherwise (a box empty, a Verify / Continue / Submit button not pressed) type {{user_code}} again (it stays valid for 5 minutes, on ${host} only) and press that button; do not ask the person for another code first.`,
@@ -6327,13 +6340,31 @@ export class Agent {
    * host of the field it was typed into, or null when it was not typed.
    */
   private async fillCode(placeholder: string, refs: string[], rememberRef?: string, { submit = true }: { submit?: boolean } = {}): Promise<string | null> {
+    this.codeMiss = null;
     if (rememberRef) await this.tick(rememberRef).catch(() => undefined);
     const first = await this.handle(refs[0]!);
     const host = this.fieldHost(first.frame);
     const { text, used } = this.secrets.substitute(placeholder, host);
     if (await this.guardSecrets(used, first, host, (this.turnSnapshot ?? this.lastSnapshot)?.byRef.get(refs[0]!))) return null;
+    const want = text.replace(/[\s-]/g, "");
     if (refs.length === 1) {
-      await this.page.type(first.frame, first.backendNodeId, text, { clear: true, submit: true });
+      // Read back before anything is pressed: a code that did not go in whole is never submitted (a wrong code burns
+      // one of the site's tries). Null: the field is gone (the page took the code and moved on). An empty field after
+      // typing is left as it is: a widget that sends the code by itself once it is whole may clear it (typing it again
+      // would send it twice).
+      const value = () => first.frame.callOnNode<string>(first.backendNodeId, "function(){ return String(this.value ?? this.textContent ?? '') }").catch(() => null);
+      await this.page.type(first.frame, first.backendNodeId, text, { clear: true });
+      let got = await value();
+      if (got !== null && got && got.replace(/[\s-]/g, "") !== want) {
+        await this.page.type(first.frame, first.backendNodeId, text, { clear: true, perKey: true });
+        got = await value();
+      }
+      if (got !== null && got && got.replace(/[\s-]/g, "") !== want) {
+        await this.page.type(first.frame, first.backendNodeId, "", { clear: true }).catch(() => undefined);
+        this.codeMiss = `the field held ${got.replace(/[\s-]/g, "").length} of the code's ${want.length} characters after typing, twice`;
+        return null;
+      }
+      if (submit && got) await this.page.press("Enter");
       return host;
     }
     // Split boxes take one character each (a space or dash would take a box of its own), the way a person fills them:
@@ -6374,6 +6405,15 @@ export class Agent {
         fixed = true;
       }
       if (!fixed) break;
+    }
+    // Every box read back before anything is pressed: a code the boxes do not hold whole is cleared, never submitted.
+    const final = await held();
+    // Gone, or emptied by the widget itself (one that sends the code once it is whole may clear its boxes): taken.
+    if (!final || final.every((v) => !v)) return host;
+    if (final.slice(0, chars.length).join("") !== chars.join("")) {
+      for (let i = boxes.length - 1; i >= 0; i--) if (final[i]) await this.page.type(boxes[i]!.frame, boxes[i]!.backendNodeId, "", { clear: true }).catch(() => undefined);
+      this.codeMiss = `${final.filter((v, i) => v === chars[i]).length} of the ${boxes.length} boxes held their character after typing, each fixed twice`;
+      return null;
     }
     if (!submit) return host;
     // Boxes submit nothing by themselves on many sites (a Verify button): the page still showing them a moment
@@ -6736,6 +6776,65 @@ const AUTH_STEPS = new Set(["login", "otp", "push_approval", "magic_link", "pass
  */
 export function signInFinished({ category, url, passwordField }: { category?: string | null; url: string; passwordField: boolean }): boolean {
   return !AUTH_STEPS.has(category ?? "none") && !passwordField && !isAuthUrl(url);
+}
+
+/** A control that only offers signing in ("Log in", "Sign in", "Login / Sign up"): a page showing one is not signed in. */
+const SIGN_IN_CONTROL = /^(?:log ?in|login|sign ?in|signin)(?: ?(?:\/|or|&|and) ?(?:sign ?up|register|join|create (?:an )?account))?$|^(?:sign ?up|register|join) ?(?:\/|or|&|and) ?(?:log ?in|login|sign ?in)$/i;
+/** Words asking for a sign-in code, or saying one was sent: in a heading or a dialog, a code step still open. */
+const CODE_STEP_WORDS =
+  /\botp\b|\bone[- ]time (?:password|code|passcode|pin)\b|\b(?:verification|security|sign[- ]?in|log ?in|login|confirmation) code\b|\benter (?:the |your )?(?:\d[- ]digit )?(?:code|passcode|pin)\b|\b(?:code|passcode)\b[^.!?\n]{0,40}\b(?:sent|texted|emailed)\b|\b(?:sent|texted|emailed)\b[^.!?\n]{0,40}\b(?:code|passcode)\b|\bverify (?:your )?(?:phone|mobile|number|e-?mail|account|identity)\b/i;
+
+/**
+ * Whether a page still shows signing in under way, though no auth step was classified on it: a shown control that
+ * only offers signing in, or a heading or dialog asking for a sign-in code. The evidence a sign-in finished is that
+ * neither shows (`signInCheck`).
+ */
+export function stillSigningIn(nodes: Iterable<Pick<SnapNode, "visible" | "tag" | "role" | "name" | "text" | "attrs" | "parent">>): boolean {
+  const inDialog = (n: { parent: Pick<SnapNode, "tag" | "role" | "attrs" | "parent"> | null }) => {
+    for (let a = n.parent; a; a = a.parent) if (a.tag === "dialog" || a.role === "dialog" || a.role === "alertdialog" || a.attrs["aria-modal"] === "true") return true;
+    return false;
+  };
+  for (const n of nodes) {
+    if (!n.visible) continue;
+    const control = n.tag === "button" || n.tag === "a" || n.role === "button" || n.role === "link";
+    if (control && SIGN_IN_CONTROL.test((n.name ?? "").replace(/\s+/g, " ").trim())) return true;
+    const heading = n.role === "heading" || /^h[1-4]$/.test(n.tag);
+    const words = heading ? n.name : n.text && n.text.length <= 200 && inDialog(n) ? n.text : "";
+    if (words && CODE_STEP_WORDS.test(words)) return true;
+  }
+  return false;
+}
+
+const PRESS_INPUT_TYPES = new Set(["button", "submit", "reset", "checkbox", "radio", "image", "file", "range", "color"]);
+const PRESS_ROLES = new Set(["button", "link", "checkbox", "radio", "switch", "tab", "menuitem", "option"]);
+
+/**
+ * Why a sign-in value (a placeholder: a code, a phone number, a password) may not be typed into `node`, or null when it
+ * may: a button, a link or another control that is pressed, not typed into. Typing clicks its target first, so the
+ * press happens and the keys go nowhere (24 Nov: a code typed into a code page's "Edit phone number" button sent the
+ * page back to the number, twice, and no code ever reached the site). Elements that may take text (inputs, text
+ * areas, editable or unnamed elements) are let through.
+ */
+export function notAField(node: Pick<SnapNode, "tag" | "role" | "name" | "attrs">, ref: string, used: string[]): string | null {
+  const type = (node.attrs["type"] ?? "").toLowerCase();
+  const editable = node.attrs["contenteditable"] !== undefined && node.attrs["contenteditable"] !== "false";
+  if (node.tag === "textarea" || editable || ["textbox", "searchbox", "combobox", "spinbutton"].includes(node.role)) return null;
+  if (node.tag === "input" && !PRESS_INPUT_TYPES.has(type)) return null;
+  const what = node.tag === "input" ? `a ${type} input` : node.tag === "a" || node.role === "link" ? "a link" : node.tag === "button" ? "a button" : PRESS_ROLES.has(node.role) ? `a ${node.role}` : "";
+  if (!what) return null;
+  const name = (node.name || node.attrs["aria-label"] || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  return (
+    `Refused: ${ref} is ${what}${name ? ` ("${name}")` : ""}, not a field: typing ${used.map((u) => `{{${u}}}`).join(", ")} there would press it and type nothing. ` +
+    `Type it into the input that takes it (a code page may draw its boxes over one input, listed near them). If no field for it shows, call ask_user with kind "login" saying so, rather than pressing anything.`
+  );
+}
+
+/** What the model is told when a code was typed but not held whole by the page (`fillCode`), so nothing was submitted. */
+export function codeMissNote(miss: string): string {
+  return (
+    `The code was typed but NOT submitted: ${miss}, so it was cleared and nothing was pressed (a wrong code would use up one of the site's tries). The code is still unused. ` +
+    `Do not type it again yourself and do not press Verify. Call ask_user with kind "login", saying the code could not be entered on this page, so the person can type it themselves in the live view.`
+  );
 }
 
 /** An input that may be one box of a split code: a text, tel, number or password field at most 90 px wide, one character long when it says. */
