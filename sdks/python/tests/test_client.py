@@ -511,3 +511,22 @@ def test_sync_and_async_send_the_same_request(resource: str, method: str, args: 
     assert seen[0] == seen[1]
     if (resource, method) in EXPECTED:
         assert seen[0] == EXPECTED[(resource, method)]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_sign_in_question_ways_read_from_a_task(mode: str) -> None:
+    question = {"id": "q1", "kind": "live_view", "category": "login", "message": "Please sign in to zomato.com", "signIn": {"ways": ["phone_code", "password"], "providers": ["Google"], "opensOn": "phone_code", "pageWords": "Login"}}
+    s = scripted(js(job(status="needs_input", question=question)))
+    t = resolve(s.client(mode).tasks.get("job_1"))
+    assert pilotfish.sign_in_of(t["question"]) == {"ways": ["phone_code", "password"], "providers": ["Google"], "opensOn": "phone_code", "pageWords": "Login", "unclear": False}
+    assert pilotfish.SIGN_IN_WAYS == ("password", "phone_code", "email_code", "identifier_first", "passkey")
+
+
+def test_sign_in_of_checks_the_field_as_the_typescript_sdk_does() -> None:
+    q = lambda s: {"id": "q1", "category": "login", "signIn": s}  # noqa: E731
+    assert pilotfish.sign_in_of(q({"ways": ["password", "magic_wand", "password"], "providers": ["Apple", ""], "opensOn": "phone_code", "asked": "password"})) == {"ways": ["password"], "providers": ["Apple"], "unclear": False}
+    assert pilotfish.sign_in_of(q({"ways": ["passkey"], "providers": [], "opensOn": "passkey", "asked": "email_code"})) == {"ways": ["passkey"], "providers": [], "asked": "email_code", "unclear": False}
+    assert pilotfish.sign_in_of(q({"ways": [], "providers": [], "pageWords": "Members area"})) == {"ways": [], "providers": [], "pageWords": "Members area", "unclear": True}
+    assert pilotfish.sign_in_of(q("password")) is None
+    assert pilotfish.sign_in_of({"id": "q2", "category": "captcha", "signIn": {"ways": ["password"], "providers": []}}) is None
+    assert pilotfish.sign_in_of(None) is None

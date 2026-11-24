@@ -1,12 +1,41 @@
-// How a person signs in to a site: what the sign-in page on screen offers (a password, a phone number that a
-// code is texted to, an email), and which way the person asked for in their own words. Many sites sign in by
-// phone and a texted code with no password at all (food delivery, ride hailing, banks and wallets in much of
-// the world); the sign-in hand-off offers that way beside email and password, and picks the one the person
-// asked for, else the one the page shows.
+// How a person signs in to a site: the ways the sign-in page on screen offers (a password, a phone number a code is
+// texted to, an email a code or link is sent to, an email or username first with the rest on the next page, a passkey,
+// a provider such as Google), and which way the person asked for in their own words. Many sites sign in by phone and
+// a texted code with no password at all (food delivery, ride hailing, banks and wallets in much of the world).
+//
+// One source of truth (24 Nov): the sign-in question carries what `readSignIn` read from the live page as one field
+// (`SignInAsk`, built by `signInAsk` and checked by `parseSignInAsk`), and every surface (the app's card, the answer
+// page, the managed MCP's text, the REST question, both SDKs) shows those ways and no others. The person's preferred way
+// only picks the one the form opens on, among them; when nothing could be read the question asks how they sign in, with
+// the page's own words, rather than showing a guessed form.
 
-import type { SignInMethod } from "./interventions.js";
+import { z } from "zod";
 
-/** The parts of a snapshot node read here. */
+/** Every way a sign-in page can offer. The app, the answer page, the managed MCP, the API docs and both SDKs list these and no others. */
+export const SIGN_IN_WAYS = ["password", "phone_code", "email_code", "identifier_first", "passkey"] as const;
+export type SignInWay = (typeof SIGN_IN_WAYS)[number];
+/** The ways the person can give on pilotfish's own form; a passkey and a provider (Google…) are done in the live browser. */
+export const FORM_WAYS: readonly SignInWay[] = ["password", "phone_code", "email_code", "identifier_first"];
+
+/** What the sign-in page on screen was read to offer (`readSignIn`). */
+export interface SignInSeen {
+  /** In the page's order, the way its own form shows first leading. Empty when none could be read. */
+  ways: SignInWay[];
+  /** Sign-in providers it offers by name ("Google", "Apple"), done in the live browser. */
+  providers: string[];
+  /** The page's own words for its sign-in (headings, field labels, buttons), for the question when no way could be read. */
+  pageWords?: string;
+}
+
+/** The sign-in question's one field (`JobQuestion.signIn`): what every surface shows, and the only ways an answer may take. */
+export interface SignInAsk extends SignInSeen {
+  /** The way the form opens on: the person's (`signInPreference`) when the page offers it, else the page's first. One of `ways`. */
+  opensOn?: SignInWay;
+  /** The way the person asked for when the page does not offer it: said beside the form, never added to `ways`. */
+  asked?: SignInWay;
+}
+
+/** The parts of a snapshot node read here (a `SnapNode` is one). */
 export interface SignInNode {
   tag: string;
   attrs: Record<string, string>;
@@ -14,43 +43,156 @@ export interface SignInNode {
   name?: string;
   text?: string;
   visible?: boolean;
+  folded?: boolean;
+  parent?: SignInNode | null;
 }
 
 const PHONE_FIELD = /\b(phone|mobile|cell(phone)?|msisdn)\b|\bmob(ile)?[\s_-]?(no|num(ber)?)\b|\btel(ephone)?\b/i;
 const EMAIL_FIELD = /\be-?mail\b/i;
-/** A button or link that switches the form to a phone number or a one-time code. */
+const USER_FIELD = /\b(user ?name|user ?id|log ?in( id| name)?|account (number|name|id)|member (id|number)|customer (id|number))\b/i;
+const CODE_FIELD = /\b(otp|one[- ]time|verification|passcode|security code|code)\b/i;
+/** A button or link that switches the form to a phone number or a one-time code by text. */
 const PHONE_SWITCH = /\b(use|with|via|continue with|sign in with|log ?in with|login with) (your |a )?(phone|mobile)( number| no\.?)?\b|\b(log ?in|sign in|login) (with|via|using) (an? )?otp\b|\b(get|send|request) (an? )?(otp|one[- ]time (code|password))\b/i;
+/** A button or link for a code or link sent by email ("Email me a sign-in link", "Send magic link"). */
+const EMAIL_CODE_SWITCH = /\b(e-?mail|send) me an? (sign[- ]?in |log ?in |login |magic |one[- ]time )?(link|code)\b|\b(send|get|use|with) (an? )?(magic|sign[- ]?in|log ?in|login|e-?mail) (link|code)\b/i;
+/** "Continue with email": an email way whose next step the page does not show. */
+const EMAIL_SWITCH = /^(continue|sign ?in|log ?in|login|sign ?up) with (your )?e-?mail( address)?$/i;
+const PASSWORD_SWITCH = /\b(sign ?in|log ?in|login|continue) (with|using) (a |your )?password\b|\buse (a |your )?password( instead)?\b/i;
+const PASSKEY_SWITCH = /\bpass ?keys?\b/i;
+const PROVIDER_BUTTON = /^(?:continue|sign ?in|log ?in|login|sign ?up|connect|join) (?:with|using|via|through) (.{1,40})$/i;
+const NOT_PROVIDER = /^(?:(?:a|an|your|my)\s+)?(?:phone|mobile|e-?mail|password|otp|pass ?key|sms|code|number|one[- ]time|magic|link|user ?name|sso|single sign)/i;
+const KNOWN_PROVIDERS = ["Google", "Apple", "Microsoft", "Facebook", "GitHub", "LinkedIn", "X", "Twitter", "Amazon", "Yahoo", "Okta", "Truecaller", "Slack", "Discord", "PayPal"];
+const SSO = /\b(single sign[- ]on|sso)\b/i;
+/** The page says it sends a code or link to sign in with ("We'll text you an OTP", "magic link", "one-time code"). */
+const SENDS_CODE = /\b(we['’]ll|we will|we) (e-?mail|text|sms|send)( you)?\b[^.!?\n]{0,30}\b(code|otp|link|one[- ]time password)\b|\bmagic link\b|\b(one[- ]time|verification|log ?in|login|sign[- ]?in) (code|link)\b|\bone[- ]time password\b|\botp\b/i;
+/** Words about a forgotten password, which do not make a page a code sign-in ("we'll email you a reset link"). */
+const RECOVERY = /\b(forgot|forgotten|reset|recover|trouble)\b/i;
+const SKIP_INPUT = new Set(["hidden", "checkbox", "radio", "submit", "button", "image", "file", "reset", "range", "color", "search", "date", "datetime-local", "month", "week", "time"]);
+
+type Field = "password" | "phone" | "email" | "either" | "user" | "code";
+
+/** A visible input's part in a sign-in form, or null. */
+function fieldOf(n: SignInNode): Field | null {
+  if (n.tag.toLowerCase() !== "input") return null;
+  const type = (n.attrs["type"] ?? "text").toLowerCase();
+  if (SKIP_INPUT.has(type)) return null;
+  if (type === "password") return "password";
+  const ac = (n.attrs["autocomplete"] ?? "").toLowerCase();
+  if (ac.includes("one-time-code")) return "code";
+  const label = [n.name, n.attrs["name"], n.attrs["id"], n.attrs["placeholder"], n.attrs["aria-label"], ac].filter(Boolean).join(" ");
+  const phone = type === "tel" || /\btel\b/.test(ac) || PHONE_FIELD.test(label);
+  const email = type === "email" || /\bemail\b/.test(ac) || EMAIL_FIELD.test(label);
+  if (phone && email) return "either";
+  if (phone) return "phone";
+  if (email) return "email";
+  if (/\busername\b/.test(ac) || USER_FIELD.test(label)) return "user";
+  // A code box: labelled as one, or one character of a split code.
+  if (CODE_FIELD.test(label) || n.attrs["maxlength"] === "1") return "code";
+  return null;
+}
+
+const isControl = (n: SignInNode) => {
+  const tag = n.tag.toLowerCase();
+  const type = (n.attrs["type"] ?? "").toLowerCase();
+  return tag === "button" || tag === "a" || (tag === "input" && (type === "submit" || type === "button")) || ["button", "link", "tab", "menuitem"].includes(n.role ?? "");
+};
+const isDialog = (n: SignInNode) => n.tag.toLowerCase() === "dialog" || n.role === "dialog" || n.role === "alertdialog" || n.attrs["aria-modal"] === "true";
+const inDialog = (n: SignInNode) => {
+  for (let a: SignInNode | null | undefined = n; a; a = a.parent) if (isDialog(a)) return true;
+  return false;
+};
+const controlName = (n: SignInNode) => (n.name || n.attrs["value"] || n.attrs["aria-label"] || n.attrs["title"] || "").replace(/\s+/g, " ").trim();
+
+/** The provider a button names ("Continue with Google", a button named only "Apple"), or null. */
+function providerOf(name: string): string | null {
+  const known = KNOWN_PROVIDERS.find((p) => p.toLowerCase() === name.toLowerCase());
+  if (known) return known;
+  const m = PROVIDER_BUTTON.exec(name);
+  if (m) {
+    // A link's own note after the name is no part of it ("Sign in with Google. Opens in new tab", live on Zomato, 24 Nov).
+    const who = m[1]!.replace(/[.,;:(]\s*(?:opens?|opening|external|new (?:tab|window)).*$/i, "").replace(/\s+(account|id)$/i, "").trim();
+    if (who && !NOT_PROVIDER.test(who)) return KNOWN_PROVIDERS.find((p) => p.toLowerCase() === who.toLowerCase()) ?? who;
+  }
+  return SSO.test(name) ? "SSO" : null;
+}
 
 /**
- * The ways the sign-in page offers, from its visible fields and buttons: "password" (a password field), "phone"
- * (a field for a phone or mobile number, or a button that switches to one or sends an OTP), "email" (an email
- * field, or a field labelled for an email). A field labelled "Email or phone" counts for both. In the order
- * password, phone, email; empty when none shows.
+ * The ways the sign-in on screen offers, read from its visible fields, buttons, links and words, in every frame the
+ * snapshot holds (a sign-in form in a cross-origin iframe, accounts.<site>, is read like the page's own). A dialog with
+ * a sign-in field in it is the sign-in; the page behind it is left out. A password field makes the form a password
+ * sign-in (a phone or email field beside it is its username); with no password field, a phone field is a phone and a
+ * code by text, an email field an email and a code or link when the page says it sends one, else an email or username
+ * first with the rest on the next page; a field for "email or phone" takes both codes when the page says it sends one.
+ * Buttons and tabs add the ways they switch to ("Login with OTP", "Email me a link", "Use password", a passkey) and
+ * providers ("Continue with Google"). `codeStep`: the page asks for a code and shows no sign-in field (the code was
+ * sent): its question is the code's. `ways` is empty when none could be read; `pageWords` are the page's own words.
  */
-export function signInOffers(nodes: Iterable<SignInNode>): SignInMethod[] {
-  let password = false;
-  let phone = false;
-  let email = false;
-  for (const n of nodes) {
-    if (n.visible === false) continue;
-    const tag = n.tag.toLowerCase();
-    if (tag === "input") {
-      const type = (n.attrs["type"] ?? "text").toLowerCase();
-      if (type === "hidden" || type === "checkbox" || type === "radio" || type === "submit" || type === "button") continue;
-      if (type === "password") {
-        password = true;
-        continue;
-      }
-      const label = [n.name, n.attrs["name"], n.attrs["id"], n.attrs["placeholder"], n.attrs["aria-label"], n.attrs["autocomplete"]].filter(Boolean).join(" ");
-      if (type === "tel" || /\btel\b/i.test(n.attrs["autocomplete"] ?? "") || PHONE_FIELD.test(label)) phone = true;
-      if (type === "email" || /\bemail\b/i.test(n.attrs["autocomplete"] ?? "") || EMAIL_FIELD.test(label)) email = true;
-      continue;
+export function readSignIn(all: Iterable<SignInNode>): SignInSeen & { codeStep: boolean } {
+  const shown = [...all].filter((n) => n.visible !== false && !n.folded);
+  const signInField = (n: SignInNode) => {
+    const f = fieldOf(n);
+    return !!f && f !== "code";
+  };
+  const nodes = shown.some((n) => signInField(n) && inDialog(n)) ? shown.filter(inDialog) : shown;
+  const at = new Map<SignInWay, number>();
+  const add = (w: SignInWay, i: number) => void (at.has(w) || at.set(w, i));
+  const providers: string[] = [];
+  const fields: Array<{ f: Field; i: number }> = [];
+  const texts: string[] = [];
+  const words: string[] = [];
+  const word = (t: string | undefined) => {
+    const s = (t ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (s && !words.includes(s)) words.push(s);
+  };
+  nodes.forEach((n, i) => {
+    if (n.text) texts.push(n.text);
+    const f = fieldOf(n);
+    if (f) {
+      fields.push({ f, i });
+      if (f !== "code") word(n.name || n.attrs["placeholder"] || n.attrs["aria-label"]);
+      return;
     }
-    if (tag === "button" || tag === "a" || n.role === "button" || n.role === "link" || n.role === "tab") {
-      if (PHONE_SWITCH.test(n.name ?? "")) phone = true;
-    }
+    if (n.role === "heading" || /^h[1-4]$/i.test(n.tag)) word(n.name);
+    if (!isControl(n)) return;
+    const name = controlName(n);
+    if (!name) return;
+    if (PHONE_SWITCH.test(name)) add("phone_code", i);
+    if (EMAIL_CODE_SWITCH.test(name)) add("email_code", i);
+    if (PASSWORD_SWITCH.test(name)) add("password", i);
+    if (PASSKEY_SWITCH.test(name)) add("passkey", i);
+    const p = providerOf(name);
+    if (p && !providers.includes(p)) providers.push(p);
+    if (p || PHONE_SWITCH.test(name) || EMAIL_CODE_SWITCH.test(name) || EMAIL_SWITCH.test(name) || PASSWORD_SWITCH.test(name) || /\b(sign ?in|log ?in|login|continue|next|otp|code)\b/i.test(name)) word(name);
+  });
+  // Said of signing in, not of a forgotten password.
+  const said = texts.join("\n").split(/(?<=[.!?\n])/).filter((s) => !RECOVERY.test(s)).join(" ");
+  // A button that sends a code or link ("Email me a sign-in link", "Get OTP") says so too.
+  const sends = SENDS_CODE.test(said) || at.has("email_code") || nodes.some((n) => isControl(n) && /\b(get|send|request) (an? )?(otp|code|one[- ]time)/i.test(controlName(n)));
+  const ids = fields.filter((x) => x.f !== "password" && x.f !== "code");
+  const pw = fields.find((x) => x.f === "password");
+  let first: SignInWay | undefined;
+  if (pw) {
+    first = "password";
+    at.set("password", Math.min(at.get("password") ?? Infinity, ids[0]?.i ?? pw.i, pw.i));
+  } else if (ids.length) {
+    const { f, i } = ids[0]!;
+    if (f === "phone") first = "phone_code";
+    else if (f === "email") first = sends ? "email_code" : "identifier_first";
+    else if (f === "either" && sends) {
+      first = "phone_code";
+      add("email_code", i);
+    } else first = "identifier_first";
+    add(first, i);
   }
-  return [...(password ? (["password"] as const) : []), ...(phone ? (["phone"] as const) : []), ...(email ? (["email"] as const) : [])];
+  // "Continue with email": an email way, with a code when the page says it sends one.
+  nodes.forEach((n, i) => {
+    if (isControl(n) && EMAIL_SWITCH.test(controlName(n))) add(sends ? "email_code" : "identifier_first", i);
+  });
+  const rest = [...at.entries()].filter(([w]) => w !== first).sort((a, b) => a[1] - b[1]).map(([w]) => w);
+  const ways = [...(first ? [first] : []), ...rest];
+  const codeStep = !pw && !ids.length && fields.some((x) => x.f === "code");
+  const pageWords = words.join(" · ").slice(0, 200);
+  return { ways, providers: providers.slice(0, 8), ...(pageWords ? { pageWords } : {}), codeStep };
 }
 
 /** How the person asked to sign in: a phone number and a texted code, an email and a code, or a password. */
@@ -143,5 +285,105 @@ export function dialCodeIn(texts: Iterable<string>): string | undefined {
 /** A sign-in page's address path ("/auth", "/login", "/sign-in", "/account/login/..."); a word in a slug does not count. */
 export function isAuthPath(path: string): boolean {
   return /(^|\/)(auth|log-?in|sign-?in)(\/|$)/i.test(path);
+}
+
+const WAY = z.enum(SIGN_IN_WAYS);
+/** `SignInAsk` as it may be stored, sent and read back: known ways only, each once, the way it opens on among them. */
+export const SignInAskSchema = z
+  .object({
+    ways: z.array(WAY).max(SIGN_IN_WAYS.length),
+    providers: z.array(z.string().trim().min(1).max(40)).max(8),
+    opensOn: WAY.optional(),
+    asked: WAY.optional(),
+    pageWords: z.string().max(300).optional(),
+  })
+  .strict()
+  .refine((a) => new Set(a.ways).size === a.ways.length && new Set(a.providers).size === a.providers.length, { message: "each way and provider once" })
+  .refine((a) => !a.opensOn || (a.ways.includes(a.opensOn) && FORM_WAYS.includes(a.opensOn)), { message: "opensOn must be one of the form ways offered" })
+  .refine((a) => !a.asked || !a.ways.includes(a.asked), { message: "asked is a way the page does not offer" });
+
+/** A stored or received sign-in field, checked: null when it is not one. */
+export function parseSignInAsk(x: unknown): SignInAsk | null {
+  const r = SignInAskSchema.safeParse(x);
+  if (!r.success) return null;
+  const a = r.data;
+  return { ways: a.ways, providers: a.providers, ...(a.opensOn ? { opensOn: a.opensOn } : {}), ...(a.asked ? { asked: a.asked } : {}), ...(a.pageWords ? { pageWords: a.pageWords } : {}) };
+}
+
+/** The ways a preference may open on, best first: a page that takes the email, phone or username first takes any. */
+const PREFERRED: Record<SignInPreference, SignInWay[]> = {
+  phone: ["phone_code", "identifier_first"],
+  email_code: ["email_code", "identifier_first"],
+  password: ["password", "identifier_first"],
+};
+const PREFERENCE_WAY: Record<SignInPreference, SignInWay> = { phone: "phone_code", email_code: "email_code", password: "password" };
+
+/**
+ * The sign-in question's field: what the page was read to offer (cleaned: known ways once, providers once, words
+ * clipped), opening on the person's way when the page offers it, else on the page's own first form. The person's way
+ * never adds one: one the page does not offer is `asked`, said beside the form.
+ */
+export function signInAsk(seen: Partial<SignInSeen> | null | undefined, prefers?: SignInPreference | null): SignInAsk {
+  const ways = [...new Set((seen?.ways ?? []).filter((w): w is SignInWay => (SIGN_IN_WAYS as readonly string[]).includes(w)))];
+  const providers = [...new Set((seen?.providers ?? []).map((p) => String(p).replace(/\s+/g, " ").trim().slice(0, 40)).filter(Boolean))].slice(0, 8);
+  const pageWords = (seen?.pageWords ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+  const want = prefers ? PREFERRED[prefers].find((w) => ways.includes(w)) : undefined;
+  const opensOn = want ?? ways.find((w) => FORM_WAYS.includes(w));
+  const asked = prefers && !want && !ways.includes(PREFERENCE_WAY[prefers]) ? PREFERENCE_WAY[prefers] : undefined;
+  return { ways, providers, ...(opensOn ? { opensOn } : {}), ...(asked ? { asked } : {}), ...(pageWords ? { pageWords } : {}) };
+}
+
+/** Nothing of the sign-in could be read: the question asks how the person signs in, with the page's words. */
+export const signInUnclear = (a: SignInSeen): boolean => !a.ways.length && !a.providers.length;
+
+/** The page takes something typed on pilotfish's own form (a password, a phone or email for a code, an email or username first). */
+export const signInHasForm = (a: SignInSeen): boolean => a.ways.some((w) => FORM_WAYS.includes(w));
+
+/**
+ * Why an answer does not fit what the page offers, or null: a password needs a password way (or an email or username
+ * first), a phone for a code the phone way (or …first), an email for a code the email way (or …first). The same rule
+ * every surface draws its forms by, checked again where answers arrive.
+ */
+export function signInAnswerProblem(a: SignInSeen, answer: { type: string; channel?: string }): string | null {
+  const has = (...w: SignInWay[]) => w.some((x) => a.ways.includes(x));
+  const offers = signInWaysText(a) || "no way pilotfish could read";
+  if (answer.type === "credentials" && !has("password", "identifier_first")) return `This page does not sign in with a password; it offers ${offers}.`;
+  if (answer.type === "code_login" && answer.channel === "sms" && !has("phone_code", "identifier_first")) return `This page does not sign in with a phone number and a texted code; it offers ${offers}.`;
+  if (answer.type === "code_login" && answer.channel === "email" && !has("email_code", "identifier_first")) return `This page does not sign in with an emailed code or link; it offers ${offers}.`;
+  return null;
+}
+
+/** Each way in words: the managed MCP's text, the answer page and the API docs say these; the app's card its own short labels. */
+export const SIGN_IN_WAY_WORDS: Record<SignInWay, string> = {
+  password: "a password (with an email, phone or username)",
+  phone_code: "a phone number and a code sent by text",
+  email_code: "an email address and a code or link sent there",
+  identifier_first: "an email, phone or username first, then what the site asks next",
+  passkey: "a passkey, in the browser",
+};
+
+/** The ways a page offers, in words, in its order: "a password (…); or Google, in the browser". "" when none. */
+export function signInWaysText(a: SignInSeen): string {
+  const parts = [...a.ways.map((w) => SIGN_IN_WAY_WORDS[w]), ...a.providers.map((p) => `${p}, in the browser`)];
+  return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join("; ")}; or ${parts[parts.length - 1]}`;
+}
+
+/** The question when nothing of a sign-in could be read: how does the person sign in here, with the page's own words. */
+export function signInHowQuestion(site: string, a: SignInSeen): string {
+  return `How do you sign in to ${site}? pilotfish could not tell from the page${a.pageWords ? ` (it shows: "${a.pageWords}")` : ""}. Say how, for example "email and password", "a code to my phone" or "Google", or sign in yourself in the browser. Never a password or code here.`;
+}
+
+/**
+ * The person's words for how they sign in, as the run may see them: never a password or code, so anything after
+ * "password", "PIN", "OTP" or "code", a run of four or more digits and a word mixing letters and digits are hidden; clipped.
+ */
+export function signInHowWords(text: string): string {
+  return text
+    .replace(/\b(password|passcode|pwd|pin|otp|code)\b(\s*(is|=|:))?\s+(?!(and|or|to|by|via|from|on|in|with|sent|texted)\b)\S+/gi, "$1 [hidden]")
+    .replace(/\S*\d{4,}\S*/g, "[hidden]")
+    .replace(/\b(?=[a-z]*\d)(?=\d*[a-z])[a-z\d]{6,}\b/gi, "[hidden]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
 }
 

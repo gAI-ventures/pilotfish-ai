@@ -5,7 +5,8 @@
 """
 
 from . import types
-from ._core import CONTINUE_TEXT, DEFAULT_BASE_URL, DownloadedFile, Page
+from ._core import CONTINUE_TEXT, DEFAULT_BASE_URL, DownloadedFile, Page, sign_in_of
+from .types import SIGN_IN_WAYS
 from ._version import __version__
 from .client import (
     AsyncBatches,
@@ -64,6 +65,8 @@ __all__ = [
     "DownloadedFile",
     "DEFAULT_BASE_URL",
     "CONTINUE_TEXT",
+    "SIGN_IN_WAYS",
+    "sign_in_of",
     "LocalBrowser",
     "LocalQuestion",
     "LocalToolError",

@@ -55,14 +55,46 @@ class TaskRequest(TypedDict, total=False):
     files: List[UploadFile]
 
 
+#: The ways a sign-in page can offer, as ``Question["signIn"]["ways"]`` lists them (the API's own list, kept equal to it
+#: by the API's tests). ``password``: an email, phone or username and a password. ``phone_code``: a phone number and a
+#: code sent by text. ``email_code``: an email address and a code or link sent there. ``identifier_first``: the email,
+#: phone or username first, the rest on the site's next page. ``passkey``: a passkey, in the browser.
+SIGN_IN_WAYS = ("password", "phone_code", "email_code", "identifier_first", "passkey")
+SignInWay = Literal["password", "phone_code", "email_code", "identifier_first", "passkey"]
+
+
+class SignInAsk(TypedDict, total=False):
+    """A sign-in question's ways (``Question["signIn"]``, category ``login``), read from the live page when it was asked.
+
+    Show the person these and no others; the details themselves are typed on ``answerUrl``. Read it with
+    ``pilotfish.sign_in_of``, which checks it.
+    """
+
+    #: In the page's order, the way its own form shows first leading. Empty with no ``providers``: it could not be read.
+    ways: List[SignInWay]
+    #: Providers it offers by name ("Google", "Apple"), done in the browser.
+    providers: List[str]
+    #: The way the form opens on: the person's when the page offers it, else the page's first. One of ``ways``.
+    opensOn: SignInWay
+    #: The way the person asked for that the page does not offer (never one of ``ways``).
+    asked: SignInWay
+    #: The page's own words for its sign-in.
+    pageWords: str
+
+
 class Question(TypedDict, total=False):
     """A question a task is waiting on (status ``needs_input``). Codes and passwords are answered on ``answerUrl``."""
 
     id: str
     kind: str
+    #: For a hand-off: what the page shows (``login``, ``captcha``, ``otp``...).
+    category: str
+    message: str
     text: str
     question: str
     options: List[str]
+    #: A sign-in (category ``login``): the ways its page offers.
+    signIn: SignInAsk
     askedAt: int
     expiresAt: int
 

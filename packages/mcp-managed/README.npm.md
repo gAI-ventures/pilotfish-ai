@@ -465,6 +465,12 @@ support it open pilotfish's answer page, and other clients get the link in the t
 browser live and lets the person take over, so they can type a code or sign in right there. Codes and passwords never
 pass through the agent.
 
+A sign-in's `Question` line names the ways the site's page offers, read from the live page when it asked (a password, a
+phone number and a texted code, an email and a code or link, an email or username first, a passkey, Google and other
+providers in the browser), and the way its form opens on; the answer page shows those ways and no others. When pilotfish
+could not tell how the page signs in, the line asks how instead: answer it with `answer_job` and the person's own words
+("a code to my phone", "Google"), never a password or code.
+
 ## Pricing
 
 Pay as you go from the organization's prepaid credit: browser time at $0.05 per browser-hour (billed in whole minutes),

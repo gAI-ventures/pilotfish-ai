@@ -27,6 +27,42 @@ T = TypeVar("T")
 QueryValue = Union[str, int, float, bool, None]
 
 
+def sign_in_of(question: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A sign-in question's ways, checked, or None when the question is not a sign-in or carries none.
+
+    Known ways only (one from a newer API is left out), each once; ``opensOn`` only when it is one of them (never a
+    passkey); ``asked`` only when it is not. ``unclear`` is True when nothing could be read: the question asks how the
+    person signs in (answer it with their words as text, never a password or code; or they sign in in the browser).
+    Same rules as the TypeScript SDK's ``signInOf``.
+    """
+    from .types import SIGN_IN_WAYS
+
+    if not question or question.get("category") != "login":
+        return None
+    s = question.get("signIn")
+    if not isinstance(s, Mapping) or not isinstance(s.get("ways"), list) or not isinstance(s.get("providers"), list):
+        return None
+    ways: List[str] = []
+    for w in s["ways"]:
+        if w in SIGN_IN_WAYS and w not in ways:
+            ways.append(w)
+    providers: List[str] = []
+    for p in s["providers"]:
+        if isinstance(p, str) and p.strip() and p not in providers:
+            providers.append(p)
+    out: Dict[str, Any] = {"ways": ways, "providers": providers}
+    opens = s.get("opensOn")
+    if opens in ways and opens != "passkey":
+        out["opensOn"] = opens
+    asked = s.get("asked")
+    if asked in SIGN_IN_WAYS and asked not in ways:
+        out["asked"] = asked
+    if isinstance(s.get("pageWords"), str) and s["pageWords"]:
+        out["pageWords"] = s["pageWords"]
+    out["unclear"] = not ways and not providers
+    return out
+
+
 @dataclass
 class Page(Generic[T]):
     """One page of a list: its ``items`` and the ``next_cursor`` to ask for the next (None on the last page)."""

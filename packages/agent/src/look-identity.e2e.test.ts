@@ -155,7 +155,7 @@ describe.skipIf(!E2E)("a look whose document changes under it, on a real page (f
       expect(asked).toHaveLength(1);
       expect(new URL(asked[0]!.url).pathname).toBe("/phone-login");
       expect(asked[0]!.title).toBe("Phone sign-in");
-      expect(asked[0]!.signInOffers).toEqual(["phone"]);
+      expect(asked[0]!.signIn?.ways).toEqual(["phone_code"]);
     } finally {
       await done();
     }

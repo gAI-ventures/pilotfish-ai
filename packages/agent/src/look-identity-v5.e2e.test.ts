@@ -176,7 +176,7 @@ describe.skipIf(!E2E)("v5: one document per decision, on real pages (fifth revie
     it("control: the page stays: one question, its host, address, title and sign-in ways all of the sign-in page", async () => {
       const r = await run(null);
       expect(r.asked).toHaveLength(1);
-      expect(r.asked[0]).toMatchObject({ host: "127.0.0.1", title: "Sign in", signInOffers: ["password", "email"], autoResume: true });
+      expect(r.asked[0]).toMatchObject({ host: "127.0.0.1", title: "Sign in", signIn: { ways: ["password"], providers: [] }, autoResume: true });
       expect(new URL(r.asked[0]!.url).pathname).toBe("/login");
       expect(r.handled).toEqual(["asked", "unresolved"]);
     });

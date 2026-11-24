@@ -158,6 +158,13 @@ const PURCHASE_NOUN = /\bpurchase\s+(?:types?|history|histories|dates?|year|pric
  */
 const CART_EDIT = /\b(remove|delete)\b[^.<>]{0,30}\b(from|in)\s+(?:the |your |my )?(cart|basket|bag|trolley)\b|\b(decrease|reduce|lower)\s+(?:the\s+|item\s+)?quantity\b/i;
 
+/**
+ * A control that sends the person a sign-in code or link ("Send One Time Password", "Get OTP", "Resend code", "Email me
+ * a login link"): it signs in, it sends nothing on their behalf. 24 Nov, Zomato: the person had
+ * just given their phone number for a code, and "Send One Time Password" asked them to confirm a send.
+ */
+const SENDS_CODE = /\b(?:send|resend|get|request|email|text)\s+(?:me\s+)?(?:an?\s+|the\s+|my\s+)?(?:new\s+)?(?:one[- ]time\s+(?:password|passcode|code|pin)|otp|verification\s+code|login\s+(?:code|link)|sign[- ]?in\s+(?:code|link)|magic\s+link|security\s+code|code)\b/i;
+
 /** A control that takes a filter off — "Remove filter", "Clear all filters", "Reset sort". */
 const CLEARS_FILTER = /\b(remove|clear|reset|undo)\s+(?:(?:all|any|the|applied|active|selected)\s+)*(filters?|facets?|sorts?|sorting|refinements?|selections?|criteria)\b/i;
 
@@ -265,6 +272,7 @@ export class DefaultPolicy implements ActionPolicy {
       for (const p of patterns) {
         if (!p.re.test(says)) continue;
         if (p.kind === "delete" && CART_EDIT.test(says) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
+        if (p.kind === "send" && SENDS_CODE.test(says) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
         if (!parseMoney(says) && (CLEARS_FILTER.test(says) || (p.kind === "pay" && FILTER_WORDS.test(says))) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
         return this.preApproval({ kind: "confirm", reason: `Target looks irreversible: ${text.slice(0, 160)}`, ...(p.kind ? { write: p.kind } : {}) }, ctx, says);
       }
@@ -296,6 +304,8 @@ export class DefaultPolicy implements ActionPolicy {
         if (p.kind === "pay" && !parseMoney(text) && !UNAMBIGUOUS_STEP.test(says) && !p.re.test(text.replace(PURCHASE_NOUN, " "))) continue;
         // Out of a cart, or one fewer: never a payment or a deletion of anything that cannot be added back.
         if (p.kind === "delete" && (CART_EDIT.test(says) || CART_EDIT.test(text)) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
+        // A sign-in code sent to the person: nothing sent on their behalf.
+        if (p.kind === "send" && SENDS_CODE.test(says) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };
         const clearsFilter = CLEARS_FILTER.test(says);
         const namesFilter = p.kind === "pay" && (FILTER_WORDS.test(says) || FILTER_WORDS.test(names));
         if (!parseMoney(text) && (clearsFilter || namesFilter) && !UNAMBIGUOUS_STEP.test(says)) return { kind: "allow" };

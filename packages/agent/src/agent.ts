@@ -61,6 +61,7 @@ import {
   rateLimited,
   readPage,
   responseTracker,
+  type PageRead,
   retryAfterMs,
   unreadNote,
   type InterruptionCleared,
@@ -70,7 +71,7 @@ import {
   type SignupDetails,
   type SolveChallenge,
 } from "./interventions.js";
-import { asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, signInOffers } from "./sign-in.js";
+import { asksSignInNumber, dialCodeIn, fitPhone, isAuthPath, looksLikePhone, readSignIn, signInHowWords, signInPreference, signInUnclear, type SignInSeen, type SignInWay } from "./sign-in.js";
 import { failureLines, isRetryLabel, RepeatFailures, repeatFailureNudge } from "./repeat-failure.js";
 import type { ElementHandle, InterruptInput, Interruption } from "@pilotfish/perception";
 
@@ -130,6 +131,9 @@ export function pageDialCode(nodes: Iterable<SnapNode>): string | undefined {
 
 /** How long a code the model asks for waits for its code screen to be drawn before the person is asked with no shape. */
 const CODE_SCREEN_WAIT_MS = 4_000;
+/** How long a sign-in question waits for a dialog still drawing to show its fields, buttons or code box, and how often it looks. */
+const SIGN_IN_DRAW_MS = 3_000;
+const SIGN_IN_POLL_MS = 400;
 
 /** Said once when most of the steps are gone and the last 8 got nowhere, with no stronger model to hand the run to. */
 export const STUCK_NOTE =
@@ -717,6 +721,8 @@ export type StepEvent =
        * per visit.
        */
       docStatus?: number;
+      /** A sign-in the run was left to go on past: the ways its page offers (`readSignIn`), never its words. */
+      signIn?: { ways: SignInWay[]; providers: string[] };
     }
   | { type: "action"; name: ToolName; input: Record<string, unknown>; target?: TargetDesc; urlBefore: string; urlAfter: string; evidence?: ActionEvidence }
   /** A site answered the same failure message `times` times after reloads or redone steps; the model was told to stop retrying it. */
@@ -960,9 +966,10 @@ export function taskLanguage(task: string): "en" | null {
 export const KEEP_GOING_STEPS = 12;
 /**
  * A done(success=false) result that names what stopped the work: a sign-in or account, a block, a check, an error, a
- * limit, nothing found or offered, the person's own choice. Such a result is taken as it is.
+ * limit, nothing found or offered, the person's own choice, or something only the person can give (24 Nov: a run that
+ * asked for the delivery area and heard nothing was sent back to carry on). Such a result is taken as it is.
  */
-export const STOPPED_BY = /\b(sign(?:ed|ing)?[ -]?in|log(?:ged|ging)?[ -]?in|login|account|password|captcha|bot check|verify (?:you|that you)|blocked|block page|access denied|forbidden|denied|not available|unavailable|not offered|isn['’]?t offered|doesn['’]?t (?:offer|exist|support|list|show)|does not (?:offer|exist|support|list|show)|no longer|sold out|out of stock|no results|no availability|nothing (?:found|matched|listed|available)|error|problem|went wrong|not working|doesn['’]?t work|failed to load|won['’]?t load|could not load|timed out|rate limit|too many requests|limit reached|declined|refused|not allowed|not permitted|requires? (?:payment|a subscription|membership)|paywall|subscribe|geo|country|region|closed|expired|cancel(?:led|ed)|the person|you asked|asked me not|not supported)\b/i;
+export const STOPPED_BY = /\b(sign(?:ed|ing)?[ -]?in|log(?:ged|ging)?[ -]?in|login|account|password|captcha|bot check|verify (?:you|that you)|blocked|block page|access denied|forbidden|denied|not available|unavailable|not offered|isn['’]?t offered|doesn['’]?t (?:offer|exist|support|list|show)|does not (?:offer|exist|support|list|show)|no longer|sold out|out of stock|no results|no availability|nothing (?:found|matched|listed|available)|error|problem|went wrong|not working|doesn['’]?t work|failed to load|won['’]?t load|could not load|timed out|rate limit|too many requests|limit reached|declined|refused|not allowed|not permitted|requires? (?:payment|a subscription|membership)|paywall|subscribe|geo|country|region|closed|expired|cancel(?:led|ed)|the person|you asked|asked me not|not supported|please (?:share|provide|tell|send|give|confirm)|let me know|(?:need|waiting for) (?:your|the person|an answer|a reply)|no answer|no reply)\b/i;
 
 export const EMPTY_RESULTS_TEXT = /^(?:sorry[,.!]?\s*)?(?:no|0|zero)\s+(?:results?|matches|matching\s+\w+|items?\s+found|products?\s+found|properties|listings|flights|hotels|records|articles|papers|jobs|entries)\b|\b(?:returned|found|produced|yielded)\s+no\s+(?:results|matches)\b|\bno\s+results\s+(?:found|for|match)|\bdid\s+not\s+match\s+any\b|\b(?:couldn'?t|could\s+not|can'?t|cannot)\s+find\s+any\s+(?:results|matches)\b|\bnothing\s+(?:found|matched)\b/i;
 
@@ -1359,6 +1366,12 @@ export class Agent {
    */
   /** Sites whose sign-in the person skipped this run: the run goes on as a guest there, and is never asked again. */
   private readonly skippedSignIn = new Set<string>();
+  /**
+   * Sites the person gave a login for on a sign-in question in this run (a password, or a phone or email for a code), as
+   * placeholders: a later sign-in question for the site gets them back instead of asking again, unless the page offers
+   * only ways they cannot fill (24 Nov, Zomato: a phone number given, then asked for twice more). `told`: how often.
+   */
+  private readonly givenSignIn = new Map<string, { way: "password" | "phone" | "email"; names: string[]; told: number }>();
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
   /** Sites a saved recovery code was typed on in this run: one per site, then the person. */
   private readonly recoveryTried = new Set<string>();
@@ -1383,6 +1396,8 @@ export class Agent {
   private interventionSeq = 0;
   /** The way to pay the person picked on this run, by site: asked once, and their pick is their yes to the pay step. */
   private readonly payChosen = new Map<string, string>();
+  /** Failures of each page tool by site ("host name"), reset by a success (`PAGE_TOOL_FAILS`). */
+  private readonly pageToolFails = new Map<string, number>();
   /** The model's tool list: rebuilt once, when `page_tool` joins it (the first page that offers WebMCP tools). */
   private tools: Anthropic.Tool[];
   private readonly enabled: Set<ToolName>;
@@ -2812,6 +2827,9 @@ export class Agent {
     }
     if (!args || typeof args !== "object" || Array.isArray(args)) return err(`arguments_json must be a JSON object, e.g. {"query":"..."} ("{}" for none).`);
     const host = safeHost(this.page.url);
+    // A page tool that keeps failing is not called again in this run: the page's own controls do the same thing.
+    const failKey = `${host} ${name}`;
+    if ((this.pageToolFails.get(failKey) ?? 0) >= PAGE_TOOL_FAILS) return err(pageToolGiveUp(name, this.pageToolFails.get(failKey)!));
     const used = new Set<string>();
     const fill = (v: unknown): unknown => {
       if (typeof v === "string") {
@@ -2840,7 +2858,11 @@ export class Agent {
     const r = box.r;
     const status = r?.status ?? "done";
     const failed = status === "error" || status === "timeout" || status === "canceled";
-    return { ...outcome, ...(failed ? { isError: true } : {}), summary: `page_tool ${name}: ${status}${outcome.evidence?.changed ? ", page changed" : ""}` };
+    const fails = failed ? (this.pageToolFails.get(failKey) ?? 0) + 1 : 0;
+    if (failed) this.pageToolFails.set(failKey, fails);
+    else this.pageToolFails.delete(failKey);
+    const content = failed && fails >= PAGE_TOOL_FAILS ? joinContent(outcome.content, pageToolGiveUp(name, fails)) : outcome.content;
+    return { ...outcome, content, ...(failed ? { isError: true } : {}), summary: `page_tool ${name}: ${status}${outcome.evidence?.changed ? ", page changed" : ""}` };
   }
 
   private redact(input: Record<string, unknown>): Record<string, unknown> {
@@ -4890,7 +4912,9 @@ export class Agent {
       // Going on is tried first: a model asked the person at a prompt it could have closed ("only one post is
       // visible"), where another run closed the same prompt and read 12 posts. And the
       // question says what the site showed so far, which the card in the chat shows beside the form.
-      event("left_to_model");
+      // The ways it offers go with the event: the sign-in form under the run's result shows those (`signInHint`).
+      const seen = readSignIn(cur.nodes);
+      this.opts.onStep?.({ type: "interruption", category: c.category, vendor: c.vendor, needs: c.needs, handled: "left_to_model", host, signals: c.signals.slice(0, 8), ...(before.response?.status ? { docStatus: before.response.status } : {}), signIn: { ways: seen.ways, providers: seen.providers } });
       return {
         note:
           `This page asks to sign in on ${host}, and no credentials are available. First try to go on without an account: close the prompt (its close button, Escape), continue as guest, scroll past it, or use the site's public pages (guest order lookup, tracking, browsing). If that shows any of what the task asks, go on, and say in your result how far ${host} let you go before it asked to sign in (what it showed, after how many items or pages): the person can then sign in to get the rest. ` +
@@ -5171,7 +5195,7 @@ export class Agent {
         };
       return { note: `The person was asked to handle the ${c.category.replace("_", " ")} on ${host}, but ${out.verified ? "the page still shows it" : "it was not seen to go"}${unverified}. Check the page before continuing.` };
     }
-    if (out.kind === "skipped") return { note: "" }; // not offered here (acceptSkip is false)
+    if (out.kind === "skipped" || out.kind === "how") return { note: "" }; // not offered here (acceptSkip and acceptHow are false)
     event("resolved", out.waitedMs);
     passed();
     this.lastSnapshot = out.snap;
@@ -5526,7 +5550,7 @@ export class Agent {
     cur: Snapshot,
     armed: boolean,
     typeCode?: (code: string) => Promise<void>,
-    { acceptCredentials = false, acceptCodeLogin = false, acceptSkip = false }: { acceptCredentials?: boolean; acceptCodeLogin?: boolean; acceptSkip?: boolean } = {},
+    { acceptCredentials = false, acceptCodeLogin = false, acceptSkip = false, acceptHow = false }: { acceptCredentials?: boolean; acceptCodeLogin?: boolean; acceptSkip?: boolean; acceptHow?: boolean } = {},
   ): Promise<
     | { kind: "skipped"; waitedMs: number }
     | { kind: "cleared"; snap: Snapshot; waitedMs: number; code: boolean }
@@ -5536,6 +5560,7 @@ export class Agent {
     | { kind: "ended"; snap: Snapshot; result: Interruption; waitedMs: number }
     | { kind: "credentials"; username: string; password: string; waitedMs: number }
     | ({ kind: "signup"; waitedMs: number } & SignupDetails)
+    | { kind: "how"; text: string; waitedMs: number }
   > {
     const t0 = Date.now();
     const ctl = new AbortController();
@@ -5635,6 +5660,8 @@ export class Agent {
       if (res.status === "credentials" && acceptCredentials) return { kind: "credentials", username: res.username, password: res.password, waitedMs: Date.now() - t0 };
       if (res.status === "code_login" && acceptCodeLogin) return { kind: "code_login", identifier: res.identifier, channel: res.channel, waitedMs: Date.now() - t0 };
       if (res.status === "signup" && acceptCredentials) return { kind: "signup", email: res.email, password: res.password, ...(res.name ? { name: res.name } : {}), waitedMs: Date.now() - t0 };
+      // How the person signs in, for a sign-in whose ways could not be read: the caller has the model find that way.
+      if (res.status === "how" && acceptHow) return { kind: "how", text: signInHowWords(res.text), waitedMs: Date.now() - t0 };
       if (res.status === "code") await typeCode?.(res.code.trim());
       // The person says it is done (or sent a code): give the page a few seconds to move on, and HUMAN's block page
       // with its widget off the vendor's window: its reload after a hold the person passed comes when its server has
@@ -5794,7 +5821,14 @@ export class Agent {
       }
     }
     if (!this.opts.onIntervention) return err(`No person is available to ${kind === "login" ? "sign in" : "pass the check"} on ${host}. Finish with done(success=false) if the task needs it.`);
-    const startRead = await readPage(this.page, this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 })));
+    // A sign-in is read anew at ask time (the ways it offers are the page's now, in every frame, once a dialog still
+    // drawing shows its fields); a check as last seen.
+    const startRead = kind === "login" ? await this.signInLook() : await readPage(this.page, this.lastSnapshot ?? (await captureSnapshot(this.page, { viewportBand: 1 })));
+    if (kind === "login") {
+      // The code was sent, or the person already gave this site's login in this run: no new sign-in question.
+      const early = await this.signInGiven(startRead, reason);
+      if (early) return early;
+    }
     // Not read: no auto-resume and no armed watch (the page must first be seen showing it), and never "none" below.
     const start = startRead.state === "known" ? startRead : null;
     // The whole question is of ONE document: the start reading's, else the page as it is now (its address only, nothing
@@ -5823,6 +5857,10 @@ export class Agent {
     event("asked");
     const before = start?.snap ?? startRead.snap;
     const nodes = start ? start.snap.nodes : [];
+    // What the sign-in offers, read from this one document (nothing when it could not be read: the person is then
+    // asked how they sign in, never shown a guessed form). The page's words are scrubbed like anything else of it.
+    const seen = kind === "login" ? readSignIn(nodes) : null;
+    const signIn: SignInSeen | null = seen ? { ways: seen.ways, providers: seen.providers, ...(seen.pageWords ? { pageWords: this.secrets.scrub(seen.pageWords) } : {}) } : null;
     const out = await this.handOff(
       {
         id: `iv${++this.interventionSeq}`,
@@ -5839,7 +5877,7 @@ export class Agent {
         autoResume: !!start,
         acceptsCredentials: true,
         ...(kind === "login" && this.opts.onSignup ? { acceptsSignup: true } : {}),
-        ...(kind === "login" ? { signInOffers: signInOffers(nodes) } : {}),
+        ...(signIn ? { signIn } : {}),
         ...(kind === "login" ? (skipped ? { afterSkip: true } : { acceptsSkip: true }) : {}),
         ...(kind === "login" && pageDialCode(nodes) ? { dialCode: pageDialCode(nodes)! } : {}),
       },
@@ -5848,8 +5886,21 @@ export class Agent {
       // A sign-in form or check already on screen: its going away is the answer. Otherwise wait to see one first.
       !!start && !isResolved(category, start.input, start.input),
       undefined,
-      { acceptCredentials: true, acceptCodeLogin: kind === "login", acceptSkip: kind === "login" && !skipped },
+      { acceptCredentials: true, acceptCodeLogin: kind === "login", acceptSkip: kind === "login" && !skipped, acceptHow: !!signIn && signInUnclear(signIn) },
     );
+    if (out.kind === "how") {
+      // How the person signs in, where the page showed no way pilotfish could read: the model finds it, then asks again.
+      event("unresolved", out.waitedMs);
+      const way = signInPreference([out.text]);
+      const site = siteOf(host);
+      return await this.withEvidence(
+        async () => undefined,
+        `${label} how`,
+        () =>
+          `The person says they sign in to ${site} with: "${out.text}"${way ? ` (${way === "phone" ? "a phone number and a code by text" : way === "email_code" ? "an email and a code or link sent there" : "a password"})` : ""}. Find that way on the page (a tab, a link or a button for it; the form may be inside a frame or a dialog still opening), open it, then call ask_user with kind "login" again so they can give their details there. Never type a login of your own.`,
+        { settle: false },
+      );
+    }
     if (out.kind === "skipped") {
       // Go on without an account, as far as the site lets the run: never asked again for this site in this run.
       const site = siteOf(host);
@@ -5872,20 +5923,8 @@ export class Agent {
       const name = this.secrets.addIdentifier(site, out.identifier, what);
       event("credentials", out.waitedMs);
       this.signingIn.set(site, { by: "person", typed: true });
-      const offers = signInOffers((this.lastSnapshot ?? before).nodes);
-      const mismatch =
-        what === "phone" && !offers.includes("phone")
-          ? ` This page shows no phone number field (it offers ${offers.length ? offers.join(" and ") : "no sign-in field yet"}): look for the site's phone / mobile option ("Use phone number", "Continue with mobile", "Login with OTP") first; if the site has none, do not type the number into an email or username field: call ask_user with kind "login" again and say the site signs in only with ${offers.length ? offers.join(" and ") : "another way"}.`
-          : "";
-      return await this.withEvidence(
-        async () => undefined,
-        label,
-        () =>
-          `The person gave ${what === "phone" ? "their phone number, for a one-time code sent to it by text (SMS)" : "their email address, for a one-time code sent there"}, to sign in to ${site} with no password, or to verify the account a sign-up on this page is making (then stay on the sign-up and verify it there). ` +
-          `Type {{${name}}} into the ${what === "phone" ? "phone / mobile number" : "email"} field (the value stays hidden from you; ${what === "phone" ? "leave a separate country-code picker as it is unless the number starts with + and the picker shows another country" : "do not type it anywhere else"}), then press the button that sends the code ("Continue", "Get OTP", "Send code", "Login"). ` +
-          `When the page asks for the code, call ask_user with kind "code": ${what === "phone" ? "the person reads the text message and gives it" : "it is read from their inbox when it is connected, else the person gives it"}. Do not ask for a password.${mismatch}`,
-        { settle: false },
-      );
+      this.givenSignIn.set(site, { way: what, names: [name], told: 0 });
+      return await this.withEvidence(async () => undefined, label, () => this.givenBrief(site, readSignIn((this.lastSnapshot ?? before).nodes)), { settle: false });
     }
     if (out.kind === "credentials") {
       // The person typed their username and password on pilotfish's page instead of signing in in the
@@ -5896,12 +5935,8 @@ export class Agent {
       event("credentials", out.waitedMs);
       // The person's own login, typed by the model: signed in once a page of the site is past it.
       this.signingIn.set(site, { by: "person", typed: true });
-      return await this.withEvidence(
-        async () => undefined,
-        label,
-        () => `The person entered their sign-in details for ${site}. Type {{${names.username}}} into the username / email field and {{${names.password}}} into the password field (the values stay hidden from you), then submit the form. Do not ask for them again.`,
-        { settle: false },
-      );
+      this.givenSignIn.set(site, { way: "password", names: [names.username, names.password], told: 0 });
+      return await this.withEvidence(async () => undefined, label, () => this.givenBrief(site, null), { settle: false });
     }
     if (out.kind === "signup") {
       event("credentials", out.waitedMs);
@@ -5936,6 +5971,90 @@ export class Agent {
     if (kind === "login") this.signingIn.set(siteOf(host), { by: "person", typed: false, ...(baseline ? { cookies: baseline } : {}) });
     await this.cleared({ category, host, url: this.page.url, by: "person", waitedMs: out.waitedMs });
     return await this.withEvidence(async () => undefined, label, () => `The person ${kind === "login" ? "signed in" : "passed the check"} on ${host}; continue from the page below.`, { settle: false });
+  }
+
+  /**
+   * The page at a sign-in question, read anew (never the model's last look: a tab switched since, a dialog opened), with
+   * every frame the snapshot reaches (a sign-in in a cross-origin iframe, accounts.<site>). A dialog still drawing gets up
+   * to SIGN_IN_DRAW_MS for its fields, buttons or code box to show (24 Nov, Zomato: the executor found the iframe's
+   * phone field only on a later look).
+   */
+  private async signInLook(): Promise<PageRead> {
+    const until = Date.now() + SIGN_IN_DRAW_MS;
+    for (;;) {
+      const prev = this.lastSnapshot;
+      const snap = (await captureSnapshot(this.page, { viewportBand: 1, ...(prev ? { previous: prev } : {}) }).catch(() => null)) ?? prev ?? (await captureSnapshot(this.page, { viewportBand: 1 }));
+      const read = await readPage(this.page, snap);
+      const seen = readSignIn(read.snap.nodes);
+      const ready = read.state === "known" && (!signInUnclear(seen) || seen.codeStep || read.result.category === "otp" || read.result.category === "magic_link");
+      if (ready || Date.now() >= until || this.opts.signal?.aborted || this.page.closed) return read;
+      await sleep(SIGN_IN_POLL_MS);
+    }
+  }
+
+  /**
+   * A sign-in question that needs no new question. The page asks for the code the site sent (a code box, a code or link
+   * prompt; or a code login was given and no sign-in form shows any more): that is the question, as kind "code". Or the
+   * person already gave a login for this site in this run that the page can take: the model gets its placeholders back
+   * and how to type them (twice at most; then the person is asked, as they are when the page offers only ways their
+   * login cannot fill). 24 Nov, Zomato: a phone number given, a second and third login question instead of typing it,
+   * and a login question once the code was sent.
+   */
+  private async signInGiven(read: PageRead, reason: string): Promise<ToolOutcome | null> {
+    const known = read.state === "known" ? read : null;
+    const site = siteOf(safeHost(known ? known.input.url || known.snap.url : this.page.url));
+    const seen = readSignIn(known ? known.snap.nodes : []);
+    const given = this.givenSignIn.get(site);
+    const codeShown = !!known && (known.result.category === "otp" || known.result.category === "magic_link" || seen.codeStep);
+    if (codeShown || (given && given.way !== "password" && signInUnclear(seen))) {
+      const question = `Enter the code ${site} sent to sign in. ${clip(reason, 120)}`;
+      const via = await this.askCodeOnPage(question);
+      if (via) return via;
+      // A code box the classifier does not take for a code prompt (in a frame of a dialog): asked as a code all the same.
+      if (codeShown) return await this.askCodePlain(question);
+    }
+    if (!given || given.told >= 2) return null;
+    const has = (...w: SignInWay[]) => w.some((x) => seen.ways.includes(x));
+    const fits = signInUnclear(seen) || has("identifier_first") || (given.way === "password" ? has("password") : given.way === "phone" ? has("phone_code") : has("email_code"));
+    if (!fits) return null;
+    given.told++;
+    this.note("ask_user");
+    return await this.withEvidence(async () => undefined, "ask_user: login (already given)", () => `Not asked again: ${this.givenBrief(site, seen)}`, { settle: false });
+  }
+
+  /** A code asked as a code (`ask_user` kind "code"): kept from the model, typed as {{user_code}} on this host. */
+  private async askCodePlain(question: string): Promise<ToolOutcome> {
+    if (!this.opts.askUser) return err("No human is available to answer.");
+    const answer = await this.opts.askUser(question, { secret: true });
+    this.note("ask_user");
+    if (!answer) return ok("The user did not answer. Proceed without this information or finish with success=false.", "ask_user");
+    // The code box may be in the site's own sign-in frame (accounts.<site>): the site and its subdomains.
+    const site = siteOf(safeHost(this.page.url));
+    this.secrets.addEphemeral("user_code", answer.trim(), [site, `*.${site}`]);
+    this.personCode.add(promptKey(this.page.url));
+    return ok(`The page asks for the code the site sent, so the person was asked for the code, not a login. Type it as {{user_code}} (valid for 5 minutes, on ${site} only) into the code field, then press its button.`, "ask_user: code received");
+  }
+
+  /** How to use the login the person gave for `site` (`givenSignIn`), and what to do when the page has no field for it. */
+  private givenBrief(site: string, seen: SignInSeen | null): string {
+    const g = this.givenSignIn.get(site);
+    if (!g) return "";
+    const where = "It may be inside a frame or a dialog on the page (look at the whole page).";
+    if (g.way === "password") {
+      const [u, p] = g.names;
+      return `The person entered their sign-in details for ${site}. Type {{${u}}} into the username / email field and {{${p}}} into the password field (the values stay hidden from you; on a page that asks for the email or username first, type that and continue, then the password), then submit the form. ${where} Do not ask for them again.`;
+    }
+    const phone = g.way === "phone";
+    const name = g.names[0];
+    const lacks = !!seen && !signInUnclear(seen) && !seen.ways.includes(phone ? "phone_code" : "email_code") && !seen.ways.includes("identifier_first");
+    const mismatch = lacks
+      ? ` This page shows no ${phone ? "phone number" : "email"} field for a code: look for the site's ${phone ? 'phone / mobile option ("Use phone number", "Continue with mobile", "Login with OTP")' : 'email option ("Continue with email", "Email me a code")'} first; if the site has none, do not type it into another field: call ask_user with kind "login" again, saying how the site signs in.`
+      : "";
+    return (
+      `The person gave ${phone ? "their phone number, for a one-time code sent to it by text (SMS)" : "their email address, for a one-time code sent there"}, to sign in to ${site} with no password, or to verify the account a sign-up on this page is making (then stay on the sign-up and verify it there). ` +
+      `Type {{${name}}} into the ${phone ? "phone / mobile number" : "email"} field (the value stays hidden from you; ${phone ? "leave a separate country-code picker as it is unless the number starts with + and the picker shows another country" : "do not type it anywhere else"}), then press the button that sends the code ("Continue", "Get OTP", "Send code", "Login"). ${where} ` +
+      `When the page asks for the code, call ask_user with kind "code": ${phone ? "the person reads the text message and gives it" : "it is read from their inbox when it is connected, else the person gives it"}. Do not ask for a password or for the ${phone ? "number" : "address"} again.${mismatch}`
+    );
   }
 
   /**
@@ -6709,6 +6828,18 @@ function pageToolResultText(name: string, r: PageToolResult): string {
     case "timeout":
       return `Page tool ${name} gave no answer in ${Math.round(r.waitedMs / 1000)} s and was cancelled; look at the page to see whether it did anything.`;
   }
+}
+
+/**
+ * Failures of one page tool on one site after which it is not called again in the run. 24 Nov, Zomato (three runs): its
+ * `zomato_request_login_otp` failed every time it was called, five calls in all, while the login dialog it stood in for
+ * took the phone number and sent the code the one time it was used.
+ */
+export const PAGE_TOOL_FAILS = 2;
+
+/** What the model is told once a page tool has failed `PAGE_TOOL_FAILS` times. */
+export function pageToolGiveUp(name: string, fails: number): string {
+  return `The page tool ${name} has failed ${fails} times in this run, so it is not called again: do this with the page's own controls instead (its form fields, buttons and dialogs, as a person would).`;
 }
 
 function err(message: string): ToolOutcome {

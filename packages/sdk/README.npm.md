@@ -48,6 +48,11 @@ const waiting = await pf.tasks.wait(t.id);
 if (waiting.question) await pf.tasks.answer(t.id, waiting.question.id, "yes");
 // Codes and passwords are never sent through the API: the person enters them on waiting.answerUrl.
 
+// A sign-in question names the ways the site's page offers, read from the live page: show those and no others.
+const signIn = signInOf(waiting.question);   // import { signInOf } from "@gaiventures/pilotfish"
+if (signIn?.unclear) await pf.tasks.answer(t.id, waiting.question!.id, { type: "text", text: "a code to my phone" });  // how they sign in, never a password
+else if (signIn) console.log(signIn.ways, signIn.providers, signIn.opensOn);  // e.g. ["phone_code", "password"], ["Google"], "phone_code"
+
 const next = await pf.tasks.followUp(t.id, "now add a note: window seat");  // same browser, same sign-ins
 const paused = await pf.tasks.get(next.id);
 if (paused.paused && paused.next === "continue") await pf.tasks.continue(next.id);

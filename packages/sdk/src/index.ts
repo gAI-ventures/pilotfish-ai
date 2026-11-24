@@ -19,4 +19,5 @@ export {
   type FieldError,
 } from "./errors.js";
 export type * from "./types.js";
+export { SIGN_IN_WAYS, signInOf } from "./types.js";
 export { VERSION } from "./version.js";

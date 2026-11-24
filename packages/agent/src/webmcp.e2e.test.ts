@@ -42,6 +42,11 @@ if (mc) {
     inputSchema: { type: "object", properties: { room: { type: "string" } } },
     execute: async ({ room }) => { document.body.dataset.booked = room; return "Booked " + room; },
   });
+  mc.registerTool({
+    name: "request_code", description: "Ask for a code by text", annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: { phone: { type: "string" } } },
+    execute: async () => { document.body.dataset.codeCalls = String(Number(document.body.dataset.codeCalls || 0) + 1); throw new Error("Something went wrong"); },
+  });
 }
 </script></body></html>`;
 
@@ -92,7 +97,7 @@ describe.skipIf(!E2E)("agent and a page's WebMCP tools (scripted model)", () => 
     const page = await browser.newPage();
     await page.navigate(`${origin}/`);
     if ((await page.main.evaluate<string>("typeof document.modelContext")) !== "object") return ctx.skip();
-    for (let i = 0; i < 40 && page.webmcp.list().length < 4; i++) await new Promise((r) => setTimeout(r, 50));
+    for (let i = 0; i < 40 && page.webmcp.list().length < 5; i++) await new Promise((r) => setTimeout(r, 50));
     const events: StepEvent[] = [];
     const asked: string[] = [];
     const { client, requests } = fakeClient([
@@ -153,6 +158,26 @@ describe.skipIf(!E2E)("agent and a page's WebMCP tools (scripted model)", () => 
     expect(page.url).toBe(`${origin}/`);
     expect(all).toMatch(/This page offers no tool named \\"no_such\\"; it offers: /);
     expect(all).toMatch(/arguments_json is not valid JSON/);
+    await page.close();
+  });
+
+  it("stops calling a page tool that failed twice on the site, and says to use the page's own controls (24 Nov, Zomato)", async (ctx) => {
+    const page = await browser.newPage();
+    await page.navigate(`${origin}/`);
+    if ((await page.main.evaluate<string>("typeof document.modelContext")) !== "object") return ctx.skip();
+    for (let i = 0; i < 40 && page.webmcp.list().length < 5; i++) await new Promise((r) => setTimeout(r, 50));
+    const events: StepEvent[] = [];
+    const call = { name: "page_tool", input: { tool: "request_code", arguments_json: '{"phone":"98"}' } };
+    const { client, requests } = fakeClient([[call], [call], [call], [{ name: "done", input: { success: false, result: "no code" } }]]);
+    const agent = new Agent(page, { client, model: "fake", policy: new DefaultPolicy({ allowPrivateNetwork: true }), onStep: (e) => events.push(e), contextEditing: false, fastSettle: true });
+    await agent.run("Ask for a sign-in code.");
+    const results = events.filter((e): e is Extract<StepEvent, { type: "tool_result" }> => e.type === "tool_result" && e.name === "page_tool");
+    expect(results.map((r) => r.ok)).toEqual([false, false, false]);
+    // Two calls reached the page; the third was refused before it, and the second already said so.
+    expect(await page.main.evaluate<string>("document.body.dataset.codeCalls")).toBe("2");
+    // The model's last request holds the second call's result and the refused third, each saying so.
+    const all = JSON.stringify(requests.at(-1));
+    expect(all.match(/The page tool request_code has failed 2 times in this run, so it is not called again: do this with the page's own controls/g)?.length).toBe(2);
     await page.close();
   });
 

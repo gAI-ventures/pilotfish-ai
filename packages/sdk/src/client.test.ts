@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { Pilotfish } from "./client.js";
 import { AuthenticationError, BadRequestError, ConflictError, ConnectionError, NotFoundError, PaymentRequiredError, PilotfishError, RateLimitError, ServerError, WaitTimeoutError } from "./errors.js";
 import { parseWebhook, signWebhook, verifyWebhook } from "./webhooks.js";
+import { SIGN_IN_WAYS, signInOf } from "./types.js";
 
 type Call = { method: string; url: URL; headers: Record<string, string>; body: unknown };
 
@@ -157,5 +158,25 @@ describe("webhooks", () => {
   it("matches the server's own signature (a fixed vector)", async () => {
     // HMAC-SHA256("secret", "1700000000.{}") as the server signs it (packages/server/src/webhooks.ts signWebhook).
     expect(await signWebhook("secret", "{}", 1_700_000_000)).toBe("t=1700000000,v1=b8569b78799ff9e3cbff0fc2d63a33a2b57f3282abd07c37ae5e8e7d79a5f163");
+  });
+});
+
+describe("a sign-in question's ways (signInOf)", () => {
+  it("reads the question's signIn from a task as the API gives it", async () => {
+    const question = { id: "q1", kind: "live_view", category: "login", message: "Please sign in to zomato.com", signIn: { ways: ["phone_code", "password"], providers: ["Google"], opensOn: "phone_code", pageWords: "Login" } };
+    const s = scripted([() => json(job({ status: "needs_input", question }))]);
+    const t = await s.client().tasks.get("job_1");
+    expect(signInOf(t.question)).toEqual({ ways: ["phone_code", "password"], providers: ["Google"], opensOn: "phone_code", pageWords: "Login", unclear: false });
+    expect(SIGN_IN_WAYS).toEqual(["password", "phone_code", "email_code", "identifier_first", "passkey"]);
+  });
+
+  it("checks it: unknown ways left out, opensOn only among them, asked only when not offered; nothing read is unclear", () => {
+    const q = (signIn: unknown) => ({ id: "q1", category: "login", signIn });
+    expect(signInOf(q({ ways: ["password", "magic_wand", "password"], providers: ["Apple", ""], opensOn: "phone_code", asked: "password" }))).toEqual({ ways: ["password"], providers: ["Apple"], unclear: false });
+    expect(signInOf(q({ ways: ["passkey"], providers: [], opensOn: "passkey", asked: "email_code" }))).toEqual({ ways: ["passkey"], providers: [], asked: "email_code", unclear: false });
+    expect(signInOf(q({ ways: [], providers: [], pageWords: "Members area" }))).toEqual({ ways: [], providers: [], pageWords: "Members area", unclear: true });
+    expect(signInOf(q("password"))).toBeNull();
+    expect(signInOf({ id: "q2", category: "captcha", signIn: { ways: ["password"], providers: [] } })).toBeNull();
+    expect(signInOf(null)).toBeNull();
   });
 });

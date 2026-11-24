@@ -69,16 +69,68 @@ export interface TaskRequest {
 
 export type TaskStatus = "queued" | "running" | "needs_input" | "done" | "failed" | "cancelled";
 
+/**
+ * The ways a sign-in page can offer, as `Question.signIn.ways` lists them (the API's own list, kept equal to it by the
+ * API's tests). `password`: an email, phone or username and a password. `phone_code`: a phone number and a code sent by
+ * text. `email_code`: an email address and a code or link sent there. `identifier_first`: the email, phone or username
+ * first, the rest on the site's next page. `passkey`: a passkey, in the browser.
+ */
+export const SIGN_IN_WAYS = ["password", "phone_code", "email_code", "identifier_first", "passkey"] as const;
+export type SignInWay = (typeof SIGN_IN_WAYS)[number];
+
+/**
+ * A sign-in question's ways (`Question.signIn`, category `login`), read from the live page when it was asked. Show the
+ * person these and no others; the details themselves are typed on `answerUrl`, never sent through the API by you.
+ */
+export interface SignInAsk {
+  /** In the page's order, the way its own form shows first leading. Empty with no `providers`: it could not be read. */
+  ways: SignInWay[];
+  /** Providers it offers by name ("Google", "Apple"), done in the browser. */
+  providers: string[];
+  /** The way the form opens on: the person's when the page offers it, else the page's first. One of `ways`. */
+  opensOn?: SignInWay;
+  /** The way the person asked for that the page does not offer (never one of `ways`). */
+  asked?: SignInWay;
+  /** The page's own words for its sign-in. */
+  pageWords?: string;
+}
+
 /** A question a task is waiting on (status `needs_input`). Codes and passwords are answered on `answerUrl`, never here. */
 export interface Question {
   id: string;
   kind?: string;
+  /** For a hand-off: what the page shows (`login`, `captcha`, `otp`…). */
+  category?: string;
+  /** The question in words. */
+  message?: string;
   text?: string;
   question?: string;
   options?: string[];
+  /** A sign-in (category `login`): the ways its page offers. Read it with `signInOf`, which checks it. */
+  signIn?: SignInAsk;
   askedAt?: number;
   expiresAt?: number;
   [key: string]: unknown;
+}
+
+/**
+ * A sign-in question's ways, checked, or null when the question is not a sign-in or carries none: known ways only (a way
+ * from a newer API is left out), each once; `opensOn` only when it is one of them; `asked` only when it is not. `unclear`:
+ * nothing could be read, so the question asks how the person signs in (answer it with `{type: "text"}` in their words,
+ * never a password or code; or they sign in in the browser).
+ */
+export function signInOf(q: Question | null | undefined): (SignInAsk & { unclear: boolean }) | null {
+  const s = q?.signIn as unknown;
+  if (q?.category !== "login" || !s || typeof s !== "object") return null;
+  const o = s as Record<string, unknown>;
+  if (!Array.isArray(o["ways"]) || !Array.isArray(o["providers"])) return null;
+  const known = (w: unknown): w is SignInWay => (SIGN_IN_WAYS as readonly unknown[]).includes(w);
+  const ways = [...new Set(o["ways"].filter(known))];
+  const providers = [...new Set(o["providers"].filter((p): p is string => typeof p === "string" && p.trim() !== ""))];
+  const opensOn = known(o["opensOn"]) && ways.includes(o["opensOn"]) && o["opensOn"] !== "passkey" ? o["opensOn"] : undefined;
+  const asked = known(o["asked"]) && !ways.includes(o["asked"]) ? o["asked"] : undefined;
+  const pageWords = typeof o["pageWords"] === "string" ? o["pageWords"] : undefined;
+  return { ways, providers, ...(opensOn ? { opensOn } : {}), ...(asked ? { asked } : {}), ...(pageWords ? { pageWords } : {}), unclear: !ways.length && !providers.length };
 }
 
 /** What a finished task found. */

@@ -574,3 +574,23 @@ describe("a final step is on what the person named (19 Nov)", () => {
     expect((await pay("Northgate Tower, Hillside")).kind).toBe("allow");
   });
 });
+
+describe("DefaultPolicy: a sign-in code sent to the person is not a send (24 Nov, Zomato)", () => {
+  const onPage = (tool: "click" | "page_tool", words: string) =>
+    new DefaultPolicy().check(
+      tool === "click"
+        ? { tool: "click", input: { ref: "e1" }, url: "https://accounts.example.com/login", target: `<button role="button">${words}</button>`, task: "log in to my account" }
+        : { tool: "page_tool", input: { tool: "t" }, url: "https://www.example.com/", target: `<page-tool name="t">${words}</page-tool>`, task: "log in to my account" },
+    );
+
+  it("lets the code and link buttons of a sign-in through, by click or page tool", async () => {
+    for (const words of ["Send One Time Password", "Send OTP", "Get OTP", "Resend code", "Send verification code", "Email me a login link", "Request a new code", "Text me a code", "request login otp"]) {
+      expect((await onPage("click", words)).kind, words).toBe("allow");
+      expect((await onPage("page_tool", words)).kind, words).toBe("allow");
+    }
+  });
+
+  it("still asks about a real send", async () => {
+    for (const words of ["Send message", "Send", "Send email", "Send gift code to a friend", "Post", "Share"]) expect(await onPage("click", words), words).toMatchObject({ kind: "confirm", write: "send" });
+  });
+});

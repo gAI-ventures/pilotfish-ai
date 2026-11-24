@@ -13,8 +13,28 @@ export { SYSTEM_PROMPT, SYSTEM_PROMPT_FAST } from "./prompt.js";
 export { TabManager } from "./tabs.js";
 export type { InterventionContext, InterventionRequest, InterventionResponse, InterruptionCleared, SignupDetails, SiteInterruptions, ChallengeSolveRequest, ChallengeSolveOutcome, PreparedSolve, SolveChallenge } from "./interventions.js";
 export { hostMatches, InterruptionStats, neverAutomate, NEVER_AUTOMATE_HOSTS } from "./interventions.js";
-export type { CodeLoginResponse, SignInMethod } from "./interventions.js";
-export { looksLikePhone, signInOffers, signInPreference, type SignInPreference } from "./sign-in.js";
+export type { CodeLoginResponse, SignInHowResponse } from "./interventions.js";
+export {
+  FORM_WAYS,
+  looksLikePhone,
+  parseSignInAsk,
+  readSignIn,
+  SIGN_IN_WAY_WORDS,
+  SIGN_IN_WAYS,
+  signInAnswerProblem,
+  signInAsk,
+  SignInAskSchema,
+  signInHasForm,
+  signInHowQuestion,
+  signInHowWords,
+  signInPreference,
+  signInUnclear,
+  signInWaysText,
+  type SignInAsk,
+  type SignInPreference,
+  type SignInSeen,
+  type SignInWay,
+} from "./sign-in.js";
 export { UsageMeter, kTokens, costOf, registerModelPrice } from "./usage.js";
 export { challengePolicy, challengePolicyFromEnv, DEFAULT_CHALLENGE_POLICY, MIN_POLL_MS } from "./challenge-policy.js";
 export type { ChallengePolicy, ChallengePolicyOptions, ChallengePolicyOverride } from "./challenge-policy.js";

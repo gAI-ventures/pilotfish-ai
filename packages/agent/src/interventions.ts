@@ -7,6 +7,7 @@
 // never-automate host.
 
 import type { Page } from "@pilotfish/browser";
+import type { SignInSeen } from "./sign-in.js";
 import { captureSnapshot, classifyInterruption, DocumentChangedError, gatherInterruptInput, isResolved, trackMainResponse, type InterruptInput, type Interruption, type MainResponseTracker, type Snapshot } from "@pilotfish/perception";
 
 /** What the host shows the human. */
@@ -34,10 +35,11 @@ export interface InterventionRequest {
   /** A sign-in the person may answer with "create an account for me" (`signup`): the host makes the details. */
   acceptsSignup?: boolean;
   /**
-   * The ways the sign-in page on screen offers, read from its fields and buttons (`signInOffers`): a password,
-   * a phone number (a code by text), an email. Empty when the page shows none of them (a "Sign in" button only).
+   * A sign-in: what the page on screen offers, read from its fields, buttons and words in every frame at ask time
+   * (`readSignIn`): the ways, the providers, the page's own words. No way and no provider: it could not be read, and the
+   * person is asked how they sign in (a `how` answer) rather than shown a guessed form.
    */
-  signInOffers?: SignInMethod[];
+  signIn?: SignInSeen;
   /** A sign-in the person may skip (a `skip` answer): the run goes on without an account, as far as the site lets it. */
   acceptsSkip?: boolean;
   /** A sign-in page's country code beside its phone field ("+91"), when it shows one: the card's phone form starts there. */
@@ -48,9 +50,6 @@ export interface InterventionRequest {
    */
   afterSkip?: boolean;
 }
-
-/** A way to sign in a page offers: a password field, a phone / mobile number field, an email field. */
-export type SignInMethod = "password" | "phone" | "email";
 
 /** Details for an account pilotfish creates with the person's approval (the host generates the password and saves the login). */
 export interface SignupDetails {
@@ -71,7 +70,18 @@ export type InterventionResponse =
   | { status: "skip" }
   | { status: "credentials"; username: string; password: string }
   | ({ status: "signup" } & SignupDetails)
-  | CodeLoginResponse;
+  | CodeLoginResponse
+  | SignInHowResponse;
+
+/**
+ * `how`: a sign-in whose ways could not be read from the page, answered with how the person signs in ("a code to my
+ * phone", "Google"), in words already cleared of anything secret (`signInHowWords`). The agent finds that way on the
+ * page, and asks again once its form shows.
+ */
+export interface SignInHowResponse {
+  status: "how";
+  text: string;
+}
 
 /**
  * `code_login`: the person signs in with no password: the agent types their phone number (or email) and the site

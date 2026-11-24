@@ -1,24 +1,134 @@
 import { describe, expect, it } from "vitest";
-import { looksLikePhone, signInOffers, signInPreference, type SignInNode } from "./sign-in.js";
+import {
+  looksLikePhone,
+  parseSignInAsk,
+  readSignIn,
+  SIGN_IN_WAYS,
+  signInAnswerProblem,
+  signInAsk,
+  signInHowQuestion,
+  signInHowWords,
+  signInPreference,
+  signInWaysText,
+  type SignInNode,
+} from "./sign-in.js";
 
 const input = (attrs: Record<string, string>, name = ""): SignInNode => ({ tag: "input", attrs, name, visible: true });
 const button = (name: string, role = "button"): SignInNode => ({ tag: "button", attrs: {}, role, name, visible: true });
+const text = (t: string): SignInNode => ({ tag: "#text", attrs: {}, text: t, visible: true });
+const heading = (t: string): SignInNode => ({ tag: "h1", attrs: {}, role: "heading", name: t, visible: true });
+const ways = (nodes: SignInNode[]) => readSignIn(nodes).ways;
 
-describe("what a sign-in page offers", () => {
-  it("reads password, phone and email fields from their type, autocomplete and labels", () => {
-    expect(signInOffers([input({ type: "tel" })])).toEqual(["phone"]);
-    expect(signInOffers([input({ type: "text", name: "mobile" }), button("Continue")])).toEqual(["phone"]);
-    expect(signInOffers([input({ type: "text" }, "Enter Mobile Number")])).toEqual(["phone"]);
-    expect(signInOffers([input({ type: "email" }), input({ type: "password" })])).toEqual(["password", "email"]);
-    expect(signInOffers([input({ type: "text", autocomplete: "username" }, "Email or phone"), input({ type: "password" })])).toEqual(["password", "phone", "email"]);
-    // A switch to the phone way counts, so does a button that sends an OTP.
-    expect(signInOffers([input({ type: "email" }), button("Use phone number instead", "link")])).toEqual(["phone", "email"]);
-    expect(signInOffers([input({ type: "text" }, "Username"), button("Login with OTP")])).toEqual(["phone"]);
+describe("what a sign-in page offers (readSignIn)", () => {
+  it("a password form: an email or phone beside a password is its username, not a code way", () => {
+    expect(ways([heading("Sign in"), input({ type: "email" }, "Email"), input({ type: "password" }, "Password"), button("Sign in")])).toEqual(["password"]);
+    expect(ways([input({ type: "text", autocomplete: "username" }, "Email or phone"), input({ type: "password" }), button("Log in")])).toEqual(["password"]);
+    expect(ways([input({ type: "tel" }, "Mobile number"), input({ type: "password" }, "Password")])).toEqual(["password"]);
   });
 
-  it("leaves out hidden fields, check boxes and a page with no sign-in fields", () => {
-    expect(signInOffers([{ ...input({ type: "password" }), visible: false }, input({ type: "hidden", name: "phone" }), input({ type: "checkbox" }, "Remember my phone")])).toEqual([]);
-    expect(signInOffers([button("Sign in")])).toEqual([]);
+  it("an email only, with a magic link or code it says it sends", () => {
+    expect(ways([heading("Log in"), input({ type: "email" }, "Work email"), text("We'll email you a magic link for a password-free sign in."), button("Continue")])).toEqual(["email_code"]);
+    expect(ways([input({ type: "email" }), button("Email me a sign-in link")])).toEqual(["email_code"]);
+  });
+
+  it("a phone and a code by text", () => {
+    expect(ways([input({ type: "tel" })])).toEqual(["phone_code"]);
+    expect(ways([input({ type: "text", name: "mobile" }), button("Continue")])).toEqual(["phone_code"]);
+    expect(ways([input({ type: "text" }, "Enter Mobile Number"), button("Get OTP")])).toEqual(["phone_code"]);
+    // A field for either, on a page that says it sends an OTP: both codes.
+    expect(ways([input({ type: "text" }, "Email or mobile number"), text("We will send you an OTP"), button("Continue")])).toEqual(["phone_code", "email_code"]);
+  });
+
+  it("split OTP boxes are the code step, not a sign-in form", () => {
+    const r = readSignIn([heading("Enter the code"), ...Array.from({ length: 6 }, () => input({ type: "text", maxlength: "1", inputmode: "numeric" }))]);
+    expect(r.ways).toEqual([]);
+    expect(r.codeStep).toBe(true);
+    expect(readSignIn([input({ type: "text", autocomplete: "one-time-code" }, "OTP")]).codeStep).toBe(true);
+  });
+
+  it("Google and Apple buttons only: providers, done in the browser, and no form", () => {
+    const r = readSignIn([heading("Welcome back"), button("Continue with Google"), button("Sign in with Apple"), button("Facebook", "link")]);
+    expect(r.ways).toEqual([]);
+    expect(r.providers).toEqual(["Google", "Apple", "Facebook"]);
+    expect(readSignIn([button("Continue with email")]).providers).toEqual([]);
+    // A link's own note is no part of the name (live on Zomato, 24 Nov): one Google, not two.
+    expect(readSignIn([button("Sign in with Google"), button("Sign in with Google. Opens in new tab")]).providers).toEqual(["Google"]);
+  });
+
+  it("an email first and the rest on the next page: no code is guessed, and a forgotten-password line is no code", () => {
+    expect(ways([heading("Sign in"), input({ type: "email" }, "Email address"), button("Next")])).toEqual(["identifier_first"]);
+    expect(ways([input({ type: "text", autocomplete: "username" }, "Username"), text("Forgot your password? We'll email you a reset link."), button("Continue")])).toEqual(["identifier_first"]);
+    expect(ways([button("Continue with email"), button("Continue with Google")])).toEqual(["identifier_first"]);
+  });
+
+  it("switches and tabs add their ways; the form on screen leads", () => {
+    expect(ways([button("Login with OTP", "tab"), input({ type: "email" }), input({ type: "password" })])).toEqual(["password", "phone_code"]);
+    expect(ways([input({ type: "email" }), button("Use phone number instead", "link")])).toEqual(["identifier_first", "phone_code"]);
+    expect(ways([input({ type: "tel" }), button("Login with password", "link"), button("Sign in with a passkey")])).toEqual(["phone_code", "password", "passkey"]);
+  });
+
+  it("a dialog with a sign-in field is the sign-in: the page behind it is left out", () => {
+    const dialog: SignInNode = { tag: "div", attrs: { "aria-modal": "true" }, role: "dialog", visible: true };
+    const inIt = (n: SignInNode): SignInNode => ({ ...n, parent: dialog });
+    expect(ways([input({ type: "email" }, "Subscribe to our newsletter"), dialog, inIt(input({ type: "tel" }, "Phone")), inIt(button("Send One Time Password"))])).toEqual(["phone_code"]);
+  });
+
+  it("an unclear page: nothing read, the page's own words kept", () => {
+    const r = readSignIn([heading("Members area"), button("Sign in"), { ...input({ type: "password" }), visible: false }, input({ type: "hidden", name: "phone" }), input({ type: "checkbox" }, "Remember my phone")]);
+    expect([r.ways, r.providers, r.codeStep]).toEqual([[], [], false]);
+    expect(r.pageWords).toBe("Members area · Sign in");
+  });
+});
+
+describe("the sign-in question's field (signInAsk)", () => {
+  const seen = { ways: ["password", "phone_code"] as const, providers: ["Google"] };
+  it("opens on the person's way when the page offers it, else the page's first form; never adds one", () => {
+    expect(signInAsk({ ...seen, ways: [...seen.ways] }, "phone")).toEqual({ ways: ["password", "phone_code"], providers: ["Google"], opensOn: "phone_code" });
+    expect(signInAsk({ ...seen, ways: [...seen.ways] })).toMatchObject({ opensOn: "password" });
+    // Asked for an emailed code: the page has none, so it is said, never offered.
+    expect(signInAsk({ ...seen, ways: [...seen.ways] }, "email_code")).toEqual({ ways: ["password", "phone_code"], providers: ["Google"], opensOn: "password", asked: "email_code" });
+    // An email or username first takes any of them.
+    expect(signInAsk({ ways: ["identifier_first"], providers: [] }, "phone")).toEqual({ ways: ["identifier_first"], providers: [], opensOn: "identifier_first" });
+    // Providers only: nothing to open a form on.
+    expect(signInAsk({ ways: [], providers: ["Google"] }, "password")).toEqual({ ways: [], providers: ["Google"], asked: "password" });
+  });
+
+  it("drops what is not a way, and repeats", () => {
+    expect(signInAsk({ ways: ["password", "password", "phone" as never], providers: ["Google", "Google", " "] })).toEqual({ ways: ["password"], providers: ["Google"], opensOn: "password" });
+  });
+
+  it("is checked when read back: known ways once, opensOn among the form ways offered, asked not offered", () => {
+    expect(parseSignInAsk({ ways: ["phone_code"], providers: [], opensOn: "phone_code" })).toEqual({ ways: ["phone_code"], providers: [], opensOn: "phone_code" });
+    expect(parseSignInAsk({ ways: ["phone"], providers: [] })).toBeNull();
+    expect(parseSignInAsk({ ways: ["password"], providers: [], opensOn: "phone_code" })).toBeNull();
+    expect(parseSignInAsk({ ways: ["passkey"], providers: [], opensOn: "passkey" })).toBeNull();
+    expect(parseSignInAsk({ ways: ["password"], providers: [], asked: "password" })).toBeNull();
+    expect(parseSignInAsk({ ways: ["password", "password"], providers: [] })).toBeNull();
+    expect(parseSignInAsk({ ways: [], providers: [], extra: 1 })).toBeNull();
+    expect(SIGN_IN_WAYS).toEqual(["password", "phone_code", "email_code", "identifier_first", "passkey"]);
+  });
+
+  it("an answer must fit a way offered", () => {
+    const phoneOnly = { ways: ["phone_code" as const], providers: [] };
+    expect(signInAnswerProblem(phoneOnly, { type: "credentials" })).toMatch(/does not sign in with a password; it offers a phone number and a code sent by text/);
+    expect(signInAnswerProblem(phoneOnly, { type: "code_login", channel: "sms" })).toBeNull();
+    expect(signInAnswerProblem(phoneOnly, { type: "code_login", channel: "email" })).toMatch(/emailed code/);
+    expect(signInAnswerProblem({ ways: ["identifier_first"], providers: [] }, { type: "code_login", channel: "email" })).toBeNull();
+    expect(signInAnswerProblem({ ways: ["identifier_first"], providers: [] }, { type: "credentials" })).toBeNull();
+    expect(signInAnswerProblem(phoneOnly, { type: "done" })).toBeNull();
+  });
+
+  it("says the ways in words, and asks how when none could be read", () => {
+    expect(signInWaysText({ ways: ["password", "phone_code"], providers: ["Google"] })).toBe("a password (with an email, phone or username); a phone number and a code sent by text; or Google, in the browser");
+    expect(signInWaysText({ ways: [], providers: [] })).toBe("");
+    expect(signInHowQuestion("zomato.com", { ways: [], providers: [], pageWords: "Login · Continue" })).toMatch(/^How do you sign in to zomato\.com\? .*it shows: "Login · Continue".*Never a password or code here\.$/);
+  });
+
+  it("the person's words for how they sign in never carry a secret", () => {
+    expect(signInHowWords("with my phone number and a code")).toBe("with my phone number and a code");
+    expect(signInHowWords("email and password, my password is hunter2")).toBe("email and password, my password [hidden]");
+    expect(signInHowWords("phone 9876543210 then OTP")).toBe("phone [hidden] then OTP");
+    expect(signInHowWords("Google, account ab12cd34ef")).toBe("Google, account [hidden]");
   });
 });
 

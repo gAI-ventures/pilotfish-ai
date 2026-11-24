@@ -74,6 +74,11 @@ done = pf.tasks.wait(t["id"])               # until it ends, or waits on a quest
 - `tasks.answer(id, question_id, answer)` answers the open question (`task["question"]["id"]`): `"yes"`, `"no"`,
   `"done"`, `"cancel"`, any other text, or an answer dict. Codes and passwords go on the task's `answerUrl`, never
   through the API.
+- `pilotfish.sign_in_of(task["question"])` reads a sign-in question's ways, checked: `ways` (in the page's order, of
+  `password`, `phone_code`, `email_code`, `identifier_first`, `passkey`), `providers` ("Google", done in the browser),
+  `opensOn`, `asked` (a way the person asked for that the page does not offer) and `unclear`. They are read from the
+  live page when it asked: show those and no others. `unclear` means pilotfish could not tell how the page signs in:
+  answer with how the person signs in, as text ("a code to my phone"), never a password or code.
 - `tasks.message(id, "use the cheaper one")` tells a running task something; it reads it before its next step.
 - `tasks.cancel(id)`, `tasks.pause(id)` / `tasks.resume(id)` (take the browser over and hand it back),
   `tasks.rerun(id)`, `tasks.thread(id)`, `tasks.delete_session(id)`.
