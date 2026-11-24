@@ -84,6 +84,43 @@ describe("SecretBroker", () => {
   });
 });
 
+describe("a value two secrets share reads as the newest one (24 Nov, a Flipkart sign-in)", () => {
+  it("a number given for this site wins over a saved login elsewhere with the same number", () => {
+    const b = new SecretBroker({ "swiggy.com.username": { value: "9876543210", allowedHosts: ["swiggy.com"] } });
+    b.addIdentifier("flipkart.com", "9876543210", "phone");
+    expect(b.scrub("Phone Number: 9876543210")).toBe("Phone Number: {{flipkart.com.entered_phone}}");
+  });
+
+  it("typing a placeholder makes it the newest: the page then shows that name", () => {
+    const b = new SecretBroker({ "a.com.username": { value: "same-user@example.com", allowedHosts: ["a.com"] }, "b.com.username": { value: "same-user@example.com", allowedHosts: ["b.com"] } });
+    expect(b.scrub("same-user@example.com")).toBe("{{b.com.username}}");
+    b.substitute("{{a.com.username}}", "a.com");
+    expect(b.scrub("user: same-user@example.com")).toBe("user: {{a.com.username}}");
+  });
+
+  it("a phone fitted to its field is masked as the name it was typed from, in readable and guarded output", () => {
+    const b = new SecretBroker({ "swiggy.com.username": { value: "9876543210", allowedHosts: ["swiggy.com"] } });
+    const name = b.addIdentifier("flipkart.com", "+91 98765 43210", "phone");
+    b.substitute(`{{${name}}}`, "www.flipkart.com");
+    b.addTypedForm(name, "9876543210");
+    expect(b.scrub("+91 [Phone Number: 9876543210]")).toBe("+91 [Phone Number: {{flipkart.com.entered_phone}}]");
+    b.guardOutput = true;
+    expect(b.holdsSecret("9876543210")).toBe(true);
+  });
+
+  it("a typed form of an unknown name, or one under 3 characters, is not kept", () => {
+    const b = new SecretBroker();
+    b.addTypedForm("nope", "9876543210");
+    b.addTypedForm("nope", "12");
+    expect(b.scrub("9876543210")).toBe("9876543210");
+  });
+
+  it("a shorter value inside a longer one never splits it", () => {
+    const b = new SecretBroker({ short: "4321", long: "98765-4321-00" });
+    expect(b.scrub("id 98765-4321-00 and 4321")).toBe("id {{long}} and {{short}}");
+  });
+});
+
 describe("typed passwords (fifth review, 17 Nov): every form becomes the withholding mark", () => {
   it("short values as substrings in raw, URL-encoded, JSON-escaped and base64 forms, inside other words too", async () => {
     const { maskShortValue, TYPED_SECRET_MARK: M } = await import("./secrets.js");

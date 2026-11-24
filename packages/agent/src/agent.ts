@@ -5735,7 +5735,11 @@ export class Agent {
     const near = nearTexts(node);
     const max = Number(node.attrs["maxlength"]);
     const dial = dialCodeIn(near);
-    return fitPhone(sub.text, { ...(Number.isFinite(max) && max > 0 ? { maxLength: max } : {}), numeric: type === "number" || (node.attrs["inputmode"] ?? "").toLowerCase() === "numeric", ...(dial ? { dialCode: dial } : {}) });
+    const fitted = fitPhone(sub.text, { ...(Number.isFinite(max) && max > 0 ? { maxLength: max } : {}), numeric: type === "number" || (node.attrs["inputmode"] ?? "").toLowerCase() === "numeric", ...(dial ? { dialCode: dial } : {}) });
+    // The field shows the number as fitted: masked as the placeholder it was typed from, never as another secret that
+    // holds the same digits (24 Nov: a saved Swiggy username read back in a Flipkart field).
+    if (fitted !== sub.text) this.secrets.addTypedForm(sub.used[0]!, fitted);
+    return fitted;
   }
 
   /**

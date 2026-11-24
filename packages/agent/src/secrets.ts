@@ -49,6 +49,17 @@ export class SecretBroker {
   private readonly formsCache = new Map<string, string[]>();
   /** Every host glob a secret was ever usable on ("*": one scoped to none), expired ones included: a page there may show a value. */
   private readonly shownOn = new Set<string>();
+  /**
+   * How recently each name was set or typed (a rising counter): when several secrets hold the same value (a phone saved
+   * as one site's username and given again to sign in to another), the page shows it as the newest one's placeholder.
+   * 24 Nov: a Flipkart sign-in typed {{flipkart.com.entered_phone}} and the page read back
+   * {{swiggy.com.username}} (an older saved login with the same number); the model took the field for an unfilled
+   * placeholder, asked the person to sign in again, and the end check failed the run on it.
+   */
+  private readonly recent = new Map<string, number>();
+  private tick = 0;
+  /** A secret's value as a field took it (a phone fitted to the field: country code left out, digits only) → its name. */
+  private readonly typedForms = new Map<string, string>();
 
   constructor(secrets: Record<string, string | SecretSpec> = {}) {
     for (const [name, spec] of Object.entries(secrets)) this.put(name, typeof spec === "string" ? { value: spec } : spec);
@@ -56,6 +67,7 @@ export class SecretBroker {
 
   private put(name: string, spec: SecretSpec): void {
     this.secrets.set(name, spec);
+    this.recent.set(name, ++this.tick);
     for (const g of spec.allowedHosts?.length ? spec.allowedHosts : ["*"]) this.shownOn.add(g);
   }
 
@@ -96,6 +108,16 @@ export class SecretBroker {
     this.typed.set(value, [...new Set([...(this.typed.get(value) ?? []), ...from])]);
   }
 
+  /**
+   * The form a field took a secret in, when the agent typed it fitted to the field (a phone number with the country code
+   * the page shows left out, digits only): from then on that form is masked as `{{name}}` too, as the newest use of it.
+   */
+  addTypedForm(name: string, form: string): void {
+    if (!form || form.length < 3 || !this.secrets.has(name)) return;
+    this.typedForms.set(form, name);
+    this.recent.set(name, ++this.tick);
+  }
+
   /** The names of the secrets a typed value came from by placeholder (empty: typed as given; undefined: not typed). */
   typedFrom(value: string): readonly string[] | undefined {
     return this.typed.get(value);
@@ -109,6 +131,7 @@ export class SecretBroker {
     for (const code of this.issued.keys()) out.add(code);
     for (const v of this.retired.keys()) out.add(v);
     for (const v of this.typed.keys()) out.add(v);
+    for (const v of this.typedForms.keys()) out.add(v);
     return [...out].filter(Boolean).sort((a, b) => b.length - a.length);
   }
 
@@ -231,6 +254,7 @@ export class SecretBroker {
         throw new Error(`Secret "${name}" is not allowed on host "${host}" (allowed: ${spec.allowedHosts?.join(", ") || "none"})`);
       }
       used.push(name);
+      this.recent.set(name, ++this.tick);
       if (spec.totp) {
         const code = totp(spec.totp);
         this.issued.set(code, Date.now());
@@ -255,10 +279,17 @@ export class SecretBroker {
     }
     if (!this.secrets.size && !this.issued.size && !this.retired.size && !this.typed.size) return text;
     let out = text;
-    for (const [name, spec] of this.secrets) {
-      if (!spec.value || spec.value.length < 3) continue;
-      out = maskValue(out, spec.value, `{{${name}}}`);
-    }
+    // One placeholder per value: the name set or typed most recently (`recent`), so a value two secrets share reads as
+    // the one this run gave or typed, not whichever was saved first. Longer values first, so a shorter one inside a
+    // longer one never splits it.
+    const named = new Map<string, string>();
+    const take = (value: string, name: string) => {
+      const was = named.get(value);
+      if (!was || (this.recent.get(name) ?? 0) > (this.recent.get(was) ?? 0)) named.set(value, name);
+    };
+    for (const [name, spec] of this.secrets) if (spec.value && spec.value.length >= 3) take(spec.value, name);
+    for (const [form, name] of this.typedForms) take(form, name);
+    for (const [value, name] of [...named].sort((a, b) => b[0].length - a[0].length)) out = maskValue(out, value, `{{${name}}}`);
     for (const code of this.issued.keys()) out = out.split(code).join("{{totp_code}}");
     for (const [value, name] of this.retired) out = maskValue(out, value, `{{${name}}}`);
     for (const value of this.typed.keys()) out = value.length >= 3 ? maskValue(out, value, TYPED_SECRET_MARK) : maskShortValue(out, value, TYPED_SECRET_MARK);
