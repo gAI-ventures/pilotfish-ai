@@ -384,9 +384,9 @@ describe("DefaultPolicy acting outside the allowlist", () => {
 });
 
 describe("a cart edit", () => {
-  const raw = (target: string) => new DefaultPolicy().check({ tool: "click", input: { ref: "e1" }, url: "https://www.swiggy.com/instamart/cart", target, task: "swap the milk" });
+  const raw = (target: string) => new DefaultPolicy().check({ tool: "click", input: { ref: "e1" }, url: "https://www.grocery.example/instamart/cart", target, task: "swap the milk" });
 
-  it("taking an item out of a cart, or one fewer, needs no approval (6 Nov: Swiggy's minus asked twice)", async () => {
+  it("taking an item out of a cart, or one fewer, needs no approval (6 Nov: the grocery site's minus asked twice)", async () => {
     expect((await raw('[e14]<button aria-label="Remove 1 item from cart" data-testid="add_buttons_minus">−</button>')).kind).toBe("allow");
     expect((await clickOn("Remove from basket")).kind).toBe("allow");
     expect((await clickOn("Remove item from your bag")).kind).toBe("allow");
@@ -419,7 +419,7 @@ describe("a payment the person's own words approve (11 Nov)", () => {
       "Book the room with my saved card but ask me before paying",
       "Check if my saved card is still on file on Amazon",
       "Order it with my saved card, but don't pay yet, leave it in the cart",
-      "Just compare the prices of the iPhone 17 on Flipkart and Amazon",
+      "Just compare the prices of the iPhone 17 on StoreSite and Amazon",
     ];
     for (const t of no) expect(payApprovedByWords(t), t).toBe(false);
     expect(asksToPay("Book a table for 2")).toBe(true);
@@ -575,7 +575,7 @@ describe("a final step is on what the person named (19 Nov)", () => {
   });
 });
 
-describe("DefaultPolicy: a sign-in code sent to the person is not a send (24 Nov, Zomato)", () => {
+describe("DefaultPolicy: a sign-in code sent to the person is not a send (24 Nov, a food-delivery site)", () => {
   const onPage = (tool: "click" | "page_tool", words: string) =>
     new DefaultPolicy().check(
       tool === "click"

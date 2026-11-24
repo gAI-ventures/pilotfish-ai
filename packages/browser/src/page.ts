@@ -1007,7 +1007,7 @@ export class Page {
    * Let the page's own writes reach its site before the browser is let go: waits until none of its first-party write
    * requests (POST, PUT, PATCH, DELETE, a GraphQL mutation; telemetry and other sites left out) is in flight and none
    * has started for `quietMs` (a debounced save, such as a cart that syncs a moment after the click), up to
-   * `timeoutMs`. `host`: the site whose writes count (default: the page's own). Live, 6 Nov: an item added to a Swiggy
+   * `timeoutMs`. `host`: the site whose writes count (default: the page's own). Live, 6 Nov: an item added to a GrocerySite
    * Instamart cart showed in the agent's cart but never reached the person's account, the browser closed seconds
    * after the click.
    */

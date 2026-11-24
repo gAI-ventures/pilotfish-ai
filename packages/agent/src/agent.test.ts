@@ -328,7 +328,7 @@ describe("a real user's flight session (23-24 Nov): dates the site rewrote, the 
     expect(STOPPED_BY.test("Google Flights showed “Oops, something went wrong” after Reload.")).toBe(true);
     expect(STOPPED_BY.test("The page says it is not available in your country or region.")).toBe(true);
     // Something only the person can give (24 Nov: the delivery area asked and not answered).
-    expect(STOPPED_BY.test("Please share the delivery address or area to check the prices on Zomato.")).toBe(true);
+    expect(STOPPED_BY.test("Please share the delivery address or area to check the prices on FoodSite.")).toBe(true);
     expect(STOPPED_BY.test("I need your delivery area before I can check prices.")).toBe(true);
     expect(STOPPED_BY.test("I could not complete a reliable comparison of the 10 date pairs or verify three cheapest options. No booking or payment was made.")).toBe(false);
     expect(STOPPED_BY.test("no flight results with specific times were reached")).toBe(false);

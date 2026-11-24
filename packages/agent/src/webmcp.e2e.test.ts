@@ -161,7 +161,7 @@ describe.skipIf(!E2E)("agent and a page's WebMCP tools (scripted model)", () => 
     await page.close();
   });
 
-  it("stops calling a page tool that failed twice on the site, and says to use the page's own controls (24 Nov, Zomato)", async (ctx) => {
+  it("stops calling a page tool that failed twice on the site, and says to use the page's own controls (24 Nov, a food-delivery site)", async (ctx) => {
     const page = await browser.newPage();
     await page.navigate(`${origin}/`);
     if ((await page.main.evaluate<string>("typeof document.modelContext")) !== "object") return ctx.skip();
@@ -178,6 +178,8 @@ describe.skipIf(!E2E)("agent and a page's WebMCP tools (scripted model)", () => 
     // The model's last request holds the second call's result and the refused third, each saying so.
     const all = JSON.stringify(requests.at(-1));
     expect(all.match(/The page tool request_code has failed 2 times in this run, so it is not called again: do this with the page's own controls/g)?.length).toBe(2);
+    // From the first failure, the error says the page's own controls can do the same (24 Nov, a food-delivery run gave up after one).
+    expect(JSON.stringify(requests[1])).toContain("A page tool is a shortcut: the page's own controls (its form fields, buttons and dialogs) can do the same, so use them rather than stop.");
     await page.close();
   });
 

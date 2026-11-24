@@ -109,7 +109,7 @@ function providerOf(name: string): string | null {
   if (known) return known;
   const m = PROVIDER_BUTTON.exec(name);
   if (m) {
-    // A link's own note after the name is no part of it ("Sign in with Google. Opens in new tab", live on Zomato, 24 Nov).
+    // A link's own note after the name is no part of it ("Sign in with Google. Opens in new tab", live on a food-delivery site, 24 Nov).
     const who = m[1]!.replace(/[.,;:(]\s*(?:opens?|opening|external|new (?:tab|window)).*$/i, "").replace(/\s+(account|id)$/i, "").trim();
     if (who && !NOT_PROVIDER.test(who)) return KNOWN_PROVIDERS.find((p) => p.toLowerCase() === who.toLowerCase()) ?? who;
   }
@@ -241,7 +241,7 @@ const CODE_ASKED = /\b(code|otp|pin|passcode)\b[^?.!]{0,30}\b(sent|texted|receiv
 const SIGN_IN_WORDS = /\b(sign[- ]?in|log ?in|login|otp|verification|verify|one[- ]time)\b/i;
 
 /**
- * A free-form question that asks the person for the phone number to sign in with ("What phone number should Swiggy use
+ * A free-form question that asks the person for the phone number to sign in with ("What phone number should GrocerySite use
  * to send the sign-in OTP?"): it is the sign-in hand-off's to ask, whose form takes the number as a placeholder (it
  * never reaches the model) and opens on the phone way. Live, 6 Nov: asked as a question, it was shown as a code box,
  * since it names the OTP. A question for the code itself, or for a phone number with no sign-in in view (a delivery

@@ -174,7 +174,7 @@ describe.skipIf(!E2E)("sign-in ways read from the live page", () => {
     const { client } = scripted((seen, turn) => {
       all += `\n${seen}`;
       if (turn > 0) results.push(seen);
-      if (turn === 0 || turn === 1) return [{ name: "ask_user", input: { kind: "login", question: "Zomato needs you signed in to order." } }];
+      if (turn === 0 || turn === 1) return [{ name: "ask_user", input: { kind: "login", question: "FoodSite needs you signed in to order." } }];
       if (turn === 2) return [{ name: "type", input: { ref: lastRef(all, /Phone number|type="tel"/), text: "{{127.0.0.1.entered_phone}}", submit: true } }];
       if (turn === 3) return [{ name: "ask_user", input: { kind: "login", question: "Please sign in to continue." } }];
       if (turn === 4 && /\{\{user_code\}\}/.test(seen)) return [{ name: "type", input: { ref: lastRef(all, /name="otp"|OTP/), text: "{{user_code}}", submit: true } }];
@@ -194,7 +194,7 @@ describe.skipIf(!E2E)("sign-in ways read from the live page", () => {
         return asked.length === 1 ? { status: "code_login", identifier: "+91 98765 43210", channel: "sms" } : { status: "code", code: "482913" };
       },
       askUser: async (question, o) => (codes.push({ question, ...(o?.secret ? { secret: true } : {}) }), "482913"),
-    }).run("order my usual from Zomato");
+    }).run("order my usual from FoodSite");
     // The first question waited for the dialog and read the phone way in its frame (and Google beside it).
     expect(asked[0]).toMatchObject({ category: "login", signIn: { ways: ["phone_code"], providers: ["Google"] } });
     // Asked again with the phone given: not the person; the model got its placeholder back.

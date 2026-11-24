@@ -163,7 +163,7 @@ describe("webhooks", () => {
 
 describe("a sign-in question's ways (signInOf)", () => {
   it("reads the question's signIn from a task as the API gives it", async () => {
-    const question = { id: "q1", kind: "live_view", category: "login", message: "Please sign in to zomato.com", signIn: { ways: ["phone_code", "password"], providers: ["Google"], opensOn: "phone_code", pageWords: "Login" } };
+    const question = { id: "q1", kind: "live_view", category: "login", message: "Please sign in to food.example", signIn: { ways: ["phone_code", "password"], providers: ["Google"], opensOn: "phone_code", pageWords: "Login" } };
     const s = scripted([() => json(job({ status: "needs_input", question }))]);
     const t = await s.client().tasks.get("job_1");
     expect(signInOf(t.question)).toEqual({ ways: ["phone_code", "password"], providers: ["Google"], opensOn: "phone_code", pageWords: "Login", unclear: false });

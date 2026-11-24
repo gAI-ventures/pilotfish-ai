@@ -51,7 +51,7 @@ describe("what a sign-in page offers (readSignIn)", () => {
     expect(r.ways).toEqual([]);
     expect(r.providers).toEqual(["Google", "Apple", "Facebook"]);
     expect(readSignIn([button("Continue with email")]).providers).toEqual([]);
-    // A link's own note is no part of the name (live on Zomato, 24 Nov): one Google, not two.
+    // A link's own note is no part of the name (live on a food-delivery site, 24 Nov): one Google, not two.
     expect(readSignIn([button("Sign in with Google"), button("Sign in with Google. Opens in new tab")]).providers).toEqual(["Google"]);
   });
 
@@ -121,7 +121,7 @@ describe("the sign-in question's field (signInAsk)", () => {
   it("says the ways in words, and asks how when none could be read", () => {
     expect(signInWaysText({ ways: ["password", "phone_code"], providers: ["Google"] })).toBe("a password (with an email, phone or username); a phone number and a code sent by text; or Google, in the browser");
     expect(signInWaysText({ ways: [], providers: [] })).toBe("");
-    expect(signInHowQuestion("zomato.com", { ways: [], providers: [], pageWords: "Login · Continue" })).toMatch(/^How do you sign in to zomato\.com\? .*it shows: "Login · Continue".*Never a password or code here\.$/);
+    expect(signInHowQuestion("food.example", { ways: [], providers: [], pageWords: "Login · Continue" })).toMatch(/^How do you sign in to food.example\? .*it shows: "Login · Continue".*Never a password or code here\.$/);
   });
 
   it("the person's words for how they sign in never carry a secret", () => {
@@ -145,7 +145,7 @@ describe("the way the person asks to sign in", () => {
   });
 
   it("the latest that names a way wins; text that names none changes nothing", () => {
-    expect(signInPreference(["log in to swiggy with my phone", "actually use email and password"])).toBe("password");
+    expect(signInPreference(["log in to grocerysite with my phone", "actually use email and password"])).toBe("password");
     expect(signInPreference(["use email and password", "no wait, OTP to my phone"])).toBe("phone");
     expect(signInPreference(["order milk on instamart", "hurry up please"])).toBeNull();
     expect(signInPreference(["log in without a password, by OTP"])).toBe("phone");
@@ -163,9 +163,9 @@ describe("a phone number", () => {
 describe("a question for the phone number to sign in with", () => {
   it("is the sign-in hand-off's: asked with sign-in words, or on a sign-in page", async () => {
     const { asksSignInNumber } = await import("./sign-in.js");
-    expect(asksSignInNumber("What phone number should Swiggy use to send the sign-in OTP?")).toBe(true);
+    expect(asksSignInNumber("What phone number should GrocerySite use to send the sign-in OTP?")).toBe(true);
     expect(asksSignInNumber("Which mobile number should I use to log in?")).toBe(true);
-    expect(asksSignInNumber("Please provide the phone number for your Swiggy account so I can request the OTP.")).toBe(true);
+    expect(asksSignInNumber("Please provide the phone number for your GrocerySite account so I can request the OTP.")).toBe(true);
     expect(asksSignInNumber("What is your phone number?", true)).toBe(true);
   });
 
@@ -181,8 +181,8 @@ describe("a question for the phone number to sign in with", () => {
 describe("the step a person is asked to approve", () => {
   it("names the control by its own label, the site and the kind of step, never markup or refs", async () => {
     const { approvalText } = await import("./agent.js");
-    expect(approvalText("click", { ref: "e12" }, '[e12]<button aria-label="Remove 1 item from cart" data-testid="add_buttons_minus">−</button>', "www.swiggy.com", "delete")).toBe("Press “Remove 1 item from cart” on swiggy.com? It deletes or removes something.");
-    expect(approvalText("click", { ref: "e3" }, "[e3]<button>Place order · ₹285</button>", "www.swiggy.com", "pay")).toBe("Press “Place order · ₹285” on swiggy.com? It pays or places an order.");
+    expect(approvalText("click", { ref: "e12" }, '[e12]<button aria-label="Remove 1 item from cart" data-testid="add_buttons_minus">−</button>', "www.grocery.example", "delete")).toBe("Press “Remove 1 item from cart” on grocery.example? It deletes or removes something.");
+    expect(approvalText("click", { ref: "e3" }, "[e3]<button>Place order · ₹285</button>", "www.grocery.example", "pay")).toBe("Press “Place order · ₹285” on grocery.example? It pays or places an order.");
     expect(approvalText("type", { ref: "e5", submit: true }, '[e5]<input placeholder="Write a reply">', "x.com", "send")).toBe("Submit “Write a reply” on x.com? It sends or publishes something.");
     expect(approvalText("click", { ref: "e9" }, undefined, "", undefined)).toBe("Press this control? It may not be undoable.");
   });

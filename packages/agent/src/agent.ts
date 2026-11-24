@@ -969,6 +969,8 @@ export const KEEP_GOING_STEPS = 12;
  * limit, nothing found or offered, the person's own choice, or something only the person can give (24 Nov: a run that
  * asked for the delivery area and heard nothing was sent back to carry on). Such a result is taken as it is.
  */
+/** The sign-in words of `STOPPED_BY`: a result whose only stop they name is a sign-in (`keepGoingNote`). */
+export const SIGN_IN_STOP = /\b(?:sign(?:ed|ing)?[ -]?(?:in|out|up)|log(?:ged|ging)?[ -]?(?:in|out)|login|account|password|credentials?)\b/gi;
 export const STOPPED_BY = /\b(sign(?:ed|ing)?[ -]?in|log(?:ged|ging)?[ -]?in|login|account|password|captcha|bot check|verify (?:you|that you)|blocked|block page|access denied|forbidden|denied|not available|unavailable|not offered|isn['’]?t offered|doesn['’]?t (?:offer|exist|support|list|show)|does not (?:offer|exist|support|list|show)|no longer|sold out|out of stock|no results|no availability|nothing (?:found|matched|listed|available)|error|problem|went wrong|not working|doesn['’]?t work|failed to load|won['’]?t load|could not load|timed out|rate limit|too many requests|limit reached|declined|refused|not allowed|not permitted|requires? (?:payment|a subscription|membership)|paywall|subscribe|geo|country|region|closed|expired|cancel(?:led|ed)|the person|you asked|asked me not|not supported|please (?:share|provide|tell|send|give|confirm)|let me know|(?:need|waiting for) (?:your|the person|an answer|a reply)|no answer|no reply)\b/i;
 
 export const EMPTY_RESULTS_TEXT = /^(?:sorry[,.!]?\s*)?(?:no|0|zero)\s+(?:results?|matches|matching\s+\w+|items?\s+found|products?\s+found|properties|listings|flights|hotels|records|articles|papers|jobs|entries)\b|\b(?:returned|found|produced|yielded)\s+no\s+(?:results|matches)\b|\bno\s+results\s+(?:found|for|match)|\bdid\s+not\s+match\s+any\b|\b(?:couldn'?t|could\s+not|can'?t|cannot)\s+find\s+any\s+(?:results|matches)\b|\bnothing\s+(?:found|matched)\b/i;
@@ -1231,7 +1233,7 @@ const QUESTION_SORT_MS = 8_000;
  * failing, three trials each (the first as sent, two with the system block cached, the same text): 661 of 669 right,
  * the held-out ones 313 of 315. The earlier corpora once (1,042 questions, cached): 1,033 right. Wrong in some trial:
  * refused, "Can you see on your Amazon Pay balance page how much is left?" and "Can you see on your Paytm wallet page
- * how much balance is left?" (3 of 3 each, as with the two prompts before it), "Can you see on your Swiggy orders page whether
+ * how much balance is left?" (3 of 3 each, as with the two prompts before it), "Can you see on your GrocerySite orders page whether
  * the last order was refunded?" (1 of 3) and "Do you want me to keep the browser open after I'm done so you can review
  * the order?" (1 of 1); asked, "Shall I use your saved address, or would you rather edit it yourself in the address
  * form?" (1 of 3), seven page and mixed questions of the earlier corpora in their one trial (an offer to pick it
@@ -1369,7 +1371,7 @@ export class Agent {
   /**
    * Sites the person gave a login for on a sign-in question in this run (a password, or a phone or email for a code), as
    * placeholders: a later sign-in question for the site gets them back instead of asking again, unless the page offers
-   * only ways they cannot fill (24 Nov, Zomato: a phone number given, then asked for twice more). `told`: how often.
+   * only ways they cannot fill (24 Nov, a food-delivery site: a phone number given, then asked for twice more). `told`: how often.
    */
   private readonly givenSignIn = new Map<string, { way: "password" | "phone" | "email"; names: string[]; told: number }>();
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
@@ -1737,7 +1739,17 @@ export class Agent {
     if (input["success"] !== false || this.keepGoingSent) return "";
     const left = Math.min((this.opts.maxSteps ?? 50) + (this.budgetExtended ? 10 : 0), this.stepCap) - this.liveStep;
     if (!(left >= KEEP_GOING_STEPS)) return "";
-    if (STOPPED_BY.test(String(input["result"] ?? ""))) return "";
+    const said = String(input["result"] ?? "");
+    if (STOPPED_BY.test(said)) {
+      // A sign-in is no stop when the run holds sign-in details for the site (given by the person in this run, or saved)
+      // and nothing else stopped it: sign in with the page's own form. 24 Nov, a food-delivery run: the person gave a phone
+      // number, the site's own OTP tool failed once, and the executor quit at step 9 of 40 "sign-in required".
+      const host = safeHost(this.page.url);
+      const names = host ? this.secrets.namesFor(host) : [];
+      if (!names.length || STOPPED_BY.test(said.replace(SIGN_IN_STOP, " "))) return "";
+      this.keepGoingSent = true;
+      return `Not yet: ${Number.isFinite(left) ? `${left} of your steps are left` : "you have steps left"}, and you have sign-in details for ${host}: ${names.map((n) => `{{${n}}}`).join(", ")}. Sign in with the page's own form (its log-in link, button or dialog), typing them as placeholders; when it asks for a code, ask_user kind "code". A site tool that failed, or a note that the sign-in is completed on the page, means do it in the page yourself. Then carry on with the task. If the site itself refuses the sign-in, call done(success=false) again saying what it showed; that ends the run.`;
+    }
     this.keepGoingSent = true;
     return `Not yet: ${Number.isFinite(left) ? `${left} of your steps are left` : "you have steps left"} and your result names nothing on the site that stopped you. Carry on with what the task still needs (the next item, input or part of the plan), noting each result as you get it, and report what you have when it is done. If something on the site does stop you (a sign-in, a block, an error, nothing offered), call done(success=false) again saying what it is; that ends the run.`;
   }
@@ -5764,7 +5776,7 @@ export class Agent {
     const dial = dialCodeIn(near);
     const fitted = fitPhone(sub.text, { ...(Number.isFinite(max) && max > 0 ? { maxLength: max } : {}), numeric: type === "number" || (node.attrs["inputmode"] ?? "").toLowerCase() === "numeric", ...(dial ? { dialCode: dial } : {}) });
     // The field shows the number as fitted: masked as the placeholder it was typed from, never as another secret that
-    // holds the same digits (24 Nov: a saved Swiggy username read back in a Flipkart field).
+    // holds the same digits (24 Nov: a saved username of another site read back in a shopping site's phone field).
     if (fitted !== sub.text) this.secrets.addTypedForm(sub.used[0]!, fitted);
     return fitted;
   }
@@ -5976,7 +5988,7 @@ export class Agent {
   /**
    * The page at a sign-in question, read anew (never the model's last look: a tab switched since, a dialog opened), with
    * every frame the snapshot reaches (a sign-in in a cross-origin iframe, accounts.<site>). A dialog still drawing gets up
-   * to SIGN_IN_DRAW_MS for its fields, buttons or code box to show (24 Nov, Zomato: the executor found the iframe's
+   * to SIGN_IN_DRAW_MS for its fields, buttons or code box to show (24 Nov, a food-delivery site: the executor found the iframe's
    * phone field only on a later look).
    */
   private async signInLook(): Promise<PageRead> {
@@ -5997,7 +6009,7 @@ export class Agent {
    * prompt; or a code login was given and no sign-in form shows any more): that is the question, as kind "code". Or the
    * person already gave a login for this site in this run that the page can take: the model gets its placeholders back
    * and how to type them (twice at most; then the person is asked, as they are when the page offers only ways their
-   * login cannot fill). 24 Nov, Zomato: a phone number given, a second and third login question instead of typing it,
+   * login cannot fill). 24 Nov, a food-delivery site: a phone number given, a second and third login question instead of typing it,
    * and a login question once the code was sent.
    */
   private async signInGiven(read: PageRead, reason: string): Promise<ToolOutcome | null> {
@@ -6822,7 +6834,9 @@ function pageToolResultText(name: string, r: PageToolResult): string {
     case "filled":
       return `Page tool ${name} filled in its form; nothing is sent yet. Check the fields in the snapshot, then click the form's submit button.`;
     case "error":
-      return `Page tool ${name} failed: ${r.error}`;
+      // From the first failure (24 Nov, a food-delivery run: its OTP tool failed once and the run gave up on the sign-in its
+      // login dialog could still take): a page tool is a shortcut, never the only way.
+      return `Page tool ${name} failed: ${r.error}\nA page tool is a shortcut: the page's own controls (its form fields, buttons and dialogs) can do the same, so use them rather than stop.`;
     case "canceled":
       return `Page tool ${name} was cancelled by the page.`;
     case "timeout":
@@ -6831,8 +6845,8 @@ function pageToolResultText(name: string, r: PageToolResult): string {
 }
 
 /**
- * Failures of one page tool on one site after which it is not called again in the run. 24 Nov, Zomato (three runs): its
- * `zomato_request_login_otp` failed every time it was called, five calls in all, while the login dialog it stood in for
+ * Failures of one page tool on one site after which it is not called again in the run. 24 Nov, a food-delivery site (three runs): its
+ * its OTP request tool failed every time it was called, five calls in all, while the login dialog it stood in for
  * took the phone number and sent the code the one time it was used.
  */
 export const PAGE_TOOL_FAILS = 2;

@@ -153,14 +153,14 @@ const PURCHASE_NOUN = /\bpurchase\s+(?:types?|history|histories|dates?|year|pric
 
 /**
  * A control that takes an item out of a cart, basket or bag, or lowers its quantity ("Remove 1 item from cart", a
- * quantity stepper's minus): undone by adding it back, so it needs no approval. 6 Nov: a Swiggy Instamart cart's
+ * quantity stepper's minus): undone by adding it back, so it needs no approval. 6 Nov: a grocery delivery cart's
  * "−" (aria-label "Remove 1 item from cart") asked the person twice to swap one milk for another.
  */
 const CART_EDIT = /\b(remove|delete)\b[^.<>]{0,30}\b(from|in)\s+(?:the |your |my )?(cart|basket|bag|trolley)\b|\b(decrease|reduce|lower)\s+(?:the\s+|item\s+)?quantity\b/i;
 
 /**
  * A control that sends the person a sign-in code or link ("Send One Time Password", "Get OTP", "Resend code", "Email me
- * a login link"): it signs in, it sends nothing on their behalf. 24 Nov, Zomato: the person had
+ * a login link"): it signs in, it sends nothing on their behalf. 24 Nov, a food-delivery site: the person had
  * just given their phone number for a code, and "Send One Time Password" asked them to confirm a send.
  */
 const SENDS_CODE = /\b(?:send|resend|get|request|email|text)\s+(?:me\s+)?(?:an?\s+|the\s+|my\s+)?(?:new\s+)?(?:one[- ]time\s+(?:password|passcode|code|pin)|otp|verification\s+code|login\s+(?:code|link)|sign[- ]?in\s+(?:code|link)|magic\s+link|security\s+code|code)\b/i;

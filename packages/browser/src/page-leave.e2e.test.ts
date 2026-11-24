@@ -1,6 +1,6 @@
 // Before a browser is let go, the page's own writes reach its site: a save the page makes a moment after the click
 // (a cart synced on a timer) and one it sends on the way out (sendBeacon on pagehide). Live, 6 Nov: an item added to
-// a Swiggy Instamart cart showed in the agent's cart and never reached the person's account.
+// a grocery delivery cart showed in the agent's cart and never reached the person's account.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";

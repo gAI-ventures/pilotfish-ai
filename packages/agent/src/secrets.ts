@@ -52,8 +52,8 @@ export class SecretBroker {
   /**
    * How recently each name was set or typed (a rising counter): when several secrets hold the same value (a phone saved
    * as one site's username and given again to sign in to another), the page shows it as the newest one's placeholder.
-   * 24 Nov: a Flipkart sign-in typed {{flipkart.com.entered_phone}} and the page read back
-   * {{swiggy.com.username}} (an older saved login with the same number); the model took the field for an unfilled
+   * 24 Nov: a shopping site's sign-in typed its {{<site>.entered_phone}} and the page read back
+   * another site's {{<site>.username}} (an older saved login with the same number); the model took the field for an unfilled
    * placeholder, asked the person to sign in again, and the end check failed the run on it.
    */
   private readonly recent = new Map<string, number>();

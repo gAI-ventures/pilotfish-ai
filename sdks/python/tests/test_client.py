@@ -515,7 +515,7 @@ def test_sync_and_async_send_the_same_request(resource: str, method: str, args: 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_sign_in_question_ways_read_from_a_task(mode: str) -> None:
-    question = {"id": "q1", "kind": "live_view", "category": "login", "message": "Please sign in to zomato.com", "signIn": {"ways": ["phone_code", "password"], "providers": ["Google"], "opensOn": "phone_code", "pageWords": "Login"}}
+    question = {"id": "q1", "kind": "live_view", "category": "login", "message": "Please sign in to food.example", "signIn": {"ways": ["phone_code", "password"], "providers": ["Google"], "opensOn": "phone_code", "pageWords": "Login"}}
     s = scripted(js(job(status="needs_input", question=question)))
     t = resolve(s.client(mode).tasks.get("job_1"))
     assert pilotfish.sign_in_of(t["question"]) == {"ways": ["phone_code", "password"], "providers": ["Google"], "opensOn": "phone_code", "pageWords": "Login", "unclear": False}

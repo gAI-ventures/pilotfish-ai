@@ -84,11 +84,11 @@ describe("SecretBroker", () => {
   });
 });
 
-describe("a value two secrets share reads as the newest one (24 Nov, a Flipkart sign-in)", () => {
+describe("a value two secrets share reads as the newest one (24 Nov, a StoreSite sign-in)", () => {
   it("a number given for this site wins over a saved login elsewhere with the same number", () => {
-    const b = new SecretBroker({ "swiggy.com.username": { value: "9876543210", allowedHosts: ["swiggy.com"] } });
-    b.addIdentifier("flipkart.com", "9876543210", "phone");
-    expect(b.scrub("Phone Number: 9876543210")).toBe("Phone Number: {{flipkart.com.entered_phone}}");
+    const b = new SecretBroker({ "grocery.example.username": { value: "9876543210", allowedHosts: ["grocery.example"] } });
+    b.addIdentifier("store.example", "9876543210", "phone");
+    expect(b.scrub("Phone Number: 9876543210")).toBe("Phone Number: {{store.example.entered_phone}}");
   });
 
   it("typing a placeholder makes it the newest: the page then shows that name", () => {
@@ -99,11 +99,11 @@ describe("a value two secrets share reads as the newest one (24 Nov, a Flipkart 
   });
 
   it("a phone fitted to its field is masked as the name it was typed from, in readable and guarded output", () => {
-    const b = new SecretBroker({ "swiggy.com.username": { value: "9876543210", allowedHosts: ["swiggy.com"] } });
-    const name = b.addIdentifier("flipkart.com", "+91 98765 43210", "phone");
-    b.substitute(`{{${name}}}`, "www.flipkart.com");
+    const b = new SecretBroker({ "grocery.example.username": { value: "9876543210", allowedHosts: ["grocery.example"] } });
+    const name = b.addIdentifier("store.example", "+91 98765 43210", "phone");
+    b.substitute(`{{${name}}}`, "www.store.example");
     b.addTypedForm(name, "9876543210");
-    expect(b.scrub("+91 [Phone Number: 9876543210]")).toBe("+91 [Phone Number: {{flipkart.com.entered_phone}}]");
+    expect(b.scrub("+91 [Phone Number: 9876543210]")).toBe("+91 [Phone Number: {{store.example.entered_phone}}]");
     b.guardOutput = true;
     expect(b.holdsSecret("9876543210")).toBe(true);
   });
