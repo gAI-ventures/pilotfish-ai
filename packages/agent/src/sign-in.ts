@@ -153,20 +153,29 @@ function providerOf(name: string): string | null {
  * site's profile there): named like a provider, it offers no way to sign in to this site (24 Nov: a code dialog's page
  * offered Facebook and LinkedIn on the sign-in card from its footer's follow-us links).
  */
-function profileLink(n: SignInNode, provider: string): boolean {
+function profileLink(n: SignInNode, provider: string, name = ""): boolean {
   if (!(n.tag === "a" || n.role === "link")) return false;
+  // A link that goes nowhere of its own (no address, "#", a script) is a button drawn as a link: the page's own widget.
+  const href = (n.attrs["href"] ?? "").trim();
+  if (!href || href.startsWith("#") || /^javascript:/i.test(href)) return false;
   let u: URL;
   try {
-    u = new URL(n.attrs["href"] ?? "");
+    u = new URL(n.attrs["href"] ?? "", "https://page.invalid/");
   } catch {
     return false;
   }
   if (!/^https?:$/.test(u.protocol)) return false;
+  // A link named only by the provider (a logo, a footer icon) signs in with it only when it goes to a sign-in address
+  // (25 Nov: a shopping site's own logo link, "Amazon", listed as a way to sign in on its own sign-in page).
+  if (name.trim().toLowerCase() === provider.toLowerCase()) return !SIGN_IN_ADDRESS.test(`${u.pathname}${u.search}`);
   const p = providerSite(provider);
   const host = u.hostname.toLowerCase();
   const theirs = p ? host === p.site || host.endsWith(`.${p.site}`) : host.includes(provider.toLowerCase());
-  return theirs && !/(^|\/)(oauth2?|o\/oauth2|dialog\/oauth|auth(orize)?|log-?in|sign-?in|sso|uas\/oauth2)(\/|$)/i.test(u.pathname);
+  return theirs && !SIGN_IN_ADDRESS.test(u.pathname);
 }
+
+/** An address that signs in: an OAuth or SSO path, a login or sign-in page, or a provider named in its query. */
+const SIGN_IN_ADDRESS = /(^|\/)(oauth2?|o\/oauth2|dialog\/oauth|auth(orize)?|log-?in|sign-?in|sso|uas\/oauth2|connect)(\/|$|\?)|[?&](provider|connection|idp|strategy)=/i;
 
 /** Words asking for a sign-in code, or saying one was sent: in a heading or a dialog, a code step is open. */
 export const CODE_STEP_WORDS =
@@ -225,7 +234,7 @@ export function readSignIn(all: Iterable<SignInNode>): SignInSeen & { codeStep: 
     if (PASSWORD_SWITCH.test(name)) add("password", i);
     if (PASSKEY_SWITCH.test(name)) add("passkey", i);
     const found = providerOf(name);
-    const p = found && !profileLink(n, found) ? found : null;
+    const p = found && !profileLink(n, found, name) ? found : null;
     if (p && !providers.includes(p)) providers.push(p);
     if (p || PHONE_SWITCH.test(name) || EMAIL_CODE_SWITCH.test(name) || EMAIL_SWITCH.test(name) || PASSWORD_SWITCH.test(name) || /\b(sign ?in|log ?in|login|continue|next|otp|code)\b/i.test(name)) word(name);
   });

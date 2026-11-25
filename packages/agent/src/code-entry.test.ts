@@ -81,6 +81,15 @@ describe("readSignIn on a code page", () => {
     ]);
     expect(seen.providers).toEqual(["Google", "Apple"]);
   });
+
+  it("a site's own logo link named like a provider is no way to sign in; a bare name going to a sign-in address is", () => {
+    const seen = readSignIn([
+      { tag: "a", role: "link", name: "Amazon", attrs: { href: "/ref=nav_logo" } },
+      { tag: "a", role: "link", name: "Google", attrs: { href: "/auth/google/start" } },
+      { tag: "button", role: "button", name: "Amazon", attrs: {} },
+    ]);
+    expect(seen.providers).toEqual(["Google", "Amazon"]);
+  });
 });
 
 describe("codeMissNote", () => {
