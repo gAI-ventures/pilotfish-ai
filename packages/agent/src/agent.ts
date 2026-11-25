@@ -3078,8 +3078,8 @@ export class Agent {
     this.place.held++;
     return (
       "Not yet: this site works by place, and its delivery address or location is not set for this run. Set it first, then search: " +
-      "once signed in, pick the site's saved address that matches the task (else the only one saved, else the one matching WHERE THE PERSON IS); " +
-      "signed out, set the site's location to WHERE THE PERSON IS; with none of these, or several that fit equally, call ask_user for the address or area. " +
+      "the place the task or the earlier turns of the session name comes first (once signed in, the site's saved address that matches it; else set as the site's location); " +
+      "with none named, the saved address matching WHERE THE PERSON IS, else the only one saved, else (signed out) the site's location set to WHERE THE PERSON IS; with none of these, or several that fit equally, call ask_user for the address or area. " +
       "Never keep a place the site picked by itself, and never press \"Detect my location\". Read it back on the page, call note with \"Place: <the address as the page shows it>\", then search."
     );
   }
