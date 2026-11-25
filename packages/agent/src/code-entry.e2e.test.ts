@@ -330,3 +330,127 @@ describe.skipIf(!E2E)("sign-in codes over the shapes code entry takes (scripted 
     }, 90_000);
   }
 });
+
+// The site's answer after a right code: its page turns into its own failure message a moment later ("Error
+// encountered, please try again later"). "passing": a reload shows the shop signed in (the error was a passing one);
+// "refused": the reload shows the message again (the site refused the sign-in). Before the fix the run went on from
+// the message signed out and never looked again; now the page is reloaded once and the model told what it showed.
+describe.skipIf(!E2E)("a sign-in that fails just after its code was accepted (scripted model)", () => {
+  let browser: Browser;
+  let server: Server;
+  let origin: string;
+  let signed = false;
+  let pageLoads = 0;
+  const ERROR_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Corner Shop</title></head><body><img alt="" width="80" height="80"><p>Error encountered, please try again later.</p></body></html>`;
+  const SIGNED_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Corner Shop</title></head><body><header><a href="/">Corner Shop</a> <button type="button">Account</button></header><main><p id="hi">Hi Ada, your saved addresses: Home</p></main></body></html>`;
+  const failing = (shape: string) =>
+    shop(shape).replace(
+      /if \(r\.ok\) \{[^\n]*?\}\s*else/,
+      "if (r.ok) { d.close(); setTimeout(() => { document.body.innerHTML = '<p>Error encountered, please try again later.</p>'; }, 1200); } else",
+    );
+
+  beforeAll(async () => {
+    if (!failing("single-6").includes("Error encountered") || !failing("maxlen2-6").includes("Error encountered")) throw new Error("the verify branch was not replaced");
+    server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://x");
+      const mode = url.searchParams.get("mode") ?? /mode=(\w+)/.exec(req.headers.referer ?? "")?.[1] ?? "";
+      const shape = url.searchParams.get("shape") ?? "single-6";
+      if (req.method === "POST") {
+        let b = "";
+        for await (const c of req) b += String(c);
+        const body = Object.fromEntries(new URLSearchParams(b));
+        const ok = url.pathname === "/api/verify" ? body["code"] === CODE6 : true;
+        if (url.pathname === "/api/verify" && ok) signed = true;
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok }));
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      if (url.pathname !== "/signin") return res.end("<h1>Home</h1>");
+      pageLoads++;
+      res.end(!signed ? failing(shape) : mode === "passing" ? SIGNED_PAGE : ERROR_PAGE);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    browser = await launch({ headless: true });
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    server?.close();
+  });
+
+  // single-6: the model types the code and presses Verify itself; maxlen2-6: pilotfish types it and the boxes send it.
+  for (const [shape, mode] of [["single-6", "passing"], ["single-6", "refused"], ["maxlen2-6", "passing"], ["maxlen2-6", "refused"]] as const) {
+    it(`${shape}, ${mode}: the page is reloaded once and the model is told what the reload showed`, async () => {
+      signed = false;
+      pageLoads = 0;
+      const p = await browser.newPage();
+      await p.navigate(`${origin}/signin?mode=${mode}&shape=${shape}`);
+      let shown = "";
+      let typedNumber = false;
+      let typedCode = false;
+      let askedLogin = false;
+      let askedCode = false;
+      let codeAsks = 0;
+      const { client, requests } = scripted((seen) => {
+        shown = `${seen}\n${shown}`;
+        if (/\bHi Ada\b/.test(seen)) return [{ name: "done", input: { success: true, result: "Signed in; the saved address is Home." } }];
+        if (/Error encountered/i.test(seen) && typedCode) return [{ name: "done", input: { success: false, result: "The shop showed an error after the code." } }];
+        const phoneField = refOf(shown, /<input[^\n]*label="Phone number"/);
+        const placeholder = /\{\{([^}]+\.entered_phone)\}\}/.exec(seen)?.[1];
+        if (placeholder && !typedNumber && phoneField) {
+          typedNumber = true;
+          return [{ name: "type", input: { ref: phoneField, text: `{{${placeholder}}}`, submit: true } }];
+        }
+        if (/\{\{user_code\}\}/.test(seen) && !typedCode) {
+          const into = /\[((?:f\d+)?e\d+)\]<input[^>\n]*(?:one-time-code|[Cc]ode)/.exec(shown)?.[1];
+          const verify = /\[((?:f\d+)?e\d+)\]<button[^>\n]*>Verify</.exec(shown)?.[1];
+          if (into && verify) {
+            typedCode = true;
+            return [{ name: "type", input: { ref: into, text: "{{user_code}}" } }, { name: "click", input: { ref: verify } }];
+          }
+        }
+        if (!askedLogin) {
+          const login = refOf(shown, /Log in/);
+          if (login && !phoneField) return [{ name: "click", input: { ref: login } }];
+          askedLogin = true;
+          return [{ name: "ask_user", input: { kind: "login", question: "The shop needs you signed in." } }];
+        }
+        if (/OTP Verification/.test(seen) && !askedCode) {
+          askedCode = true;
+          return [{ name: "ask_user", input: { kind: "code", question: "Please share the OTP sent to your phone." } }];
+        }
+        return [{ name: "done", input: { success: false, result: "Not signed in." } }];
+      });
+      const r = await new Agent(p, {
+        client,
+        model: "fake",
+        policy: { check: () => ({ kind: "allow" as const }) },
+        contextEditing: false,
+        fastSettle: true,
+        interruptions: true,
+        interventionPollMs: 250,
+        maxSteps: 14,
+        askUser: async () => (codeAsks++, CODE6),
+        onIntervention: async (req) => {
+          if (req.needs === "code" || req.category === "otp") codeAsks++;
+          return req.needs === "code" || req.category === "otp" ? { status: "code", code: CODE6 } : { status: "code_login", identifier: PHONE, channel: "sms" };
+        },
+      }).run("sign in to the shop with my phone number and check my saved address");
+      await p.close();
+      const told = requests.map(lastSeen).join("\n");
+      // One reload of the page after the code: the first load, then that reload.
+      expect(pageLoads).toBe(2);
+      // The person was asked for one code only.
+      expect(codeAsks).toBe(1);
+      if (mode === "passing") {
+        expect(told).toMatch(/reloaded once and the message is gone/);
+        expect(r.success).toBe(true);
+      } else {
+        expect(told).toMatch(/reloaded once and still shows it/);
+        expect(r.success).toBe(false);
+      }
+      expect(JSON.stringify(requests)).not.toContain(CODE6);
+    }, 90_000);
+  }
+});

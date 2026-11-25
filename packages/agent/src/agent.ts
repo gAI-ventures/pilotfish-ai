@@ -1391,6 +1391,14 @@ export class Agent {
   private readonly place: { set: boolean; held: number };
   /** Why the last code `fillCode` typed was not submitted (the page's field or boxes did not hold it whole), else null. */
   private codeMiss: string | null = null;
+  /** The current hand-off's code or link was accepted (`handOver`). */
+  private codePassed = false;
+  /** Sites whose page was reloaded once for a failure message just after a code was accepted (`afterCodeAccepted`). */
+  private readonly codeErrorReloaded = new Set<string>();
+  /** When the person (or a code source) last gave a code for a site in this run (`afterCodeError`). */
+  private readonly codeGivenAt = new Map<string, number>();
+  /** The code (its `codeGivenAt` time) whose answer was already waited for on a site. */
+  private readonly codeWaited = new Map<string, number>();
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
   /** Sites a saved recovery code was typed on in this run: one per site, then the person. */
   private readonly recoveryTried = new Set<string>();
@@ -3895,6 +3903,7 @@ export class Agent {
           // A code (2FA, verification) never enters the model's context: it becomes a secret for this site.
           if (input["kind"] === "code" || secretAnswer(String(input["question"]), answer)) {
             this.secrets.addEphemeral("user_code", answer.trim(), [safeHost(this.page.url)]);
+            this.codeGivenAt.set(siteOf(safeHost(this.page.url)), Date.now());
             // The person's code for this prompt: the saved authenticator key never types over it.
             this.personCode.add(promptKey(this.page.url));
             return ok(`The user gave the code. Type it as {{user_code}} (valid for 5 minutes, on ${safeHost(this.page.url)} only).`, "ask_user: code received");
@@ -4930,6 +4939,12 @@ export class Agent {
     let verified = true;
     if (c.category === "hard_block" && c.vendor === "human") ({ c, before, cur, verified } = await this.awaitWidget(c, before, cur));
     const out = await this.interruptionOn(c, before, cur, !verified);
+    // Nothing in the way, and a code was given for this site a moment ago: the site's own failure message here is the
+    // sign-in's answer, reloaded once.
+    if (!out.note && c.category === "none" && !this.stopRequest) {
+      const after = await this.afterCodeError(out.snap ?? cur).catch(() => null);
+      if (after) return after;
+    }
     // The wait may have ended on another page (HUMAN's script sent its block page on to the results): every way out
     // shows the model the page it ended on, never the block page it left (else the first turn read "Access to this
     // page has been denied" while on the results).
@@ -5108,15 +5123,85 @@ export class Agent {
    * (onIntervention), while the page is watched. With `fromModel` (ask_user kind "code") and no person to
    * hand it to, null: the caller asks through askUser instead.
    */
-  private async handOver(x: {
-    c: Interruption;
-    before: InterruptInput;
-    cur: Snapshot;
-    host: string;
-    message: string;
-    event: (handled: InterruptionHandled, waitedMs?: number) => void;
-    fromModel?: boolean;
-  }): Promise<{ note: string; snap?: Snapshot } | null> {
+  private async handOver(x: HandOver): Promise<{ note: string; snap?: Snapshot } | null> {
+    this.codePassed = false;
+    const out = await this.handOverOnce(x);
+    if (!out || !this.codePassed || x.c.category !== "otp") return out;
+    const after = await this.afterCodeAccepted(x.host).catch(() => null);
+    return after ? { note: [out.note, after.note].filter(Boolean).join(" "), ...(after.snap ? { snap: after.snap } : out.snap ? { snap: out.snap } : {}) } : out;
+  }
+
+  /**
+   * A sign-in that fails just after its code was accepted (25 Nov, live: the code dialog closed, and 1.5 s later the
+   * site's page read "Error encountered, please try again later" and its session said signed out; the run went on
+   * signed out and never looked again). The site finishes signing in after the code (a redirect, a reload of its
+   * own), so its answer is read for `AFTER_CODE_MS`; a failure message there (`failureLines`, on the same site) gets
+   * one reload, once per site in a run, and the model is told what the reload showed: a passing error is then past,
+   * and one that stays is the site refusing the sign-in, reported, not answered with more codes.
+   */
+  private async afterCodeAccepted(host: string): Promise<{ note: string; snap?: Snapshot } | null> {
+    const site = siteOf(host) || host;
+    if (this.codeErrorReloaded.has(site)) return null;
+    const given = this.codeGivenAt.get(site);
+    if (given !== undefined) this.codeWaited.set(site, given);
+    const seen = await this.awaitSiteError(site, null);
+    return seen ? this.reloadAfterCodeError(host, seen) : null;
+  }
+
+  /** The site's answer to a code, read for `AFTER_CODE_MS` (from `first`, a look already taken): its failure lines, or null. */
+  private async awaitSiteError(site: string, first: Snapshot | null): Promise<{ lines: string[]; snap: Snapshot } | null> {
+    let seen = first ? siteErrorOn(first, site) : null;
+    for (const until = Date.now() + AFTER_CODE_MS; !seen && Date.now() < until; ) {
+      await this.page.waitForContent(1_000).catch(() => false);
+      const snap = await captureSnapshot(this.page, { viewportBand: 1 }).catch(() => null);
+      seen = snap ? siteErrorOn(snap, site) : null;
+      if (!seen) await sleep(500);
+    }
+    return seen;
+  }
+
+  /**
+   * The page a step ended on, within `CODE_ERROR_WINDOW_MS` of a code given for its site: a failure message there gets
+   * the same single reload as one seen just after an accepted code (a code the model typed and submitted itself never
+   * passes through the hand-over).
+   */
+  private async afterCodeError(snap: Snapshot): Promise<{ note: string; snap?: Snapshot } | null> {
+    const host = safeHost(snap.url);
+    const site = siteOf(host) || host;
+    const given = this.codeGivenAt.get(site);
+    if (given === undefined || Date.now() - given > CODE_ERROR_WINDOW_MS || this.codeErrorReloaded.has(site)) return null;
+    // Still on the code step (a code field showing): not the site's answer yet. A "Log in" left in the header is no
+    // sign: a site that fails here never redraws it.
+    if (snap.nodes.some((n) => n.visible && asksForCode(n))) return null;
+    // The first page past the code since it was given: the site's answer comes a moment after the code page goes
+    // (a step ends as the dialog closes), so it is waited for once per code; later pages are read as they are.
+    const first = this.codeWaited.get(site) !== given;
+    if (first) this.codeWaited.set(site, given);
+    const seen = first ? await this.awaitSiteError(site, snap) : siteErrorOn(snap, site);
+    return seen ? this.reloadAfterCodeError(host, seen) : null;
+  }
+
+  /** One reload, once per site in a run, of a page that failed after a code; the model is told what the reload showed. */
+  private async reloadAfterCodeError(host: string, seen: { lines: string[]; snap: Snapshot }): Promise<{ note: string; snap: Snapshot }> {
+    const site = siteOf(host) || host;
+    this.codeErrorReloaded.add(site);
+    const said = `"${seen.lines[0]}"`;
+    await this.page.reload().catch(() => undefined);
+    await this.page.waitForContent(5_000).catch(() => false);
+    const now = await captureSnapshot(this.page, { viewportBand: 1 }).catch(() => null);
+    const still = now ? siteErrorOn(now, site) : null;
+    const snap = now ?? seen.snap;
+    this.lastSnapshot = snap;
+    this.opts.onStep?.({ type: "interruption", category: "otp", needs: "none", handled: still ? "unresolved" : "resolved", host, signals: [clip(`after the code: ${seen.lines[0]}; reloaded once, ${still ? "still shown" : "gone"}`, 120)], source: "classifier" });
+    return {
+      note: still
+        ? `Right after the code was accepted, ${host} showed ${said}; the page was reloaded once and still shows it, so the site did not finish signing in. Look whether the page shows you signed in; if it does not, the site refused the sign-in after a right code: say so in your answer and go on with what can be done signed out. Do not ask the person for another code unless the page itself asks for one.`
+        : `Right after the code was accepted, ${host} showed ${said}; the page was reloaded once and the message is gone. Look whether the page shows you signed in before going on.`,
+      snap,
+    };
+  }
+
+  private async handOverOnce(x: HandOver): Promise<{ note: string; snap?: Snapshot } | null> {
     let { c, before, cur, message } = x;
     const { host, event } = x;
     const policy = this.challenge.forSite(siteOf(host));
@@ -5138,6 +5223,7 @@ export class Agent {
     const key = promptKey(this.page.url);
     // A prompt that was passed is over: the same address asking again later (a re-check) is a new prompt.
     const passed = () => {
+      this.codePassed = true;
       this.totpTried.delete(key);
       this.personCode.delete(key);
     };
@@ -5173,6 +5259,7 @@ export class Agent {
       const code = refs?.length ? codeFor(f.code, c.input) : null;
       if (!refs?.length || !code) return false;
       this.secrets.addEphemeral("user_code", code, await this.codeHosts(host, c));
+      this.codeGivenAt.set(siteOf(host), Date.now());
       if (code !== f.code.trim()) this.secrets.hide("user_code", f.code.trim());
       this.lastSnapshot = at;
       const typed = (await this.fillCode("{{user_code}}", refs, c.input?.rememberRef)) !== null;
@@ -5295,6 +5382,7 @@ export class Agent {
         // Registered in turn, so a mailbox code being typed right now keeps its own value.
         const register = async () => {
           this.secrets.addEphemeral("user_code", code, await this.codeHosts(host, c));
+          this.codeGivenAt.set(siteOf(host), Date.now());
           if (code !== given.trim()) this.secrets.hide("user_code", given.trim());
         };
         const refs = c.input?.fieldRefs;
@@ -6217,6 +6305,7 @@ export class Agent {
     // The code box may be in the site's own sign-in frame (accounts.<site>): the site and its subdomains.
     const site = siteOf(safeHost(this.page.url));
     this.secrets.addEphemeral("user_code", answer.trim(), [site, `*.${site}`]);
+    this.codeGivenAt.set(site, Date.now());
     this.personCode.add(promptKey(this.page.url));
     return ok(`The page asks for the code the site sent, so the person was asked for the code, not a login. Type it as {{user_code}} (valid for 5 minutes, on ${site} only) into the code field, then press its button.`, "ask_user: code received");
   }
@@ -6890,6 +6979,34 @@ const SEARCH_ADDRESS = /(^https?:\/\/[^/]+)?\/(search|s)(\/|\?|$)|[?&](q|query|s
 const SEARCH_FIELD = /\bsearch\b|\blooking for\b|\bfind (a|an|products?|items?|restaurants?)\b/i;
 /** A field's words about the place itself: typing there is how the place is set. */
 const PLACE_FIELD = /\b(address|location|area|pincode|pin code|postcode|zip|city|locality|street|landmark|apartment|flat|building)\b/i;
+
+/** How long a site's answer to an accepted code is read for a failure message (`afterCodeAccepted`): it came 1.5 s after on 25 Nov. */
+const AFTER_CODE_MS = 3_000;
+
+/** How long after a code was given a site's failure message on a step's page still counts as the sign-in's answer. */
+const CODE_ERROR_WINDOW_MS = 60_000;
+
+/** The site's own failure lines on `snap` (`failureLines`), when it is a page of `site`; else null. */
+function siteErrorOn(snap: Snapshot, site: string): { lines: string[]; snap: Snapshot } | null {
+  if (siteOf(safeHost(snap.url)) !== site) return null;
+  try {
+    const lines = failureLines(pageText(snap, { maxChars: 20_000 }));
+    return lines.length ? { lines, snap } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What `handOver` is given. */
+interface HandOver {
+  c: Interruption;
+  before: InterruptInput;
+  cur: Snapshot;
+  host: string;
+  message: string;
+  event: (handled: InterruptionHandled, waitedMs?: number) => void;
+  fromModel?: boolean;
+}
 
 /** What the model is told when a code was typed but not held whole by the page (`fillCode`), so nothing was submitted. */
 export function codeMissNote(miss: string): string {
