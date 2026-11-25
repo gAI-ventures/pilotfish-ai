@@ -200,7 +200,7 @@ export function serializeSnapshot(snap: Snapshot, opts: SerializeOptions = {}): 
     // A zero-size box can still hold visible content (a body whose children are all absolutely or
     // fixed positioned): pass through it like a boxless wrapper, unless it clips them (a collapsed
     // accordion: height 0, overflow hidden).
-    if (!n.visible && !n.isIframe) return !n.attrs["__clip"] && hasVisibleDescendant(n) ? walk(n, level, { skipText: said }) : undefined;
+    if (!n.visible && !n.isIframe) return !clipsAway(n) && hasVisibleDescendant(n) ? walk(n, level, { skipText: said }) : undefined;
     if (n.rect && !shown(n) && !(filtering ? shownRefBelow(n) : hasInteractiveDescendant(n))) return;
     const ind = indent(level);
     // A frame with no box and nothing drawn inside it (a tracker's cookie sync or pixel) shows nothing.
@@ -470,7 +470,25 @@ function hasOwnText(n: SnapNode): boolean {
 
 function hasVisibleDescendant(n: SnapNode): boolean {
   for (const c of n.children) {
-    if (c.text === undefined && (c.visible || (!c.attrs["__clip"] && hasVisibleDescendant(c)))) return true;
+    if (c.text === undefined && (c.visible || (!clipsAway(c) && hasVisibleDescendant(c)))) return true;
+  }
+  return false;
+}
+
+/**
+ * An unseen clipping box hides what is inside it (a collapsed accordion: height 0, overflow hidden), except a drawn
+ * position:fixed box below it, which its overflow does not clip (a dialog mounted in an empty wrapper).
+ */
+function clipsAway(n: SnapNode): boolean {
+  return !!n.attrs["__clip"] && !fixedDrawnWithin(n);
+}
+
+function fixedDrawnWithin(n: SnapNode, depth = 0): boolean {
+  if (depth > 12) return false;
+  for (const c of n.children) {
+    if (c.text !== undefined) continue;
+    if (c.visible && c.attrs["__fixed"]) return true;
+    if (fixedDrawnWithin(c, depth + 1)) return true;
   }
   return false;
 }
@@ -858,7 +876,7 @@ export function pageText(snap: Snapshot, { maxChars = 60_000, structured = false
     for (const c of n.children) {
       if (chars > maxChars) return;
       if (skip.has(c)) continue;
-      if (!c.visible && !c.text && !c.boxless && (c.attrs["__clip"] || !hasVisibleDescendant(c))) continue;
+      if (!c.visible && !c.text && !c.boxless && (clipsAway(c) || !hasVisibleDescendant(c))) continue;
       if (c.boxless || (!c.visible && !c.text)) {
         walk(c);
       } else if (c.text) {

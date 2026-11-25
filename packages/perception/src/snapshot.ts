@@ -783,8 +783,11 @@ function buildDocument(
         if (styleIdx(li, "pointer-events") === "none") node.attrs["__pe"] = "none";
         const ox = styleIdx(li, "overflow-x");
         const oy = styleIdx(li, "overflow-y");
-        // A clipping box hides what overflows it (a collapsed accordion: height 0, overflow hidden).
-        if (ox === "hidden" || ox === "clip" || oy === "hidden" || oy === "clip") node.attrs["__clip"] = "1";
+        // A clipping box hides what overflows it (a collapsed accordion: height 0, overflow hidden). Not the root or the
+        // body: their overflow applies to the viewport (CSS overflow propagation), so a 0-px-tall body with overflow
+        // hidden hides nothing (25 Nov: a sign-in frame's body was 0 px tall under its fixed dialog, and the whole
+        // dialog, its phone field and its button, was left out of the page the model read).
+        if ((ox === "hidden" || ox === "clip" || oy === "hidden" || oy === "clip") && tag !== "html" && tag !== "body") node.attrs["__clip"] = "1";
         const scrollRect = L.scrollRects?.[li];
         const clientRect = L.clientRects?.[li];
         if (scrollRect && clientRect && (ox === "auto" || ox === "scroll" || oy === "auto" || oy === "scroll")) {

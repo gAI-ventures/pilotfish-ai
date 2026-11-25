@@ -49,6 +49,12 @@ describe.skipIf(!E2E)("perception e2e", () => {
 <div role="dialog" style="position:fixed;left:200px;top:150px;width:400px;height:120px;background:#fff"><p>Join our newsletter</p><input type="email" aria-label="Email"></div>
 <div style="position:absolute;top:500px;height:0;overflow:hidden"><button>Collapsed item</button><p>Collapsed text</p></div>
 </body></html>`);
+      // A sign-in page shaped like a frame's (25 Nov): its body clips (overflow hidden) and has no height, its dialog is
+      // fixed in an empty wrapper that clips too; a collapsed accordion (height 0, overflow hidden) stays hidden.
+      if (req.url === "/clipped-body") return void res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title></head><body style="margin:0;overflow:hidden">
+<div style="height:0;overflow:hidden"><div style="position:fixed;inset:0;background:rgba(0,0,0,.4)"></div><div style="position:fixed;left:400px;top:120px;width:440px;height:300px;background:#fff"><h2>Login</h2><input type="tel" placeholder="Phone"><button>Send One Time Password</button></div></div>
+<div style="position:absolute;top:500px;height:0;overflow:hidden"><button>Collapsed item</button><p>Collapsed text</p></div>
+</body></html>`);
       // Single-character controls next to letter-by-letter animated text (one <span> per character).
       // A page that hides its background from assistive tech while a listbox or a modal dialog is open (17 Nov), with two
       // options told apart only by their aria-label, and (?modal) a page that loads with its modal already open.
@@ -315,6 +321,20 @@ ${req.url.includes("modal") ? "<script>document.getElementById('dlg').showModal(
     expect(text).toMatch(/\[e\d+\]<input type="email"/);
     expect(pageText(snap)).toContain("Join our newsletter");
     // A collapsed accordion (height 0, overflow hidden) keeps its content hidden.
+    expect(text).not.toMatch(/Collapsed/);
+    expect(pageText(snap)).not.toContain("Collapsed");
+    await other.close();
+  });
+
+  it("sees a fixed dialog under a clipping body of no height and a clipping empty wrapper; a collapsed accordion stays hidden", async () => {
+    const other = await browser.newPage();
+    await other.navigate(origin + "/clipped-body");
+    const snap = await captureSnapshot(other, { viewportBand: 1 });
+    const text = serializeSnapshot(snap);
+    expect(text).toMatch(/<h2>Login<\/h2>/);
+    expect(text).toMatch(/\[e\d+\]<input type="tel" placeholder="Phone"/);
+    expect(text).toMatch(/\[e\d+\]<button>Send One Time Password<\/button>/);
+    expect(pageText(snap)).toContain("Send One Time Password");
     expect(text).not.toMatch(/Collapsed/);
     expect(pageText(snap)).not.toContain("Collapsed");
     await other.close();
