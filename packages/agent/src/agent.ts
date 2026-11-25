@@ -5240,7 +5240,7 @@ export class Agent {
     // The page says its codes are used up ("OTP attempts exhausted. Please try other login methods."): another code
     // would be refused too, so nobody is asked for one; the model goes back to the sign-in options (24 Nov).
     if (codePage) {
-      const words = pageText(cur, { maxChars: 4_000 });
+      const words = signInWords(cur, c.input?.fieldRefs);
       if (SIGN_IN_WAY_USED_UP.test(words)) {
         const site = siteOf(host);
         this.usedUpTold.add(site);
@@ -6296,7 +6296,7 @@ export class Agent {
     // The page says the way it was signing in by is used up (too many codes, "try other login methods"): no code is
     // asked for; the model goes back to the site's sign-in options and asks again there, where the person can pick
     // another way (Google, email, a password). Once a site.
-    const words = known ? pageText(known.snap, { maxChars: 4_000 }) : "";
+    const words = known ? signInWords(known.snap, known.result.input?.fieldRefs) : "";
     const usedUp = !!known && SIGN_IN_WAY_USED_UP.test(words);
     if (usedUp && !this.usedUpTold.has(site)) {
       this.usedUpTold.add(site);
@@ -7239,6 +7239,20 @@ function promptKey(url: string): string {
 
 /** Elements whose text is a choice, not what the page says (left out of `nearText`). */
 const CHOICE_ROLES = new Set(["button", "link", "menuitem", "tab", "option", "radio"]);
+
+/**
+ * The words a sign-in step says about itself: the prose around its code field (`nearText`), then what is drawn on top
+ * (dialogs and panels first), then the page. 25 Nov, live: a site's code dialog in a sign-in frame of another origin
+ * said "OTP attempts exhausted. Please try other login methods.", but the first 4,000 characters of the page text were
+ * the listing behind it, so the used-up check never saw it and the person was asked for a code the site would not send.
+ */
+function signInWords(snap: Snapshot, refs?: string[]): string {
+  let page = "";
+  try {
+    page = pageText(snap, { overlaysFirst: true, maxChars: 4_000 });
+  } catch {}
+  return [nearText(snap, refs), page].filter(Boolean).join(" \n ");
+}
 
 /**
  * The page's prose around a code field (its form, or the nearest container with some text), links and
