@@ -55,6 +55,23 @@ describe.skipIf(!E2E)("perception e2e", () => {
 <div style="height:0;overflow:hidden"><div style="position:fixed;inset:0;background:rgba(0,0,0,.4)"></div><div style="position:fixed;left:400px;top:120px;width:440px;height:300px;background:#fff"><h2>Login</h2><input type="tel" placeholder="Phone"><button>Send One Time Password</button></div></div>
 <div style="position:absolute;top:500px;height:0;overflow:hidden"><button>Collapsed item</button><p>Collapsed text</p></div>
 </body></html>`);
+      // A dish options sheet shaped like a food-delivery site's (25 Nov): the whole sheet sits in a role=button wrapper
+      // with a pointer cursor; each option row draws its own box over a native radio or checkbox the page hid (0 x 0).
+      // Beside it, an ordinary list of visible checkboxes with labels.
+      if (req.url === "/option-sheet") return void res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Menu</title><style>
+.row{display:flex;justify-content:space-between;align-items:center;height:24px;margin:8px 0;cursor:pointer}
+.row input{width:0;height:0;margin:0;opacity:0;position:absolute}
+.box{display:inline-block;width:16px;height:16px;border:1px solid #888}
+</style></head><body style="margin:0">
+<div role="button" style="cursor:pointer;position:fixed;left:200px;top:80px;width:480px">
+<div role="dialog" aria-label="Customise" style="background:#fff;padding:16px"><p>Paneer Butter Masala • 160</p><h3>Customise as per your taste</h3><p>Choose From Variant</p>
+<div class="row"><span>Paneer Butter Masala (Qtr)</span><span>160</span><div><input type="radio" name="v" checked><span class="box"></span></div></div>
+<div class="row"><span>Paneer Butter Masala (Half)</span><span>320</span><div><input type="radio" name="v"><span class="box"></span></div></div>
+<p>Choose From Extras</p>
+<div class="row"><span>Green Salad</span><span>+ 105</span><div><input type="checkbox"><span class="box"></span></div></div>
+<button>Continue</button></div></div>
+<form style="position:absolute;top:520px;left:20px"><label><input type="checkbox" name="veg"> Veg only</label><label><input type="checkbox" name="offers"> Offers</label></form>
+</body></html>`);
       // Single-character controls next to letter-by-letter animated text (one <span> per character).
       // A page that hides its background from assistive tech while a listbox or a modal dialog is open (17 Nov), with two
       // options told apart only by their aria-label, and (?modal) a page that loads with its modal already open.
@@ -337,6 +354,26 @@ ${req.url.includes("modal") ? "<script>document.getElementById('dlg').showModal(
     expect(pageText(snap)).toContain("Send One Time Password");
     expect(text).not.toMatch(/Collapsed/);
     expect(pageText(snap)).not.toContain("Collapsed");
+    await other.close();
+  });
+
+  it("a row that draws a hidden radio or checkbox is that control, with its state, even inside a button-like wrapper", async () => {
+    const other = await browser.newPage();
+    await other.navigate(origin + "/option-sheet");
+    const snap = await captureSnapshot(other, { viewportBand: 1 });
+    const text = serializeSnapshot(snap);
+    const rowOf = (name: string) => [...snap.byRef.values()].find((n) => n.name.includes(name) && (n.role === "radio" || n.role === "checkbox"));
+    const qtr = rowOf("(Qtr)"), half = rowOf("(Half)"), salad = rowOf("Green Salad");
+    expect(qtr?.role).toBe("radio");
+    expect(qtr?.checked).toBe(true);
+    expect(half?.role).toBe("radio");
+    expect(half?.checked ?? false).toBe(false);
+    expect(salad?.role).toBe("checkbox");
+    expect(text).toMatch(/\[e\d+\]<button>Continue<\/button>/);
+    // The visible checkboxes keep their own refs; their labels are not made controls of their own.
+    const veg = [...snap.byRef.values()].filter((n) => n.attrs["name"] === "veg" || n.attrs["name"] === "offers");
+    expect(veg.map((n) => n.tag)).toEqual(["input", "input"]);
+    expect([...snap.byRef.values()].filter((n) => n.tag === "label")).toHaveLength(0);
     await other.close();
   });
 

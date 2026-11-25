@@ -397,9 +397,11 @@ async function captureOnce(page: Page, opts: SnapshotOptions): Promise<Snapshot>
     const offset = cap.frame.isMain ? { x: cap.offset.x - metrics.scroll.x, y: cap.offset.y - metrics.scroll.y } : cap.offset;
     buildDocument(cap.dom, 0, cap.frame, cap.ax, mountParent, offset, nodes, oopifMounts, nthCounter, geo);
   }
-  // Elements the page hides from assistive tech get their role and name back; the positional numbers that depend on
-  // names are then counted again, in the same document order the build counted them.
-  if (restoreHiddenNames(nodes, opts.previous ?? null)) {
+  // Elements the page hides from assistive tech get their role and name back, and the rows that draw a hidden checkbox
+  // or radio become its target; the positional numbers that depend on names and roles are then counted again, in the
+  // same document order the build counted them.
+  const lent = lendHiddenToggles(nodes);
+  if (restoreHiddenNames(nodes, opts.previous ?? null) || lent) {
     nthCounter.clear();
     for (const n of nodes) {
       if (!(n.interactive || n.scrollable)) continue;
@@ -1052,6 +1054,57 @@ const NAME_FROM_CONTENT = new Set([
   "button", "cell", "checkbox", "columnheader", "gridcell", "heading", "link", "menuitem", "menuitemcheckbox", "menuitemradio",
   "option", "radio", "row", "rowheader", "switch", "tab", "tooltip", "treeitem",
 ]);
+
+/** The native checkboxes and radios in `n`'s subtree, up to two (enough to tell one from several). */
+function togglesIn(n: SnapNode, found: SnapNode[] = []): SnapNode[] {
+  for (const c of n.children) {
+    if (found.length > 1) break;
+    if (c.tag === "input" && /^(checkbox|radio)$/i.test(c.attrs["type"] ?? "")) found.push(c);
+    else togglesIn(c, found);
+  }
+  return found;
+}
+
+/**
+ * A native checkbox or radio the page hides (no size, or not drawn) under a row it draws itself (the option's name, its
+ * price, a drawn box): the row becomes the control, with the input's role and checked state, and what is inside it
+ * folds into it. 25 Nov, live: a food-delivery site's dish options sheet sat inside a role=button wrapper with a
+ * pointer cursor; every option row folded into that wrapper and the inputs, 0 x 0, had no ref, so the model could pick
+ * no size or extra and pressed the dish's own "Add" again, closing the sheet, until its steps ran out. The row is the
+ * highest visible box within four levels that holds this toggle alone and is no taller than a row (120 px).
+ */
+function lendHiddenToggles(nodes: SnapNode[]): boolean {
+  let changed = false;
+  for (const input of nodes) {
+    if (input.tag !== "input" || input.visible || input.disabled || !input.rect) continue;
+    const type = (input.attrs["type"] ?? "").toLowerCase();
+    if (type !== "checkbox" && type !== "radio") continue;
+    let row: SnapNode | null = null;
+    for (let a = input.parent, k = 0; a && k < 4; a = a.parent, k++) {
+      if (a.tag === "#document" || a.isIframe) break;
+      if (!a.visible || !a.rect) continue;
+      if (a.rect.height > 120 || a.rect.width < 12 || togglesIn(a).length > 1) break;
+      row = a;
+    }
+    if (!row || row.attrs["__pe"] || /^(button|a|select|textarea)$/.test(row.tag)) continue;
+    row.interactive = true;
+    row.inInteractive = false;
+    if (!row.role || row.role === "generic" || row.role === "button" || row.role === "LabelText" || row.role === "none") row.role = type;
+    if (input.checked) row.checked = true;
+    if (!row.name) row.name = (textOf(row) || input.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
+    row.identity = identityOf(row);
+    const fold = (n: SnapNode) => {
+      for (const c of n.children) {
+        if (c.interactive && !NATIVE_INTERACTIVE_TAGS.has(c.tag)) c.interactive = false;
+        c.inInteractive = true;
+        fold(c);
+      }
+    };
+    fold(row);
+    changed = true;
+  }
+  return changed;
+}
 
 /**
  * Role and name for elements the page hides from assistive tech (`axHidden`), which Chromium leaves unnamed. The same
