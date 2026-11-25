@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Page } from "@pilotfish/browser";
 import type { InterruptInput, Interruption, Snapshot } from "@pilotfish/perception";
-import { classifyPage, rateLimited, retryAfterMs, UnboundLookError } from "./interventions.js";
+import { classifyPage, describeInterruption, rateLimited, retryAfterMs, UnboundLookError } from "./interventions.js";
 
 const hit = (category: Interruption["category"], signals: string[], vendor?: string): Interruption => ({ category, signals, blocking: true, needs: "none_possible", ...(vendor ? { vendor } : {}) }) as Interruption;
 const withHeaders = (headers: Record<string, string>): InterruptInput => ({ response: { url: "https://a.example/", status: 429, headers } }) as InterruptInput;
@@ -32,5 +32,42 @@ describe("a look bound to no document (fifth review)", () => {
     // No CDP call is made for it: the fake page has no session.
     const snap = { url: "http://x/block", unsettled: true, document: null } as unknown as Snapshot;
     await expect(classifyPage({} as Page, snap)).rejects.toBeInstanceOf(UnboundLookError);
+  });
+});
+
+describe("hand-off messages for sign-in steps no hosted browser can finish", () => {
+  const passkey = describeInterruption(hit("passkey", ["passkey"]), "login.example.com");
+
+  it("a passkey or QR sign-in is explained as device-bound by design, with the ways forward, and never as an error", () => {
+    expect(passkey).toContain("login.example.com");
+    expect(passkey).toMatch(/by design/i);
+    expect(passkey).toMatch(/Touch ID, Face ID, a security key/);
+    expect(passkey).toMatch(/QR/);
+    expect(passkey).toMatch(/password or a one-time code/);
+    expect(passkey).toMatch(/live view/);
+    expect(passkey).toMatch(/saved with pilotfish/);
+    expect(passkey).toMatch(/local MCP/);
+    expect(passkey).not.toMatch(/error|fail|unable|cannot be fixed|sorry/i);
+  });
+
+  it("a login hand-off says the signed-in session is reused on later runs", () => {
+    const m = describeInterruption(hit("login", ["password field"]), "shop.example.com");
+    expect(m).toMatch(/live view/);
+    expect(m).toMatch(/reused on later runs/);
+  });
+
+  it("a code hand-off keeps the hint and offers the repeat-use ways (signed-in session, app password, 2FA off)", () => {
+    const i = { ...hit("otp", ["code field"]), input: { hint: "sent to a***@x.com" } } as Interruption;
+    const m = describeInterruption(i, "bank.example.com");
+    expect(m).toContain("sent to a***@x.com");
+    expect(m).toMatch(/send the code, or type it in the live view/);
+    expect(m).toMatch(/app password/);
+    expect(m).toMatch(/two-step verification/);
+    expect(m).toMatch(/session is reused/);
+  });
+
+  it("a payment or bot check does not pick up the sign-in advice", () => {
+    expect(describeInterruption(hit("payment_3ds", ["3ds"]), "pay.example.com")).not.toMatch(/app password/);
+    expect(describeInterruption(hit("captcha", ["captcha"]), "x.example.com")).not.toMatch(/app password|reused/);
   });
 });

@@ -307,15 +307,15 @@ export function describeInterruption(i: Interruption, host: string): string {
     case "bot_challenge":
       return `${host} shows a CAPTCHA / bot check${who}. Please solve it in the live view; the run continues by itself once it is passed.`;
     case "login":
-      return `${host} asks to sign in${who}. Please sign in in the live view (the agent has no credentials for it).`;
+      return `${host} asks to sign in${who}. Please sign in in the live view (the agent has no credentials for it). Once you are in, the signed-in session is reused on later runs of this site (save the login in Sites & logins to keep it for new sessions).`;
     case "otp":
-      return `${host} asks for a verification code${i.input?.hint ? ` (${i.input.hint})` : ""}. Please send the code, or type it in the live view.`;
+      return `${host} asks for a verification code${i.input?.hint ? ` (${i.input.hint})` : ""}. Please send the code, or type it in the live view. If a site asks for a code on every run, you can sign in once so the session is reused, or (if the site allows it) set up an app password for automation or turn off two-step verification for that account.`;
     case "push_approval":
       return `${host} sent a sign-in request to your device${i.displayNumber ? `; pick ${i.displayNumber}` : ""}. Please approve it.`;
     case "magic_link":
       return `${host} emailed a sign-in link${i.input?.hint ? ` (${i.input.hint})` : ""}. Please open it or paste it.`;
     case "passkey":
-      return `${host} asks for a passkey / security key. Please sign in another way in the live view.`;
+      return `${host} asks for a passkey or a QR / phone sign-in. These are bound to your own device by design (Touch ID, Face ID, a security key), so no cloud browser can complete them, and the QR route is part of the same protection. To continue: pick the site's other sign-in way (a password or a one-time code) in the live view; the run carries on by itself once you are in. For next time, a passkey saved with pilotfish signs in here by itself, and the local MCP on your own device works too.`;
     case "payment_3ds":
       return `Your bank asks to confirm the payment (3-D Secure)${who}. Please complete it in the live view.`;
     case "http_auth":

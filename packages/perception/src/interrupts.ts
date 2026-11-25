@@ -395,6 +395,11 @@ const PASSKEY_TEXT = [
   /\bwindows hello\b/,
   /\bpasskey\b[^.]{0,60}\b(confirm|verify|it'?s (really )?you)\b|\b(confirm|verify)\b[^.]{0,40}\bpasskey\b/,
   /\b(use your|scan with your) (fingerprint|face|screen lock)\b/,
+  // Cross-device ("hybrid") screens: the site's QR / phone route to the same device-bound key a
+  // remote browser cannot reach ("use a passkey from another device", "use your phone or tablet").
+  /\bpasskey\b[^.]{0,60}\b(another|other|different) (device|phone|tablet)\b|\b(another|other|different) (device|phone|tablet)\b[^.]{0,40}\bpasskey\b/,
+  /\buse your (phone|tablet|other device)\b[^.]{0,30}\bto (sign|log)[- ]?in\b/,
+  /\bscan (the |this )?qr code\b(?![^.]{0,80}authenticator)[^.]{0,80}\b(phone|camera|device|app)\b/,
 ];
 
 const OTP_NAME = /\b(otp|totp|hotp|mfa|2fa|tfa|twofactor|one ?time|onetime|passcode|verification|verify|verif|vcode|code|token|pin|smscode|authcode|auth|challenge|approvals)\b/;
@@ -1437,7 +1442,7 @@ function detectAuthStep(m: Model, v: View, ctxKnown: boolean): Hit | null {
   }
   const passkey = gateLike ? PASSKEY_TEXT.find((re) => re.test(v.lower)) : undefined;
   if (passkey && textInputs.length === 0) {
-    return { category: "passkey", blocking: true, needs: "login_in_live_view", signals: [`passkey / security key prompt "${passkey.exec(v.lower)?.[0] ?? ""}"`, "a remote browser cannot reach the user's authenticator; pick another method in the live view", ...(ctx ? [ctx] : [])] };
+    return { category: "passkey", blocking: true, needs: "login_in_live_view", signals: [`passkey / security key prompt "${passkey.exec(v.lower)?.[0] ?? ""}"`, "a hosted browser cannot complete a passkey or QR / phone sign-in (the key stays on the person's own device); pick another sign-in method in the live view, or a passkey saved with pilotfish answers it", ...(ctx ? [ctx] : [])] };
   }
   const strongMagic = MAGIC_STRONG.find((re) => re.test(v.lower));
   const weakMagic = MAGIC_WEAK.test(v.lower);

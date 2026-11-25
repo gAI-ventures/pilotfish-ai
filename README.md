@@ -165,6 +165,15 @@ The browser tests use Google Chrome when it is installed; set `PILOTFISH_CHROME`
 This repository is a mirror: it is published from pilotfish's own repository, and every sync replaces its whole tree.
 Pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).
 
+## Acceptable use
+
+pilotfish's open MCP is free software under the MIT License, but the license governs copyright only - it doesn't authorize what you automate. By using pilotfish you agree to:
+
+- automate only sites and accounts you're authorized to use, in line with each site's terms and applicable law;
+- never use it for spam, bulk account creation, collecting personal data you have no right to, credential harvesting or phishing, or getting around blocks, bans, paywalls or rate limits a site has placed on you.
+
+Abuse of the managed service is covered by the pilotfish Terms of Service (<https://pilotfish.gai.ventures/terms>). Report security issues privately as [SECURITY.md](SECURITY.md) describes.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
