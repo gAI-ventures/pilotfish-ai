@@ -333,14 +333,17 @@ describe.skipIf(!E2E)("sign-in codes over the shapes code entry takes (scripted 
 
 // The site's answer after a right code: its page turns into its own failure message a moment later ("Error
 // encountered, please try again later"). "passing": a reload shows the shop signed in (the error was a passing one);
-// "refused": the reload shows the message again (the site refused the sign-in). Before the fix the run went on from
-// the message signed out and never looked again; now the page is reloaded once and the model told what it showed.
+// "refused": the reload shows the message again; "signedout": the reload shows the shop with its "Log in" again (both
+// the site refusing the sign-in). Before the fix the run went on from the message signed out and never looked again;
+// now the page is reloaded once and the model told what it showed. A refused sign-in asks for no second code, though
+// the model tries again as a model did live (it asked the person for a second code the site refused the same way).
 describe.skipIf(!E2E)("a sign-in that fails just after its code was accepted (scripted model)", () => {
   let browser: Browser;
   let server: Server;
   let origin: string;
   let signed = false;
   let pageLoads = 0;
+  let verifies = 0;
   const ERROR_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Corner Shop</title></head><body><img alt="" width="80" height="80"><p>Error encountered, please try again later.</p></body></html>`;
   const SIGNED_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Corner Shop</title></head><body><header><a href="/">Corner Shop</a> <button type="button">Account</button></header><main><p id="hi">Hi Ada, your saved addresses: Home</p></main></body></html>`;
   const failing = (shape: string) =>
@@ -360,7 +363,8 @@ describe.skipIf(!E2E)("a sign-in that fails just after its code was accepted (sc
         for await (const c of req) b += String(c);
         const body = Object.fromEntries(new URLSearchParams(b));
         const ok = url.pathname === "/api/verify" ? body["code"] === CODE6 : true;
-        if (url.pathname === "/api/verify" && ok) signed = true;
+        if (url.pathname === "/api/verify") verifies++;
+        if (url.pathname === "/api/verify" && ok) signed = mode !== "signedout";
         res.writeHead(200, { "content-type": "application/json" });
         return res.end(JSON.stringify({ ok }));
       }
@@ -380,10 +384,11 @@ describe.skipIf(!E2E)("a sign-in that fails just after its code was accepted (sc
   });
 
   // single-6: the model types the code and presses Verify itself; maxlen2-6: pilotfish types it and the boxes send it.
-  for (const [shape, mode] of [["single-6", "passing"], ["single-6", "refused"], ["maxlen2-6", "passing"], ["maxlen2-6", "refused"]] as const) {
+  for (const [shape, mode] of [["single-6", "passing"], ["single-6", "refused"], ["single-6", "signedout"], ["maxlen2-6", "passing"], ["maxlen2-6", "refused"], ["maxlen2-6", "signedout"]] as const) {
     it(`${shape}, ${mode}: the page is reloaded once and the model is told what the reload showed`, async () => {
       signed = false;
       pageLoads = 0;
+      verifies = 0;
       const p = await browser.newPage();
       await p.navigate(`${origin}/signin?mode=${mode}&shape=${shape}`);
       let shown = "";
@@ -392,13 +397,25 @@ describe.skipIf(!E2E)("a sign-in that fails just after its code was accepted (sc
       let askedLogin = false;
       let askedCode = false;
       let codeAsks = 0;
+      let retried = false;
       const { client, requests } = scripted((seen) => {
         shown = `${seen}\n${shown}`;
         if (/\bHi Ada\b/.test(seen)) return [{ name: "done", input: { success: true, result: "Signed in; the saved address is Home." } }];
-        if (/Error encountered/i.test(seen) && typedCode) return [{ name: "done", input: { success: false, result: "The shop showed an error after the code." } }];
+        if (/Not asked: [^\n]*refused the sign-in/.test(seen)) return [{ name: "done", input: { success: false, result: "The shop refused the sign-in after the code." } }];
+        // Told the reload's outcome: this model signs in again all the same (a second code asked for).
+        if (/reloaded once/.test(seen) && !retried) {
+          retried = true;
+          typedNumber = false;
+          typedCode = false;
+          askedCode = false;
+          // The page's own "Log in" (a snapshot line, not the list of elements the reload removed).
+          const login = /^\s*\*?\[((?:f\d+)?e\d+)\]<button[^\n>]*>Log in</m.exec(seen)?.[1];
+          return login ? [{ name: "click", input: { ref: login } }] : [{ name: "ask_user", input: { kind: "code", question: "Please share the new OTP sent to your phone." } }];
+        }
         const phoneField = refOf(shown, /<input[^\n]*label="Phone number"/);
-        const placeholder = /\{\{([^}]+\.entered_phone)\}\}/.exec(seen)?.[1];
-        if (placeholder && !typedNumber && phoneField) {
+        const placeholder = /\{\{([^}]+\.entered_phone)\}\}/.exec(shown)?.[1];
+        // The number when the person's answer names its placeholder, or (signing in again) the phone field shows anew.
+        if (placeholder && !typedNumber && phoneField && (/\{\{[^}]+\.entered_phone\}\}/.test(seen) || /Phone number/.test(seen))) {
           typedNumber = true;
           return [{ name: "type", input: { ref: phoneField, text: `{{${placeholder}}}`, submit: true } }];
         }
@@ -441,13 +458,16 @@ describe.skipIf(!E2E)("a sign-in that fails just after its code was accepted (sc
       const told = requests.map(lastSeen).join("\n");
       // One reload of the page after the code: the first load, then that reload.
       expect(pageLoads).toBe(2);
-      // The person was asked for one code only.
+      // The person was asked for one code only, and the site was sent one.
       expect(codeAsks).toBe(1);
+      expect(verifies).toBe(1);
       if (mode === "passing") {
         expect(told).toMatch(/reloaded once and the message is gone/);
         expect(r.success).toBe(true);
       } else {
-        expect(told).toMatch(/reloaded once and still shows it/);
+        expect(told).toMatch(mode === "refused" ? /reloaded once and still shows it: the site refused the sign-in/ : /the message is gone, but the page still offers to sign in: the site refused the sign-in/);
+        // The second sign-in the model tried asked nobody for a code.
+        expect(told).toMatch(/Not asked: [^\n]*refused the sign-in after a right code/);
         expect(r.success).toBe(false);
       }
       expect(JSON.stringify(requests)).not.toContain(CODE6);

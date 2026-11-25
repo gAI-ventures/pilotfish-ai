@@ -1399,6 +1399,8 @@ export class Agent {
   private readonly codeGivenAt = new Map<string, number>();
   /** The code (its `codeGivenAt` time) whose answer was already waited for on a site. */
   private readonly codeWaited = new Map<string, number>();
+  /** Sites that refused the sign-in after a right code in this run, with the message they showed (`reloadAfterCodeError`). */
+  private readonly codeRefused = new Map<string, string>();
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
   /** Sites a saved recovery code was typed on in this run: one per site, then the person. */
   private readonly recoveryTried = new Set<string>();
@@ -3835,6 +3837,8 @@ export class Agent {
           // A code the model asks for on a page the classifier sees as a code or sign-in-link prompt goes the
           // runtime's way first: the saved authenticator key, then codeSource, then the person.
           if (input["kind"] === "code" || CODE_QUESTION.test(String(input["question"]))) {
+            const refused = this.refusedCodeNote(safeHost(this.page.url));
+            if (refused) return ok(refused, "ask_user: code not asked (the site refused the sign-in)");
             const via = await this.askCodeOnPage(String(input["question"]));
             if (via) return via;
           }
@@ -5181,7 +5185,13 @@ export class Agent {
     return seen ? this.reloadAfterCodeError(host, seen) : null;
   }
 
-  /** One reload, once per site in a run, of a page that failed after a code; the model is told what the reload showed. */
+  /**
+   * One reload, once per site in a run, of a page that failed after a code; the model is told what the reload showed.
+   * The message still there, or gone with the page still offering to sign in (`stillSigningIn`: its "Log in" back, a
+   * code field), is the site refusing the sign-in after a right code (25 Nov, live, twice: the reload showed the site
+   * signed out, and the run asked the person for a second code the site refused the same way). The site is then
+   * `codeRefused` for the run: no code is asked for it again (`refusedCodeNote`).
+   */
   private async reloadAfterCodeError(host: string, seen: { lines: string[]; snap: Snapshot }): Promise<{ note: string; snap: Snapshot }> {
     const site = siteOf(host) || host;
     this.codeErrorReloaded.add(site);
@@ -5192,13 +5202,24 @@ export class Agent {
     const still = now ? siteErrorOn(now, site) : null;
     const snap = now ?? seen.snap;
     this.lastSnapshot = snap;
-    this.opts.onStep?.({ type: "interruption", category: "otp", needs: "none", handled: still ? "unresolved" : "resolved", host, signals: [clip(`after the code: ${seen.lines[0]}; reloaded once, ${still ? "still shown" : "gone"}`, 120)], source: "classifier" });
+    const signedOut = !still && !!now && stillSigningIn(now.nodes);
+    const refused = !!still || signedOut;
+    if (refused) this.codeRefused.set(site, seen.lines[0]!);
+    this.opts.onStep?.({ type: "interruption", category: "otp", needs: "none", handled: refused ? "unresolved" : "resolved", host, signals: [clip(`after the code: ${seen.lines[0]}; reloaded once, ${still ? "still shown" : signedOut ? "gone, still signed out" : "gone"}`, 120)], source: "classifier" });
+    const after = `Right after the code was accepted, ${host} showed ${said}; the page was reloaded once`;
+    const stop = `the site refused the sign-in after a right code. Do not sign in again or ask the person for another code: the site would refuse it the same way. Say in your answer that ${host} refused the sign-in after the code, and go on with what can be done signed out.`;
     return {
-      note: still
-        ? `Right after the code was accepted, ${host} showed ${said}; the page was reloaded once and still shows it, so the site did not finish signing in. Look whether the page shows you signed in; if it does not, the site refused the sign-in after a right code: say so in your answer and go on with what can be done signed out. Do not ask the person for another code unless the page itself asks for one.`
-        : `Right after the code was accepted, ${host} showed ${said}; the page was reloaded once and the message is gone. Look whether the page shows you signed in before going on.`,
+      note: still ? `${after} and still shows it: ${stop}` : signedOut ? `${after}; the message is gone, but the page still offers to sign in: ${stop}` : `${after} and the message is gone. Look whether the page shows you signed in before going on.`,
       snap,
     };
+  }
+
+  /** The note in place of a code asked for a site that refused the sign-in after a right code in this run (`codeRefused`). */
+  private refusedCodeNote(host: string): string | null {
+    const site = siteOf(host) || host;
+    const said = this.codeRefused.get(site);
+    if (said === undefined) return null;
+    return `Not asked: ${host} refused the sign-in after a right code earlier in this run (it showed "${said}" and stayed signed out after a reload), so another code would be refused the same way. Do not sign in again; say in your answer that ${host} refused the sign-in after the code, and go on with what can be done signed out.`;
   }
 
   private async handOverOnce(x: HandOver): Promise<{ note: string; snap?: Snapshot } | null> {
@@ -5208,6 +5229,14 @@ export class Agent {
     const kind = c.category === "magic_link" ? "link" : "code";
     if (kind === "link") message += " Opened on your own phone or computer, the link signs that device in, not pilotfish's browser: copy the link from the email and paste it here instead.";
     const codePage = c.category === "otp" || c.category === "magic_link";
+    // The site refused the sign-in after a right code in this run: nobody is asked for another one.
+    if (c.category === "otp") {
+      const refused = this.refusedCodeNote(host);
+      if (refused) {
+        event("unresolved");
+        return { note: refused };
+      }
+    }
     // The page says its codes are used up ("OTP attempts exhausted. Please try other login methods."): another code
     // would be refused too, so nobody is asked for one; the model goes back to the sign-in options (24 Nov).
     if (codePage) {
