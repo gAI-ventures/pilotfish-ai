@@ -405,6 +405,13 @@ export interface AgentOptions {
    */
   onSignedIn?: (e: { site: string; host: string; url: string; by: "saved" | "person" | "passkey" }) => void | Promise<void>;
   /**
+   * The task's site works by place (the start-context step's `byPlace`, read when asked: it may arrive after the run
+   * starts). Then the first search waits until the run has set the site's delivery address or location (`placeGate`).
+   */
+  placeFirst?: () => boolean;
+  /** Where the place's state is kept: one object for a run's executors, so a place set by one leg holds for the next. */
+  placeState?: { set: boolean; held: number };
+  /**
    * The agent read a PDF a tab shows in Chrome's viewer (get_text): no download happened, so the host may keep
    * the document as a file of its own (18 Nov: "download the PDF" of an inline irs.gov form left only a link).
    * Returns a line for the agent ("Kept … as a session file"), or null when nothing was kept.
@@ -1377,6 +1384,11 @@ export class Agent {
   private readonly givenSignIn = new Map<string, { way: "password" | "phone" | "email" | "provider"; names: string[]; told: number; provider?: string; providerSite?: string }>();
   /** Sites whose used-up sign-in way (too many codes, "try other login methods") the model was told about once. */
   private readonly usedUpTold = new Set<string>();
+  /**
+   * The site's delivery address or location was set and read back in this run (a note of it, or a page tool that set it),
+   * and how often a search was held back for it (`placeGate`: twice at most). Shared by a run's executors (`placeState`).
+   */
+  private readonly place: { set: boolean; held: number };
   /** Why the last code `fillCode` typed was not submitted (the page's field or boxes did not hold it whole), else null. */
   private codeMiss: string | null = null;
   private readonly signingIn = new Map<string, { by: "saved" | "person" | "passkey"; typed: boolean; via?: string; cookies?: Set<string> }>();
@@ -1544,6 +1556,7 @@ export class Agent {
     const broker = opts.secretBroker ?? new SecretBroker(opts.secrets);
     this.secrets = opts.guardSecretOutput ? guardedView(broker, opts.onSecretOutput ?? null) : broker;
     this.repeatFailures = opts.repeatFailures ?? new RepeatFailures();
+    this.place = opts.placeState ?? { set: false, held: 0 };
     // With secrets, a screenshot is refused page by page (pictureRisk), not for the whole run: before 1 Nov a saved
     // LinkedIn login took the screenshot tools from every task of that account, and a run asked the person what its
     // own page showed.
@@ -3050,8 +3063,49 @@ export class Agent {
     return outcome;
   }
 
+  /**
+   * A site that works by place (`AgentOptions.placeFirst`) shows and sells only for its delivery address or location:
+   * a search before it is set searches the place the site picked by itself (the exit's city, an old address). So the
+   * first search (typing into a search field, opening a search address, a page's own search tool) waits until the run
+   * has set and read back the place: once signed in, the saved address that matches the task, else the only one saved,
+   * else WHERE THE PERSON IS; signed out, the site's location set to WHERE THE PERSON IS; else the person is asked.
+   * Twice at most, then searches go through (a site whose place cannot be set never blocks the run). 25 Nov: runs
+   * searched with the site's own pick (a city from the exit, a saved address that was not the person's).
+   */
+  private placeGate(name: ToolName, input: Record<string, unknown>): string | null {
+    if (this.place.set || this.place.held >= 2 || !this.opts.placeFirst?.()) return null;
+    if (!this.searches(name, input)) return null;
+    this.place.held++;
+    return (
+      "Not yet: this site works by place, and its delivery address or location is not set for this run. Set it first, then search: " +
+      "once signed in, pick the site's saved address that matches the task (else the only one saved, else the one matching WHERE THE PERSON IS); " +
+      "signed out, set the site's location to WHERE THE PERSON IS; with none of these, or several that fit equally, call ask_user for the address or area. " +
+      "Never keep a place the site picked by itself, and never press \"Detect my location\". Read it back on the page, call note with \"Place: <the address as the page shows it>\", then search."
+    );
+  }
+
+  /** Whether an action searches: typing into a search field, opening a search address, or a page tool that searches. */
+  private searches(name: ToolName, input: Record<string, unknown>): boolean {
+    if (name === "navigate") return SEARCH_ADDRESS.test(String(input["url"] ?? ""));
+    if (name === "page_tool") return /search|find|browse/i.test(String(input["tool"] ?? ""));
+    const field = (ref: unknown) => {
+      const n = (this.turnSnapshot ?? this.lastSnapshot)?.byRef.get(String(ref));
+      if (!n) return false;
+      const words = `${n.name ?? ""} ${n.attrs["placeholder"] ?? ""} ${n.attrs["aria-label"] ?? ""} ${n.attrs["name"] ?? ""} ${n.attrs["id"] ?? ""}`;
+      // A field for the place itself ("Search for area, street name", a pincode) is how it gets set: never held back.
+      if (PLACE_FIELD.test(words)) return false;
+      return n.role === "searchbox" || (n.attrs["type"] ?? "").toLowerCase() === "search" || SEARCH_FIELD.test(words);
+    };
+    if (name === "type") return field(input["ref"]);
+    if (name === "fill") return ((input["fields"] as Array<{ ref: string }> | undefined) ?? []).some((f) => field(f.ref));
+    return false;
+  }
+
   private async executeInner(name: ToolName, input: Record<string, unknown>): Promise<ToolOutcome> {
     let dismissed = "";
+    // A site that works by place: its delivery address or location is set before the first search (`placeGate`).
+    const held = this.placeGate(name, input);
+    if (held) return err(held);
     try {
       switch (name) {
         case "navigate": {
@@ -3318,6 +3372,7 @@ export class Agent {
         case "note": {
           const text = this.secrets.scrub(String(input["text"])).slice(0, 2_000);
           this.noteLog.push(text);
+          if (PLACE_SET.test(text)) this.place.set = true;
           if (this.opts.revealNotes) await this.revealText(text, { maxStops: 1, onlyOffscreen: true, from: "the note" }).catch(() => undefined);
           return ok(`Noted (${this.noteLog.length} note${this.noteLog.length === 1 ? "" : "s"}).`, "note");
         }
@@ -3615,8 +3670,12 @@ export class Agent {
           const text = typeof value === "string" ? value : JSON.stringify(value, null, 0) ?? "undefined";
           return ok(this.secrets.scrub(text.slice(0, 20_000)), "run_js");
         }
-        case "page_tool":
-          return await this.callPageTool(String(input["tool"]), String(input["arguments_json"] ?? "{}"));
+        case "page_tool": {
+          const out = await this.callPageTool(String(input["tool"]), String(input["arguments_json"] ?? "{}"));
+          // A page's own tool that selects or sets the delivery address or location, and worked, sets the place.
+          if (!out.isError && PLACE_TOOL.test(String(input["tool"]))) this.place.set = true;
+          return out;
+        }
         case "query": {
           const expression = String(input["expression"]);
           // Read-only for real: the expression runs in a world of its own where clicks, submits, sending data and
@@ -6820,6 +6879,17 @@ export function notAField(node: Pick<SnapNode, "tag" | "role" | "name" | "attrs"
     `Type it into the input that takes it (a code page may draw its boxes over one input, listed near them). If no field for it shows, call ask_user with kind "login" saying so, rather than pressing anything.`
   );
 }
+
+/** A note saying the delivery address or location is set ("Place: …", "The saved Home address is selected"). */
+export const PLACE_SET = /^\s*place\s*:|\b(address|location|pincode|pin code|locality|area|city)\b[^.\n]{0,80}\b(is |was |now )?(selected|set|confirmed|chosen|shown as selected)\b|\b(selected|set|confirmed|chose|picked)\b[^.\n]{0,40}\b(delivery )?(address|location)\b|\bdelivering to\b/i;
+/** A page's own tool that selects, sets or adds the delivery address or location. */
+const PLACE_TOOL = /(select|set|add|change|choose)_?(delivery_?)?(address|location|pincode|area)/i;
+/** An address that searches: a search path or a query parameter. */
+const SEARCH_ADDRESS = /(^https?:\/\/[^/]+)?\/(search|s)(\/|\?|$)|[?&](q|query|search|searchterm|k|keyword|text)=/i;
+/** A field's words that search the site for things: "Search for products", "What are you looking for". */
+const SEARCH_FIELD = /\bsearch\b|\blooking for\b|\bfind (a|an|products?|items?|restaurants?)\b/i;
+/** A field's words about the place itself: typing there is how the place is set. */
+const PLACE_FIELD = /\b(address|location|area|pincode|pin code|postcode|zip|city|locality|street|landmark|apartment|flat|building)\b/i;
 
 /** What the model is told when a code was typed but not held whole by the page (`fillCode`), so nothing was submitted. */
 export function codeMissNote(miss: string): string {

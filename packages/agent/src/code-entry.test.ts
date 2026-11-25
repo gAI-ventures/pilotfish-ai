@@ -100,3 +100,11 @@ describe("codeMissNote", () => {
     expect(n).toMatch(/kind "login"/);
   });
 });
+
+describe("PLACE_SET", () => {
+  it("a note saying the delivery address or location is set opens the by-place gate", async () => {
+    const { PLACE_SET } = await import("./agent.js");
+    for (const t of ["Place: Home · Koramangala, Bengaluru", "The Home saved address is selected: 4th floor, Example Residency", "Delivery location set to Koramangala", "Selected the saved Home address", "Delivering to Home"]) expect(PLACE_SET.test(t)).toBe(true);
+    for (const t of ["Searched for dark chocolate", "The cart has 2 items", "Signed in successfully"]) expect(PLACE_SET.test(t)).toBe(false);
+  });
+});
