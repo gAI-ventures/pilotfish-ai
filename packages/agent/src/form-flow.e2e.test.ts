@@ -97,6 +97,15 @@ const SETTINGS = `<!doctype html><html><head><meta charset="utf-8"><title>Settin
   document.getElementById('yes').addEventListener('click', async () => { await fetch('/public', { method: 'POST' }); d.close(); document.body.innerHTML = '<h1>This repository is now public</h1>'; });
 </script></body></html>`;
 
+// The same settings page, long, where the last confirmation asks the person to prove it is them again in a dialog over it.
+const SETTINGS_SUDO = `<!doctype html><html><head><meta charset="utf-8"><title>Settings</title></head><body>
+<h1>General</h1><h2>Danger Zone</h2><p>This repository is currently private.</p><button id="pub" type="button">Change to public</button>
+${Array.from({ length: 60 }, (_, i) => `<h3>Setting ${i}</h3><p>Explains what setting number ${i} does for this repository and who it affects.</p>`).join("")}
+<dialog id="sudo" role="dialog" aria-modal="true"><h2>Confirm access</h2><p>Signed in as @ada</p><a href="#" id="mail">Verify via email</a> <a href="#">Use your password</a></dialog>
+<script>
+  document.getElementById('pub').addEventListener('click', () => document.getElementById('sudo').showModal());
+</script></body></html>`;
+
 describe.skipIf(!E2E)("steps a run missed on a form and a confirmation dialog (scripted model)", () => {
   let browser: Browser;
   let server: Server;
@@ -119,7 +128,7 @@ describe.skipIf(!E2E)("steps a run missed on a form and a confirmation dialog (s
         }, 400);
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(url.pathname === "/new" ? NEW_REPO : url.pathname === "/settings" ? SETTINGS : "<h1>Home</h1>");
+      res.end(url.pathname === "/new" ? NEW_REPO : url.pathname === "/settings" ? SETTINGS : url.pathname === "/settings-sudo" ? SETTINGS_SUDO : "<h1>Home</h1>");
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -197,5 +206,36 @@ describe.skipIf(!E2E)("steps a run missed on a form and a confirmation dialog (s
     expect(shown).toBe(true);
     expect(posts).toEqual(["/public"]);
     expect(r.success).toBe(true);
+  }, 60_000);
+
+  it("a confirm-access dialog over a long settings page goes to the person, not the end of the run", async () => {
+    const p = await browser.newPage();
+    await p.navigate(`${origin}/settings-sudo`);
+    let clicked = false;
+    const asked: Array<{ category?: string }> = [];
+    const { client } = scripted((seen) => {
+      // A model that does what it is told about the step, else stops there and reports it (as the run did live).
+      if (/prove it is them again/.test(seen)) return [{ name: "ask_user", input: { kind: "login", question: "The site asks to confirm access before making the repository public." } }];
+      const pub = refOf(seen, /<button[^\n]*>Change to public/);
+      if (!clicked && pub) {
+        clicked = true;
+        return [{ name: "click", input: { ref: pub } }];
+      }
+      return [{ name: "done", input: { success: false, result: "The site asks to confirm access by email." } }];
+    });
+    await new Agent(p, {
+      client,
+      model: "fake",
+      policy: { check: () => ({ kind: "allow" as const }) },
+      contextEditing: false,
+      fastSettle: true,
+      autoDismiss: true,
+      interruptions: true,
+      interventionPollMs: 250,
+      maxSteps: 6,
+      onIntervention: async (req) => (asked.push(req as { category?: string }), { status: "cancel" }),
+    }).run("make the repository public");
+    await p.close();
+    expect(asked.map((a) => a.category)).toContain("login");
   }, 60_000);
 });

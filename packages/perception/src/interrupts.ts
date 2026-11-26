@@ -1506,6 +1506,30 @@ function detectLogin(m: Model, v: View): Hit | null {
   if (reauth && medium(v) && REAUTH_WAY.test(v.lower)) {
     return { category: "login", blocking: true, needs: "login_in_live_view", signals: [`re-authentication step "${reauth}"`, ...extra] };
   }
+  // The same step drawn in a dialog over a long page (a settings page that asks before a sensitive change), where the
+  // page's own text is far too long for the check above.
+  const inDialog = reauthDialog(v);
+  if (inDialog) return { category: "login", blocking: true, needs: "login_in_live_view", signals: [`re-authentication step "${inDialog}" in a dialog`, ...extra] };
+  return null;
+}
+
+/** A dialog drawn over the page holding a re-authentication step (its heading or label, and a way to prove it): its heading, or null. */
+function reauthDialog(v: View): string | null {
+  for (const e of v.elements) {
+    if (!e.visible || !(e.tag === "dialog" || e.role === "dialog" || e.role === "alertdialog" || e.attrs["role"] === "dialog" || e.attrs["aria-modal"] === "true")) continue;
+    const text = textOfNode(e, 3000);
+    if (text.length >= 3000) continue;
+    const heads: string[] = [];
+    if (e.attrs["aria-label"]) heads.push(e.attrs["aria-label"]);
+    const walk = (n: InterruptNode) => {
+      if (heads.length > 6) return;
+      if (/^h[1-4]$/.test(n.tag) || n.role === "heading") heads.push(textOfNode(n, 80));
+      for (const c of n.children) walk(c);
+    };
+    walk(e);
+    const h = heads.find((t) => t.length <= 60 && REAUTH_HEADING.test(t.trim()));
+    if (h && REAUTH_WAY.test(text.toLowerCase())) return h;
+  }
   return null;
 }
 

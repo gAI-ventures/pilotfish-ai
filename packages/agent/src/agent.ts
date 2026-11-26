@@ -5096,6 +5096,17 @@ export class Agent {
       const how = this.opts.loginNote?.(siteOf(host));
       return { note: `A sign-in form is shown on ${host}; credentials for it are available as ${this.secrets.namesFor(host).map((n) => `{{${n}}}`).join(", ")}.${how ? ` ${how}` : ""} Tick "Keep me signed in" / "Remember me" when shown.` };
     }
+    if (c.category === "login" && c.signals.some((s) => s.startsWith("re-authentication step"))) {
+      // A signed-in person asked to prove it is them again before a change goes through ("Confirm access" over a
+      // settings page): no guest path, and closing it cancels the change (26 Nov, live: the run stopped there and
+      // reported it). The person proves it: by a code the page sends (asked with kind "code"), or in the live view.
+      event("left_to_model");
+      return {
+        note: this.opts.onIntervention
+          ? `${host} asks the signed-in person to prove it is them again before this change goes through ("${clip(c.signals[0]!.replace(/^re-authentication step "|" in a dialog$|"$/g, ""), 60)}"). Do not close it: that cancels the change, and do not stop or report it as done. If it offers to send a code (by email, text or app), choose that and call ask_user with kind "code" for it; otherwise call ask_user with kind "login" saying the site asks to confirm access for this change, and the person proves it in the live view. Then carry on with the change.`
+          : `${host} asks the signed-in person to prove it is them again before this change goes through, and no person is available: call done(success=false) saying the change waits on that step.`,
+      };
+    }
     if (c.category === "login") {
       // A sign-in page is not always a wall: order lookup, tracking, guest checkout and browsing
       // often sit next to it. One model turn decides; it asks for a sign-in only when it needs one.

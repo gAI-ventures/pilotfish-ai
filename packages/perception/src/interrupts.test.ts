@@ -353,6 +353,18 @@ describe("tier C: snapshot", () => {
     expect(classify({ snapshot: plain }).category).not.toBe("login");
   });
 
+  it("a re-authentication step in a dialog over a long settings page is a sign-in step; a plain confirm dialog there is not", () => {
+    const reauth = E("div", { role: "dialog", "aria-modal": "true" }, [E("h2", {}, ["Confirm access"]), E("p", {}, ["Signed in as @ada"]), E("a", { href: "#" }, ["Verify via email"]), E("a", { href: "#" }, ["Use your password"])], { role: "dialog", rect: { x: 400, y: 200, width: 400, height: 300 } });
+    const page = S("https://code.example/ada/repo/settings", [E("h1", {}, ["General"]), ...lots(80), reauth], { title: "Settings · ada/repo" });
+    expect(classify({ snapshot: page })).toMatchObject({ category: "login", blocking: true, needs: "login_in_live_view" });
+    // A labelled dialog with no heading element counts too.
+    const labelled = E("dialog", { "aria-label": "Verify it's you" }, [E("p", {}, ["We'll send a verification code to your email."]), E("button", {}, ["Send code"])], { rect: { x: 400, y: 200, width: 400, height: 300 } });
+    expect(classify({ snapshot: S("https://app.example/settings", [...lots(80), labelled], { title: "Settings" }) }).category).toBe("login");
+    // The visibility dialog itself (no re-authentication) leaves the page as it is.
+    const confirm = E("div", { role: "dialog", "aria-modal": "true" }, [E("h2", {}, ["Make ada/repo public"]), E("button", {}, ["I want to make this repository public"])], { role: "dialog", rect: { x: 400, y: 200, width: 400, height: 300 } });
+    expect(classify({ snapshot: S("https://code.example/ada/repo/settings", [E("h1", {}, ["General"]), ...lots(80), confirm], { title: "Settings · ada/repo" }) }).category).not.toBe("login");
+  });
+
   it("a password field in a modal dialog over a content page blocks", () => {
     const snap = S("https://news.example/story", [...lots(40), E("div", { role: "dialog", "aria-modal": "true" }, [E("input", { type: "email" }), E("input", { type: "password" }), E("button", {}, ["Log in"])], { role: "dialog", rect: { x: 400, y: 200, width: 400, height: 300 } })], { title: "Big story" });
     expect(classify({ snapshot: snap })).toMatchObject({ category: "login", blocking: true });
