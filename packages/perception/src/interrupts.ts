@@ -1499,8 +1499,20 @@ function detectLogin(m: Model, v: View): Hit | null {
       return { category: "login", blocking: true, needs: "login_in_live_view", signals: [`identifier-first sign-in field "${(user.node.attrs["name"] ?? user.node.attrs["id"] ?? user.type).slice(0, 30)}"`, cues, ...extra] };
     }
   }
+  // A signed-in person asked to prove it is them again before a sensitive change, with only the ways to do it on the page
+  // (a passkey, a code by email or app, "use your password") and no field yet: no field above found it, and the run ended
+  // there reporting the step (26 Nov, live: a code host's "Confirm access" before a repository was made public).
+  const reauth = v.headings.find((t) => t.length <= 60 && REAUTH_HEADING.test(t.trim()));
+  if (reauth && medium(v) && REAUTH_WAY.test(v.lower)) {
+    return { category: "login", blocking: true, needs: "login_in_live_view", signals: [`re-authentication step "${reauth}"`, ...extra] };
+  }
   return null;
 }
+
+/** The heading of a step that asks a signed-in person to prove it is them again ("Confirm access", "Verify it's you"). */
+const REAUTH_HEADING = /^(confirm (access|your identity|it['’]?s you|your password)|verify (it['’]?s you|your identity)|re-?authenticate|re-?enter your password|please (re-?)?enter your password to continue)\.?$/i;
+/** A way to prove it offered on such a step. */
+const REAUTH_WAY = /\b(password|passkey|security key|authenticator|(verification|one[- ]time|sign[- ]in) code|send (me )?a code|verify via (email|sms|text|phone)|code (by|via) (email|sms|text))\b/;
 
 /**
  * A site saying it does not serve the visitor's country or region ("This service is not available in your country",

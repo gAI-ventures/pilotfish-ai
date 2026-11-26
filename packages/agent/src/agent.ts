@@ -2296,12 +2296,12 @@ export class Agent {
    * Dismiss a cookie/consent banner (choosing reject / necessary-only / close, never accept) or a
    * content-free promo dialog (close / not now) that appeared on load. Returns what was clicked, or "".
    */
-  private async dismissOverlays(first?: Snapshot, keep?: Set<string>, previous?: Snapshot | null): Promise<{ done: string; snap?: Snapshot }> {
+  private async dismissOverlays(first?: Snapshot, keep?: Set<string>, previous?: Snapshot | null, opts: { popups?: boolean } = {}): Promise<{ done: string; snap?: Snapshot }> {
     const done: string[] = [];
     let snap = first ?? (await captureSnapshot(this.page, { viewportBand: 1, previous }));
     let waited = false;
     for (let round = 0; round < 2; round++) {
-      const t = findDismissTarget(snap, keep);
+      const t = findDismissTarget(snap, keep, opts);
       if (!t) break;
       // A bot check or a block page is never a popup to close, nor is anything else on a page showing one: HUMAN can draw
       // its Press & Hold in a dialog with a "Close dialog" button, and closing it is a failed check to HUMAN. The
@@ -3265,7 +3265,10 @@ export class Agent {
           }
           if (this.opts.actionReceipts && this.inAct) this.pendingReceipt = () => this.readBack(h, { typed: text, append: input["clear"] === false, secret: sensitive });
           let dismissedForType = "";
-          const typeOpts = { clear: input["clear"] !== false, perKey: input["per_key"] === true, submit: input["submit"] === true };
+          // Enter is pressed once what the typing started has answered (beforeSubmit), not in the same breath.
+          const submitAfter = input["submit"] === true;
+          const typeOpts = { clear: input["clear"] !== false, perKey: input["per_key"] === true, submit: false };
+          const typedAt = Date.now();
           return await this.withEvidence(
             async () => {
               await this.page.type(h.frame, h.backendNodeId, text, typeOpts).catch(async (e: unknown) => {
@@ -3278,6 +3281,10 @@ export class Agent {
                 if (!dismissedForType) throw e;
                 await this.page.type(h.frame, h.backendNodeId, text, typeOpts);
               });
+              if (submitAfter) {
+                await this.beforeSubmit(typedAt);
+                await this.page.press("Enter");
+              }
             },
             `type ${input["ref"]}${used.length ? ` (secrets: ${used.join(",")})` : ""}`,
             () => (dismissedForType ? `Auto-dismissed (it covered the target): ${dismissedForType}` : ""),
@@ -4125,7 +4132,13 @@ export class Agent {
       // Only dialogs that were not there before: never close one the model is working in.
       const keep = new Set<string>();
       for (const n of before.nodes) if (n.nodeType === 1 && (n.role === "dialog" || n.role === "alertdialog" || n.attrs["aria-modal"] === "true")) keep.add(nodeKey(n));
-      const r = await this.dismissOverlays(after, keep, before);
+      // A popup that comes up on the same page right after the model pressed or chose something (or sent a form) is what
+      // that action opened (a confirmation, the next step of a flow): never closed for it. 26 Nov, live: a code host's
+      // "Make <repo> public" dialog (a line of text and one button) was closed as content-free each time the model's
+      // "Change to public" opened it, three times, so the model never saw it. Consent banners are still answered, and
+      // a popup that comes with a new page (after a navigation) is still closed.
+      const ownAction = (/^(click|press|select|choose|drag)\b/.test(label) || /^fill \d+ fields \+ submit /.test(label)) && after.document === before.document && after.documentSeq === before.documentSeq;
+      const r = await this.dismissOverlays(after, keep, before, { popups: !ownAction });
       lateDismissed = r.done;
       if (r.snap) after = r.snap;
     }
@@ -4500,6 +4513,27 @@ export class Agent {
     return /^https?:\/\//i.test(frame.url) ? safeHost(frame.url) : safeHost(this.page.url);
   }
 
+  /**
+   * Before a form is sent in the same step its fields were typed in: what the typing started gets its answer first (a
+   * name-availability check, a lookup; up to the fast settle's own caps), and a submit button the page disabled while
+   * it checks gets up to SUBMIT_ENABLED_MS to come back. 26 Nov, live: a code host's new-repository form was sent while
+   * it still said "Checking availability..." under the name; the press did nothing, and the run reported the form
+   * filled and sent, with the form still open, twice.
+   */
+  private async beforeSubmit(since: number, submit?: { frame: FrameSession; backendNodeId: number }): Promise<void> {
+    await this.page.settle({ fast: true, since, expectAsync: true }).catch(() => undefined);
+    // The form says it is still checking ("Checking availability...", "Validating…"): a debounced check may start after
+    // the settle's window, so its line is waited out too, in the form being sent (the focused field's), up to the same cap.
+    const checking = () => this.page.main.evaluate<boolean>(FORM_CHECKING_JS, { readOnly: true, timeoutMs: 1_000 }).catch(() => false);
+    for (const end = Date.now() + SUBMIT_ENABLED_MS; (await checking()) && Date.now() < end; ) await sleep(150);
+    if (!submit) return;
+    const disabled = () =>
+      submit.frame
+        .callOnNode<boolean>(submit.backendNodeId, "function(){ const b = this.closest ? (this.closest('button,input,[role=button]') || this) : this; return !!b.disabled || b.getAttribute('aria-disabled') === 'true'; }")
+        .catch(() => false);
+    for (const end = Date.now() + SUBMIT_ENABLED_MS; (await disabled()) && Date.now() < end; ) await sleep(100);
+  }
+
   private async fillForm(fields: Array<{ ref: string; value: string }>, submitRef?: string): Promise<ToolOutcome> {
     // A code for a row of one-character boxes, given whole for one of them: one character per box.
     const row = fields.length === 1 ? this.codeRowFor(fields[0]!.ref, fields[0]!.value) : null;
@@ -4529,6 +4563,7 @@ export class Agent {
     const submit = submitRef ? await this.handle(submitRef) : undefined;
     let problems: string[] = [];
     let submitted = false;
+    const filledAt = Date.now();
     const outcome = await this.withEvidence(
       async () => {
         for (const t of targets) {
@@ -4547,6 +4582,7 @@ export class Agent {
           problems = await this.unfilled(targets);
         }
         if (submit && !problems.length) {
+          await this.beforeSubmit(filledAt, submit);
           await this.page.click(submit.frame, submit.backendNodeId).catch(async (e: unknown) => {
             if (!(e instanceof ActionError && e.code === "obscured")) throw e;
             // A date picker or suggestion list from the last field covers the button: blur it and retry.
@@ -7012,6 +7048,11 @@ const PLACE_FIELD = /\b(address|location|area|pincode|pin code|postcode|zip|city
 /** How long a site's answer to an accepted code is read for a failure message (`afterCodeAccepted`): it came 1.5 s after on 25 Nov. */
 const AFTER_CODE_MS = 3_000;
 
+/** How long a submit button the page disabled while it checks the typed values gets to come back (`beforeSubmit`). */
+const SUBMIT_ENABLED_MS = 3_000;
+/** Page JS: whether the form holding the focused field (else the page) shows a line saying it is still checking what was typed. */
+const FORM_CHECKING_JS = `(() => { const a = document.activeElement; const root = (a && a.closest && a.closest("form")) || document.body; const t = (root.innerText || "").slice(0, 20000); return /\\b(checking|validating|verifying)\\b[^\\n]{0,40}(\\u2026|\\.\\.\\.)/i.test(t); })()`;
+
 /** How long after a code was given a site's failure message on a step's page still counts as the sign-in's answer. */
 const CODE_ERROR_WINDOW_MS = 60_000;
 
@@ -7493,7 +7534,7 @@ const CLOSE = /^(close|close (dialog|banner|modal|popup|notice)|dismiss|no,? tha
 const ACK = /^(got it|ok,? got it|understood|i understand)$/i;
 
 /** A button that dismisses a consent banner (reject/close) or a content-free popup (close). */
-export function findDismissTarget(snap: Snapshot, keep?: Set<string>): { node: SnapNode; kind: string } | null {
+export function findDismissTarget(snap: Snapshot, keep?: Set<string>, opts: { popups?: boolean } = {}): { node: SnapNode; kind: string } | null {
   const containers: Array<{ el: SnapNode; consent: boolean }> = [];
   for (const n of snap.nodes) {
     if (n.nodeType !== 1 || !n.visible) continue;
@@ -7519,7 +7560,7 @@ export function findDismissTarget(snap: Snapshot, keep?: Set<string>): { node: S
     if (consent) {
       const b = buttons.find((x) => REJECT.test(label(x))) ?? buttons.find((x) => CLOSE.test(label(x)));
       if (b) return { node: b, kind: "consent banner" };
-    } else if (!hasControl && buttons.length <= 4 && textOf(el, 600).length < 500) {
+    } else if (opts.popups !== false && !hasControl && buttons.length <= 4 && textOf(el, 600).length < 500) {
       // Content-free popups only (an announcement, a promo, "prices now include fees"): no controls,
       // a couple of buttons, little text. Date pickers, filter panels and forms are never closed.
       const b = buttons.find((x) => CLOSE.test(label(x))) ?? buttons.find((x) => ACK.test(label(x)));

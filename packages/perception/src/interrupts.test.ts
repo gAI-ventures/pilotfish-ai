@@ -336,6 +336,23 @@ describe("tier C: snapshot", () => {
     expect(classify({ snapshot: snap })).toMatchObject({ category: "login", blocking: true, needs: "login_in_live_view" });
   });
 
+  it("a re-authentication step with only its ways on the page is a sign-in step; the same words in a long page are not", () => {
+    const step = S("https://code.example/sessions/sudo", [E("h1", {}, ["Confirm access"]), E("p", {}, ["Signed in as @ada"]), E("button", {}, ["Use passkey"]), E("p", {}, ["Having problems?"]), E("a", { href: "#" }, ["Verify via email"]), E("a", { href: "#" }, ["Use your password"])], { title: "Confirm access" });
+    // A sign-in step for the person either way: login, or a passkey step when a passkey is the first way offered.
+    expect(classify({ snapshot: step })).toMatchObject({ blocking: true, needs: "login_in_live_view" });
+    expect(["login", "passkey"]).toContain(classify({ snapshot: step }).category);
+    const noPasskey = S("https://code.example/sessions/sudo", [E("h1", {}, ["Confirm access"]), E("p", {}, ["Signed in as @ada"]), E("a", { href: "#" }, ["Verify via email"]), E("a", { href: "#" }, ["Use your password"]), ...Array.from({ length: 8 }, (_, i) => E("a", { href: `/f${i}` }, [`Footer ${i}`]))], { title: "Confirm access" });
+    expect(classify({ snapshot: noPasskey })).toMatchObject({ category: "login", blocking: true });
+    const verify = S("https://bank.example/verify", [E("h2", {}, ["Verify it's you"]), E("p", {}, ["We'll send a verification code to your phone."]), E("button", {}, ["Send code"])], { title: "Verify" });
+    expect(classify({ snapshot: verify }).category).toBe("login");
+    // A help article that has the heading among a lot of text is no step.
+    const article = S("https://help.example/articles/sudo", [E("h1", {}, ["Confirm access"]), ...lots(60), E("p", {}, ["You may be asked for your password or a passkey."])], { title: "Sudo mode - Help" });
+    expect(classify({ snapshot: article }).category).not.toBe("login");
+    // The heading without any way to prove it (a plain confirmation) is no sign-in.
+    const plain = S("https://app.example/x", [E("h1", {}, ["Confirm access"]), E("p", {}, ["Grant Calendar read access to this app?"]), E("button", {}, ["Allow"])], { title: "Confirm" });
+    expect(classify({ snapshot: plain }).category).not.toBe("login");
+  });
+
   it("a password field in a modal dialog over a content page blocks", () => {
     const snap = S("https://news.example/story", [...lots(40), E("div", { role: "dialog", "aria-modal": "true" }, [E("input", { type: "email" }), E("input", { type: "password" }), E("button", {}, ["Log in"])], { role: "dialog", rect: { x: 400, y: 200, width: 400, height: 300 } })], { title: "Big story" });
     expect(classify({ snapshot: snap })).toMatchObject({ category: "login", blocking: true });
