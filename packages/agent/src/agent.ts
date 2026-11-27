@@ -137,6 +137,12 @@ const SIGN_IN_DRAW_MS = 3_000;
 const SIGN_IN_POLL_MS = 400;
 
 /** Said once when most of the steps are gone and the last 8 got nowhere, with no stronger model to hand the run to. */
+/** Replies in a row cut off at the output limit before a leg ends (`loop`): each can take minutes. */
+export const CUT_OFFS = 4;
+
+/** Actions meant to change the page: one that changed nothing holds back a done in the same batch. */
+const NO_EFFECT_TOOLS = new Set<string>(["click", "type", "fill", "select_option", "choose", "press", "click_xy", "drag", "type_text", "page_tool"]);
+
 export const STUCK_NOTE =
   "Your last 8 actions found nothing new, and most of your steps are used. Do not go round the same pages again. If what the task needs is not where you have looked, call done now with success=false, saying what you found, where you looked and what blocks the rest; if one answer from the person would unblock it (which account, which option), ask it with ask_user first.";
 
@@ -979,7 +985,13 @@ export const KEEP_GOING_STEPS = 12;
  */
 /** The sign-in words of `STOPPED_BY`: a result whose only stop they name is a sign-in (`keepGoingNote`). */
 export const SIGN_IN_STOP = /\b(?:sign(?:ed|ing)?[ -]?(?:in|out|up)|log(?:ged|ging)?[ -]?(?:in|out)|login|account|password|credentials?)\b/gi;
-export const STOPPED_BY = /\b(sign(?:ed|ing)?[ -]?in|log(?:ged|ging)?[ -]?in|login|account|password|captcha|bot check|verify (?:you|that you)|blocked|block page|access denied|forbidden|denied|not available|unavailable|not offered|isn['’]?t offered|doesn['’]?t (?:offer|exist|support|list|show)|does not (?:offer|exist|support|list|show)|no longer|sold out|out of stock|no results|no availability|nothing (?:found|matched|listed|available)|error|problem|went wrong|not working|doesn['’]?t work|failed to load|won['’]?t load|could not load|timed out|rate limit|too many requests|limit reached|declined|refused|not allowed|not permitted|requires? (?:payment|a subscription|membership)|paywall|subscribe|geo|country|region|closed|expired|cancel(?:led|ed)|the person|you asked|asked me not|not supported|please (?:share|provide|tell|send|give|confirm)|let me know|(?:need|waiting for) (?:your|the person|an answer|a reply)|no answer|no reply)\b/i;
+// Words that also fill ordinary partial answers are left out ("you asked", "the person", "account", "country", "region",
+// "closed", "cancelled", "subscribe" alone): "I compared 2 of the 10 date pairs you asked for" read as a stop and was
+// never sent back, the very case keep-going exists for. Their stop forms stay ("in your country or region", "requires an
+// account", "the store is closed"), and stops the list missed are in ("rejected", "invalid", "locked", "suspended", "not
+// eligible", "does not deliver", "no flights", "not found", "private"): a refused password was sent back to be typed
+// again (27 Nov review; `stopped-by.test.ts` holds the labelled cases).
+export const STOPPED_BY = /\b(sign(?:ed|ing)?[ -]?in|log(?:ged|ging)?[ -]?in|login|password|credentials?|(?:needs?|requires?|without) (?:an? )?account|account (?:is |was )?(?:locked|suspended|disabled|blocked|required|needed)|no account|captcha|bot check|verify (?:you|that you|it['’]?s you)|blocked|block page|access denied|forbidden|denied|not available|unavailable|not offered|isn['’]?t offered|doesn['’]?t (?:offer|exist|support|list|show|deliver|ship)|does not (?:offer|exist|support|list|show|deliver|ship)|not deliver(?:ing|able)|no longer|sold out|out of stock|no results|no availability|no (?:flights|trains|buses|rooms|tables|slots|seats|dates|times|options|tickets) (?:are |were )?(?:available|left|found|listed|shown|offered|for)|nothing (?:found|matched|listed|available)|not found|could ?n['’]?t find (?:it|the|that|any)|error|went wrong|not working|doesn['’]?t work|failed to load|won['’]?t load|could not load|timed out|rate limit|too many requests|limit reached|declined|refused|rejected|invalid|incorrect|wrong (?:password|code|otp|pin)|locked|suspended|not eligible|ineligible|minimum order|private|permission|not authori[sz]ed|unauthori[sz]ed|not allowed|not permitted|requires? (?:payment|a subscription|membership|a plan)|paywall|subscri(?:be|ption) (?:to (?:see|view|continue|read|access)|required|needed)|geo-?block(?:ed)?|in (?:your|this|that|the) (?:country|region)|(?:from|outside) (?:your|this|that|the) (?:country|region)|(?:is|was|are|were) (?:now |currently |permanently |temporarily )?closed|closed (?:now|today|for)|expired|(?:was|been|is|has been) cancel(?:led|ed)|asked me not|not supported|please (?:share|provide|tell|send|give|confirm)|let me know|(?:need|waiting for) (?:your|the person|an answer|a reply)|no answer|no reply)\b/i;
 
 export const EMPTY_RESULTS_TEXT = /^(?:sorry[,.!]?\s*)?(?:no|0|zero)\s+(?:results?|matches|matching\s+\w+|items?\s+found|products?\s+found|properties|listings|flights|hotels|records|articles|papers|jobs|entries)\b|\b(?:returned|found|produced|yielded)\s+no\s+(?:results|matches)\b|\bno\s+results\s+(?:found|for|match)|\bdid\s+not\s+match\s+any\b|\b(?:couldn'?t|could\s+not|can'?t|cannot)\s+find\s+any\s+(?:results|matches)\b|\bnothing\s+(?:found|matched)\b/i;
 
@@ -1139,6 +1151,13 @@ interface ToolOutcome {
    * person (the calls after it may assume their answer).
    */
   halt?: boolean;
+  /**
+   * The harness's own refusal, not a failed try on the page: done sent back to carry on (keep-going), done while the
+   * person is being asked something, done refused after an action that did nothing. It stops the batch as an error does
+   * but never counts toward the failure stall or max_failures (27 Nov review: a keep-going note and one stale ref made
+   * the "failures" stall, whose note told the model to give up, the opposite of the note it had just been given).
+   */
+  refused?: boolean;
   /** A free-form question the person answered, and their answer (scrubbed); never a code, a sign-in or a secret. */
   answered?: { question: string; answer: string };
   /** The ActionError code of a failed action ("stale", "obscured"…). */
@@ -1499,6 +1518,8 @@ export class Agent {
   /** The last model call's wall time and SDK retries, for its usage event. */
   private lastCall: { ms: number; retries: number } | null = null;
   private recentActions: string[] = [];
+  /** The tool call being executed, for the loop rule's key (`loopKey`). */
+  private callInput: Record<string, unknown> = {};
   /** Where the run's actions ended and what they set: the loop and budget stall rules read it. */
   private readonly stalls = new StallTracker();
   /** The budget stall found the run still making progress and gave it 10 more steps (once). */
@@ -1843,6 +1864,8 @@ export class Agent {
     // The steps left when the run was last told to finish (0: not yet).
     let wrapUpAt = 0;
     let consecutiveFailures = 0;
+    // Replies in a row cut off at the output limit (`CUT_OFFS`); a turn with a tool call clears it.
+    let cutOffs = 0;
     let deadline = this.deadline;
     const done = (r: Omit<AgentResult, "usage">): AgentResult => {
       this.stepCount = step;
@@ -1906,8 +1929,19 @@ export class Agent {
           // done costs 3 s and a cache write for nothing.
           if (this.opts.proseIsDone && proseAnswer(text, { steps: step, gated: !!this.opts.control?.gated, task })) {
             const result = text.trim();
-            this.opts.onStep?.({ type: "done", success: true, result });
-            return done({ success: true, result, steps: step, stopReason: "done" });
+            // Prose that opens by saying the work could not be done is a give-up, as done(success=false) would be: the
+            // keep-going rule and the orchestrator's early-quit retry read it so. Taken as a success, "I could not find
+            // any flights on those dates" skipped both (27 Nov review).
+            const success = !proseGaveUp(result);
+            if (!success) {
+              const keepGoing = this.keepGoingNote({ success: false, result });
+              if (keepGoing) {
+                messages.push({ role: "user", content: [{ type: "text", text: keepGoing }] });
+                continue;
+              }
+            }
+            this.opts.onStep?.({ type: "done", success, result });
+            return done({ success, result, steps: step, stopReason: "done" });
           }
           messages.push({ role: "user", content: [{ type: "text", text: "If the task is finished, call `done` with the result. Otherwise continue with the next tool call." }] });
           if (this.recentActions.at(-1) === "__prose__") {
@@ -1917,12 +1951,18 @@ export class Agent {
           continue;
         }
         if (response.stop_reason === "max_tokens") {
-          messages.push({ role: "user", content: [{ type: "text", text: "Your previous turn was cut off. Continue with a shorter response." }] });
+          // Each cut-off turn can run minutes and thousands of tokens (a done that types every row); uncapped, the same
+          // turn came back cut off until the time or the spend ran out (27 Nov review). The second says how to answer short;
+          // past CUT_OFFS in a row the leg ends with what it has, for the check to judge.
+          cutOffs++;
+          if (cutOffs > CUT_OFFS) return done({ success: false, result: "The model's replies were cut off at the output limit several times in a row.", steps: step, stopReason: "error", error: "Replies cut off at the output limit" });
+          messages.push({ role: "user", content: [{ type: "text", text: cutOffs >= 2 ? "Your turns keep getting cut off at the output limit. Keep the next one short: one tool call, a short answer. In done, put {{rows}} or {{last_read}} where a long list you read belongs instead of typing it out." : "Your previous turn was cut off. Continue with a shorter response." }] });
           continue;
         }
         break;
       }
 
+      cutOffs = 0;
       const results: Anthropic.ToolResultBlockParam[] = [];
       this.turnSnapshot = this.lastSnapshot;
       let halted = false;
@@ -1948,9 +1988,12 @@ export class Agent {
         const started = Date.now();
         const outcome =
           name === "done" && input["success"] === true && noEffectInBatch
-            ? err(`done refused: "${noEffectInBatch}" earlier in this turn had no observable effect. Check the page (the evidence above) before finishing.`)
+            ? refusal(`done refused: "${noEffectInBatch}" earlier in this turn had no observable effect. Check the page (the evidence above) before finishing.`)
             : await this.execute(name, input, task);
-        if (outcome.evidence && !outcome.evidence.changed) noEffectInBatch = outcome.summary;
+        // Only an action meant to change something counts as "no effect" (a wait or scroll that changed nothing is no
+        // failed step), and a later action in the batch that did change the page clears it (27 Nov review: a working
+        // submit, a 2 s wait with nothing new, then done was refused).
+        if (outcome.evidence && NO_EFFECT_TOOLS.has(name)) noEffectInBatch = outcome.evidence.changed ? "" : outcome.summary;
         if (!outcome.isError) {
           if (name === "navigate" || name === "go_back" || outcome.evidence?.navigated || (name === "press" && isReloadKey(String(input["key"] ?? "")))) turnLoaded = true;
           const pressed = (name === "click" || name === "choose") && typeof input["ref"] === "string" ? this.turnSnapshot?.byRef.get(input["ref"]) : undefined;
@@ -1968,7 +2011,7 @@ export class Agent {
           // known, so it stops the batch without counting as a failed try (Walmart, 3 Nov: a facet ref after the sort
           // redrew the list, then a node detached mid-click: "stall (failures)" put Sonnet on Haiku's run). A ref it
           // never saw (not_found) still counts.
-          if (!(changedEarlier && outcome.code === "stale")) consecutiveFailures++;
+          if (!(changedEarlier && outcome.code === "stale") && !outcome.refused) consecutiveFailures++;
           halted = true; // stop-at-first-failure within a batch
         } else if (outcome.halt) {
           // A question sent back to the model failed nothing, but the calls after it may assume the person's
@@ -2016,7 +2059,9 @@ export class Agent {
       // Any turn that brought a fresh view of the page counts, a look included: a site's error drawn after its request
       // came back (a flight search's, 0.9 s after the search) is seen only on the next read of the page.
       const repeated = this.lastSnapshot && this.lastSnapshot !== this.turnSnapshot ? await this.failureNudge(turnLoaded, turnRetried) : null;
-      const nudge = this.loopNudge() ?? repeated;
+      // Both when both fire: the failure note was marked told when it was made, and dropped for the loop's it was never
+      // given again (the third reload of a failing page, the case it exists for: 27 Nov review).
+      const nudge = [this.loopNudge(), repeated].filter((n): n is string => !!n).join(" ") || null;
       let directive = nudge ?? "";
       // Stalls hand the same conversation to a stronger model (once per kind of stall). The budget
       // is the run's, not a capped leg's: a 4-step check-up leg is past 60% of its cap after two
@@ -2870,7 +2915,7 @@ export class Agent {
     const host = safeHost(this.page.url);
     // A page tool that keeps failing is not called again in this run: the page's own controls do the same thing.
     const failKey = `${host} ${name}`;
-    if ((this.pageToolFails.get(failKey) ?? 0) >= PAGE_TOOL_FAILS) return err(pageToolGiveUp(name, this.pageToolFails.get(failKey)!));
+    if ((this.pageToolFails.get(failKey) ?? 0) >= PAGE_TOOL_FAILS) return refusal(pageToolGiveUp(name, this.pageToolFails.get(failKey)!));
     const used = new Set<string>();
     const fill = (v: unknown): unknown => {
       if (typeof v === "string") {
@@ -2921,6 +2966,7 @@ export class Agent {
     const parsed = schema.safeParse(stripNulls(rawInput));
     if (!parsed.success) return err(`Invalid input for ${name}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
     let input = parsed.data as Record<string, unknown>;
+    this.callInput = input;
     // The open MCP's browser_wait takes until/gone (return once that text appears or goes). They are not in the
     // agent's own tool list, whose strict-tool budget is full (two more optional parameters would take strict from
     // drag), so they come through here as given.
@@ -2952,7 +2998,7 @@ export class Agent {
     // A reload by key drops what was chosen on the page: on 4 Nov a Google Flights retry pressed Control+r, lost the
     // search it had set up and ran out of steps. Loading a page again stays possible, on purpose, with navigate.
     if (name === "press" && isReloadKey(String(input["key"] ?? ""))) {
-      return err(`Not pressed: ${String(input["key"])} reloads the page, which can drop the search, filters and choices made on it. To let the page finish loading, use wait; to load it again on purpose, navigate to its URL.`);
+      return refusal(`Not pressed: ${String(input["key"])} reloads the page, which can drop the search, filters and choices made on it. To let the page finish loading, use wait; to load it again on purpose, navigate to its URL.`);
     }
     // Policy gate for page-affecting tools.
     // `query` runs page JS (held to reading: a world of its own and writes blocked, see its case) and goes
@@ -3115,7 +3161,7 @@ export class Agent {
     let dismissed = "";
     // A site that works by place: its delivery address or location is set before the first search (`placeGate`).
     const held = this.placeGate(name, input);
-    if (held) return err(held);
+    if (held) return refusal(held);
     try {
       switch (name) {
         case "navigate": {
@@ -3389,7 +3435,7 @@ export class Agent {
         case "note": {
           const text = this.secrets.scrub(String(input["text"])).slice(0, 2_000);
           this.noteLog.push(text);
-          if (PLACE_SET.test(text)) this.place.set = true;
+          if (placeSetIn(text)) this.place.set = true;
           if (this.opts.revealNotes) await this.revealText(text, { maxStops: 1, onlyOffscreen: true, from: "the note" }).catch(() => undefined);
           return ok(`Noted (${this.noteLog.length} note${this.noteLog.length === 1 ? "" : "s"}).`, "note");
         }
@@ -3925,10 +3971,10 @@ export class Agent {
         }
         case "done": {
           // A held download or the traffic limit is being put to the person: their answer comes first.
-          if (this.opts.control?.gated) return err("Not yet: something is being checked with the person (a held download or the traffic limit). Their answer comes at your next turn; finish after it.");
+          if (this.opts.control?.gated) return refusal("Not yet: something is being checked with the person (a held download or the traffic limit). Their answer comes at your next turn; finish after it.");
           // Giving up with most of the leg's steps unused and nothing named that stopped it: sent back once to carry on.
           const keepGoing = this.keepGoingNote(input);
-          if (keepGoing) return err(keepGoing);
+          if (keepGoing) return refusal(keepGoing);
           let data: Record<string, unknown> | undefined;
           if (typeof input["data_json"] === "string" && input["data_json"].trim()) {
             try {
@@ -3981,7 +4027,7 @@ export class Agent {
 
   /** Record an action for the stall rules: where it ended (`url`, from its evidence) and what it changed. */
   private note(action: string, url = this.page.url, ev?: ActionEvidence): void {
-    this.recentActions.push(action);
+    this.recentActions.push(ev ? loopKey(action, this.callInput, ev) : action);
     if (this.recentActions.length > 20) this.recentActions.shift();
     this.stalls.record(action, url, ev, this.noteLog.length);
   }
@@ -4520,18 +4566,19 @@ export class Agent {
    * it still said "Checking availability..." under the name; the press did nothing, and the run reported the form
    * filled and sent, with the form still open, twice.
    */
-  private async beforeSubmit(since: number, submit?: { frame: FrameSession; backendNodeId: number }): Promise<void> {
+  private async beforeSubmit(since: number, submit?: { frame: FrameSession; backendNodeId: number }): Promise<boolean> {
     await this.page.settle({ fast: true, since, expectAsync: true }).catch(() => undefined);
     // The form says it is still checking ("Checking availability...", "Validating…"): a debounced check may start after
     // the settle's window, so its line is waited out too, in the form being sent (the focused field's), up to the same cap.
     const checking = () => this.page.main.evaluate<boolean>(FORM_CHECKING_JS, { readOnly: true, timeoutMs: 1_000 }).catch(() => false);
     for (const end = Date.now() + SUBMIT_ENABLED_MS; (await checking()) && Date.now() < end; ) await sleep(150);
-    if (!submit) return;
+    if (!submit) return false;
     const disabled = () =>
       submit.frame
         .callOnNode<boolean>(submit.backendNodeId, "function(){ const b = this.closest ? (this.closest('button,input,[role=button]') || this) : this; return !!b.disabled || b.getAttribute('aria-disabled') === 'true'; }")
         .catch(() => false);
     for (const end = Date.now() + SUBMIT_ENABLED_MS; (await disabled()) && Date.now() < end; ) await sleep(100);
+    return await disabled();
   }
 
   private async fillForm(fields: Array<{ ref: string; value: string }>, submitRef?: string): Promise<ToolOutcome> {
@@ -4563,6 +4610,8 @@ export class Agent {
     const submit = submitRef ? await this.handle(submitRef) : undefined;
     let problems: string[] = [];
     let submitted = false;
+    let submitDisabled = false;
+    let submittedAt = 0;
     const filledAt = Date.now();
     const outcome = await this.withEvidence(
       async () => {
@@ -4582,7 +4631,13 @@ export class Agent {
           problems = await this.unfilled(targets);
         }
         if (submit && !problems.length) {
-          await this.beforeSubmit(filledAt, submit);
+          // A submit the page still holds disabled is not pressed: pressing it does nothing, and the leg read as sent
+          // (27 Nov review). The model sees why on the page (a message beside a field) and decides.
+          if (await this.beforeSubmit(filledAt, submit)) {
+            submitDisabled = true;
+            return;
+          }
+          submittedAt = Date.now();
           await this.page.click(submit.frame, submit.backendNodeId).catch(async (e: unknown) => {
             if (!(e instanceof ActionError && e.code === "obscured")) throw e;
             // A date picker or suggestion list from the last field covers the button: blur it and retry.
@@ -4596,9 +4651,18 @@ export class Agent {
       () =>
         problems.length
           ? `NOT FILLED: ${problems.join("; ")}.${submitRef ? ` The submit ${submitRef} was NOT clicked.` : ""}`
-          : `All ${targets.length} fields hold their values${submitted ? `; clicked ${submitRef}` : ""}.`,
+          : submitDisabled
+            ? `All ${targets.length} fields hold their values, but the submit ${submitRef} is still disabled, so it was NOT clicked: read the page for what it still wants (a message beside a field, a required choice).`
+            : `All ${targets.length} fields hold their values${submitted ? `; clicked ${submitRef}` : ""}.`,
     );
     if (problems.length) return { ...outcome, isError: true, summary: `fill: ${problems.length} field(s) did not take their value` };
+    // The server's answer to the submit is what came after the press: a write while the fields were typed (a name check, an
+    // autosave) is no answer, and the form fast path read one as "the server accepted it" with the form still open.
+    // A submit not pressed (held disabled) got no answer at all, so its writes are none.
+    if (submitRef && outcome.evidence?.writes) {
+      const after = submitted ? this.page.writesSince(submittedAt) : [];
+      outcome.evidence.writes = outcome.evidence.writes.filter((w) => after.some((a) => a.url === w.url && a.method === w.method));
+    }
     this.lastFill = {
       fields: targets
         .filter((t) => t.node)
@@ -6847,7 +6911,7 @@ export class StallTracker {
 
   /** Record one action: its label ("click e12"), the URL it ended on, its evidence, and the run's note count. */
   record(label: string, url: string, ev?: StallEvidence, notes = 0): void {
-    const path = pathKey(url);
+    const path = progressKey(url);
     const newPath = !!path && !this.paths.has(path);
     if (path) this.paths.add(path);
     let gain = false;
@@ -6902,6 +6966,24 @@ function sameDoc(src: string, url: string, base: string): boolean {
   }
 }
 
+/** Query parameters that track or cache-bust, never what a page shows (`progressKey`). */
+const NOISE_PARAM = /^(?:utm_\w*|gclid|gbraid|wbraid|fbclid|msclkid|dclid|yclid|mc_[ce]id|_ga|_gl|ref|ref_|referrer|source|src|sid|session(?:id)?|token|_|cb|ts|t|timestamp|nocache|rand|random|v|ver)$/i;
+
+/**
+ * Where an action ended, for the budget rule's "reached somewhere new": origin, path and the query without its tracking
+ * parameters, sorted. The path alone read a search worked through its address (another date pair, another filter or
+ * page in the query) as going nowhere, and at 60% of the steps such a run was told to give up (27 Nov review).
+ */
+export function progressKey(url: string): string {
+  try {
+    const u = new URL(url);
+    const kept = [...u.searchParams.entries()].filter(([k]) => !NOISE_PARAM.test(k)).sort(([a, x], [b, y]) => (a === b ? x.localeCompare(y) : a.localeCompare(b)));
+    return `${u.origin}${u.pathname}${kept.length ? `?${kept.map(([k, v]) => `${k}=${v}`).join("&")}` : ""}`;
+  } catch {
+    return "";
+  }
+}
+
 /** origin + path of a URL (query and hash left out), or "" when it is not one. */
 function pathKey(url: string): string {
   try {
@@ -6924,6 +7006,15 @@ const MORE_WORK = /\b(i will|i'll|let me (?!know)|now i (need|have|must)|i am go
  * the next step ("Next I will sort by price.", a list that ends in ":"), nothing waits on the person, and
  * the task did not ask for structured data (done's data_json).
  */
+/** Words that say the work could not be done, read in a prose answer's first sentence (`proseGaveUp`). */
+const GAVE_UP = /\b(?:could ?n['’]?t|could not|can ?n['’]?t|cannot|was ?n['’]?t able|was not able|were ?n['’]?t able|were not able|(?:am|was|were) unable|unable to|did ?n['’]?t (?:find|manage|get|succeed)|did not (?:find|manage|get|succeed)|failed to|gave up|no (?:\w+ ){0,3}(?:were |was |are |is )?(?:found|available|listed|shown|returned))\b/i;
+
+/** Whether a prose answer opens by saying the work could not be done ("I could not find…", "Unable to…"). */
+export function proseGaveUp(text: string): boolean {
+  const first = /^[^\n]{0,240}?(?:[.!?](?:\s|$)|$)/m.exec(text.trim())?.[0] ?? "";
+  return GAVE_UP.test(first);
+}
+
 export function proseAnswer(text: string, { steps, gated, task }: { steps: number; gated: boolean; task: string }): boolean {
   const t = text.trim();
   return steps >= 1 && !gated && t.length > 40 && !t.endsWith("?") && !t.endsWith(":") && !MORE_WORK.test(t) && !/\bjson\b|structured (data|output)|data_json/i.test(task);
@@ -7047,6 +7138,18 @@ export function notAField(node: Pick<SnapNode, "tag" | "role" | "name" | "attrs"
 
 /** A note saying the delivery address or location is set ("Place: …", "The saved Home address is selected"). */
 export const PLACE_SET = /^\s*place\s*:|\b(address|location|pincode|pin code|locality|area|city)\b[^.\n]{0,80}\b(is |was |now )?(selected|set|confirmed|chosen|shown as selected)\b|\b(selected|set|confirmed|chose|picked)\b[^.\n]{0,40}\b(delivery )?(address|location)\b|\bdelivering to\b/i;
+/** A negation in the words that matched PLACE_SET: "the delivery address is not set yet" says the opposite. */
+const PLACE_NOT = /\b(?:not|no|never|yet to|unable|could ?n['’]?t|could not|can ?n['’]?t|cannot|is ?n['’]?t|was ?n['’]?t|did ?n['’]?t|failed|without)\b/i;
+
+/** Whether a note says the place is set (`PLACE_SET`), not that it is not (27 Nov review: a negation opened the place gate). */
+export function placeSetIn(text: string): boolean {
+  const m = PLACE_SET.exec(text);
+  if (!m) return false;
+  // "Place: …" says what follows: read it to the end of its sentence ("Place: not set yet").
+  // Else the words matched with the few before them ("could not set the delivery location").
+  const said = /^\s*place\s*:/i.test(m[0]) ? text.slice(m.index).split(/[.;\n]/)[0]! : `${text.slice(Math.max(0, m.index - 24), m.index).split(/[.;\n]/).at(-1) ?? ""}${m[0]}`;
+  return !PLACE_NOT.test(said);
+}
 /** A page's own tool that selects, sets or adds the delivery address or location. */
 const PLACE_TOOL = /(select|set|add|change|choose)_?(delivery_?)?(address|location|pincode|area)/i;
 /** An address that searches: a search path or a query parameter. */
@@ -7385,6 +7488,21 @@ function timingsOf(e: unknown): { timings?: ActionTimings } {
  * for three things) are reading, not one action repeated; the same read three times is a loop (Best Buy, 3 Nov:
  * three different queries climbed Haiku's run to Sonnet as "the same action three times").
  */
+/**
+ * A page action's key for the loop rule: its label with what it was given and what it did, so "the same action three
+ * times" means the same input and the same effect each time. The label alone ("navigate", "type e5", "scroll down",
+ * "click e40") named three different addresses opened, three queries typed into one box, a long list scrolled or three
+ * "Next" pages read the same action, and the model was told "It is not working… report the blocker with
+ * done(success=false)" in the middle of a comparison (27 Nov review). An action that changes nothing new keeps one key,
+ * and three of those in a row are still a loop.
+ */
+export function loopKey(label: string, input: Record<string, unknown>, ev: Pick<ActionEvidence, "urlAfter" | "newText" | "valueChanges" | "stateChanges" | "addedCount" | "removedCount" | "navigated">): string {
+  const keys = Object.keys(input).filter((k) => input[k] !== undefined && input[k] !== null && input[k] !== false).sort();
+  const did = [ev.urlAfter, ev.navigated ? "nav" : "", (ev.newText ?? []).join("|"), (ev.valueChanges ?? []).map((v) => `${v.ref}=${v.to}`).join("|"), (ev.stateChanges ?? []).join("|"), ev.addedCount, ev.removedCount].join("~");
+  const what = JSON.stringify([keys.map((k) => [k, input[k]]), did]);
+  return `${label} #${createHash("sha256").update(what).digest("hex").slice(0, 6)}`;
+}
+
 function readKey(name: string, input: Record<string, unknown>): string {
   const keys = Object.keys(input).filter((k) => input[k] !== undefined && input[k] !== null && input[k] !== false).sort();
   if (!keys.length) return name;
@@ -7444,6 +7562,11 @@ export function pageToolGiveUp(name: string, fails: number): string {
 
 function err(message: string): ToolOutcome {
   return { isError: true, content: message, summary: message.slice(0, 120) };
+}
+
+/** The harness's own refusal of a call (`ToolOutcome.refused`): an error to the model, never a failed try. */
+function refusal(message: string): ToolOutcome {
+  return { ...err(message), refused: true };
 }
 
 function describeRef(snap: Snapshot | null, ref: string): string | undefined {

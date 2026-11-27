@@ -264,6 +264,10 @@ describe.skipIf(!E2E)("browser e2e", () => {
     await p.click(p.main, await nodeId(p, "#shown"));
     await p.settle();
     expect(await p.main.evaluate<string>("document.title")).toBe("shown");
+    // A node the page has since replaced is gone, not hidden: "stale" is what makes the agent find it again (27 Nov).
+    const id = await nodeId(p, "#shown");
+    await p.main.evaluate("(() => { const b = document.getElementById('shown'); b.replaceWith(b.cloneNode(true)); })()");
+    await expect(p.click(p.main, id)).rejects.toMatchObject({ name: "ActionError", code: "stale" });
     await p.close();
   });
 

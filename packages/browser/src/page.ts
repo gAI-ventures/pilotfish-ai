@@ -1309,9 +1309,12 @@ export class Page {
     // its point finds the hidden part, its ancestor, so the click went there and did nothing but scroll (23 Nov: a
     // link in a collapsed Wikipedia navbox). Refused before anything scrolls; checkVisibility leaves out opacity and
     // visibility, so a native input drawn over by its own label is still clicked through that label.
+    // A node the page took out (drawn again between the look and the press) is gone, never "hidden": checkVisibility is
+    // false for it too, and reported as not shown it was never found again by its key (27 Nov review).
     const drawn = await frame
-      .callOnNode<boolean>(backendNodeId, "function(){ var e = this.nodeType === 1 ? this : this.parentElement; return !e || typeof e.checkVisibility !== 'function' || e.checkVisibility(); }", [], { isolated: true })
+      .callOnNode<boolean | "gone">(backendNodeId, "function(){ if (!this.isConnected) return 'gone'; var e = this.nodeType === 1 ? this : this.parentElement; return !e || typeof e.checkVisibility !== 'function' || e.checkVisibility(); }", [], { isolated: true })
       .catch(() => true);
+    if (drawn === "gone") throw new ActionError("stale", `Element no longer exists in the page (backendNodeId ${backendNodeId})`);
     if (!drawn) throw new ActionError("not_visible", "Element is not shown: it is inside a collapsed or hidden part of the page");
     // A driver may wheel a target below the fold toward the viewport; the jump below then only finishes the job.
     if (this.driver?.wheelIntoView && frame === this.main) {
