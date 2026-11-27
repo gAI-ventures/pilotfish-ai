@@ -21,7 +21,7 @@ export interface TaskRequest {
   task: string;
   /** Open this page first. */
   startUrl?: string;
-  /** The model every step runs on: `gpt-6-luna` (the default), `gpt-5-mini` or `gpt-5-nano`. */
+  /** `auto` (the default: Claude Haiku does the task, Sonnet checks it), or one model for every step: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6.1-sol`, `gpt-5-mini` or `gpt-5-nano`. */
   model?: string;
   /** Browser actions across the whole run (1-200). */
   maxSteps?: number;

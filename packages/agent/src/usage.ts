@@ -23,11 +23,14 @@ const PRICES: Record<string, ModelRate> = {
   "claude-opus-5-5": { in: 4, out: 20, cr: 0.2, cw: 5 },
   "claude-sonnet-5-5": { in: 2, out: 10, cr: 0.2, cw: 2.5 },
   "claude-haiku-5-5": { in: 0.1, out: 0.5, cr: 0.01, cw: 0.125, long: { above: 100_000, in: 0.5, out: 2.5, cr: 0.05, cw: 0.625 } },
-  // OpenAI models, standard short-context rates from OpenAI's pricing page (4 Nov 2026). OpenAI caches by
-  // itself and reports no cache writes, so cw is never charged; cr is its cached-input rate.
-  "gpt-6-luna": { in: 0.1, out: 0.5, cr: 0.01, cw: 0.125 },
-  "gpt-6.1-terra": { in: 1, out: 5, cr: 0.05, cw: 1 },
-  "gpt-6.1-sol": { in: 2, out: 10, cr: 0.1, cw: 2 },
+  // OpenAI models, standard rates from OpenAI's pricing page (27 Nov 2026). OpenAI caches by itself and reports no
+  // cache writes, so cw is never charged; cr is its cached-input rate. A prompt over 272K tokens is billed 2x input
+  // and cached input and 1.5x output for the whole call.
+  "gpt-6-luna": { in: 0.1, out: 0.5, cr: 0.01, cw: 0.125, long: { above: 272_000, in: 0.2, out: 0.75, cr: 0.02, cw: 0.125 } },
+  "gpt-6.1-terra": { in: 1, out: 5, cr: 0.05, cw: 1.25, long: { above: 272_000, in: 2, out: 7.5, cr: 0.1, cw: 1.25 } },
+  "gpt-6.1-sol": { in: 2, out: 10, cr: 0.1, cw: 2.5, long: { above: 272_000, in: 4, out: 15, cr: 0.2, cw: 2.5 } },
+  "gpt-6.2-sol": { in: 2, out: 10, cr: 0.1, cw: 2.5, long: { above: 272_000, in: 4, out: 15, cr: 0.2, cw: 2.5 } },
+  "gpt-6.2-astra": { in: 8, out: 40, cr: 0.4, cw: 10, long: { above: 272_000, in: 16, out: 60, cr: 0.8, cw: 10 } },
   "gpt-5-mini": { in: 0.25, out: 2, cr: 0.025, cw: 0.25 },
   "gpt-5-nano": { in: 0.05, out: 0.4, cr: 0.005, cw: 0.05 },
   // A hosted web search (OpenAI's web_search tool, Anthropic's web_search): $10 per 1,000 calls at both, one usage
