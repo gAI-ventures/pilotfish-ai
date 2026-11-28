@@ -78,6 +78,15 @@ import type { ElementHandle, InterruptInput, Interruption } from "@pilotfish/per
 
 export type { ChallengeSource } from "./challenges.js";
 
+/** Steps a run gets back for questions the person answered (sign-in, code, payment): their time, not its work. */
+export const PERSON_STEPS_BACK = 8;
+/** An ask_user that took at least this long waited on the person (an answer from a code source or a sent-back question is quicker). */
+export const PERSON_ANSWER_MS = 2_000;
+/** After an action that loads a new document, how long a page that is still loading and shows almost nothing is waited for. */
+export const SHELL_WAIT_MS = 8_000;
+/** A page showing fewer characters than this, while its document or requests are still loading, is an app's empty shell. */
+export const SHELL_TEXT_CHARS = 300;
+
 /** Steps before a leg's limit at which the model is told to finish with what it has. */
 export const WRAP_UP_STEPS = 3;
 /**
@@ -1524,6 +1533,10 @@ export class Agent {
   private readonly stalls = new StallTracker();
   /** The budget stall found the run still making progress and gave it 10 more steps (once). */
   private budgetExtended = false;
+  /** Steps given back this run for steps that only waited on the person (`PERSON_STEPS_BACK`). */
+  private personStepsBack = 0;
+  /** This leg was told its steps are running out (`wrapUpNote`): a done after it may be the budget's, not the task's. */
+  private wrapUpGiven = false;
   /** STUCK_NOTE was given (once a run). */
   private stuckSaid = false;
   /** In-page challenge widgets (site + URL) the ladder already worked on: once each, then the model decides. */
@@ -1608,6 +1621,29 @@ export class Agent {
     this.opts.maxSteps = (this.opts.maxSteps ?? 50) + Math.max(0, n);
   }
 
+  /**
+   * A page that shows almost nothing while it is still loading: waited for until its text grows past
+   * SHELL_TEXT_CHARS, or it finishes loading, or SHELL_WAIT_MS. A small page that has finished loading is never
+   * waited for. Returns a note for the result, or "" when nothing was waited for.
+   */
+  private async shellWait(): Promise<string> {
+    const read = async () => {
+      const chars = await this.page.main.evaluate<number>("(document.body && document.body.innerText || '').trim().length", { timeoutMs: 1_000 }).catch(() => -1);
+      const state = await this.page.loadState().catch(() => null);
+      return { chars, loading: !!state && (state.readyState !== "complete" || state.pendingRequests > 0) };
+    };
+    let now = await read();
+    if (now.chars < 0 || now.chars >= SHELL_TEXT_CHARS || !now.loading) return "";
+    const started = Date.now();
+    while (Date.now() - started < SHELL_WAIT_MS && !this.opts.signal?.aborted) {
+      await sleep(300);
+      now = await read();
+      if (now.chars < 0 || now.chars >= SHELL_TEXT_CHARS || !now.loading) break;
+    }
+    const waited = ((Date.now() - started) / 1000).toFixed(1);
+    return now.chars >= SHELL_TEXT_CHARS || !now.loading ? `(Waited ${waited} s for the page to draw its content.)` : `(The page still shows almost nothing after ${waited} s of loading: wait, then look again.)`;
+  }
+
   /** The findings the model recorded with `note` (scrubbed). */
   get notes(): readonly string[] {
     return this.noteLog;
@@ -1684,6 +1720,11 @@ export class Agent {
   /** The model currently driving the run. */
   get currentModel(): string {
     return this.model;
+  }
+
+  /** Whether this leg was told its steps were running out (its done may be the budget's, not the task's end). */
+  get ranOutOfSteps(): boolean {
+    return this.wrapUpGiven;
   }
 
   /** Steps the run may still take: its limit (and the 10 more a run still moving gets once) less those taken. */
@@ -1863,6 +1904,7 @@ export class Agent {
     const legStart = step;
     // The steps left when the run was last told to finish (0: not yet).
     let wrapUpAt = 0;
+    this.wrapUpGiven = false;
     let consecutiveFailures = 0;
     // Replies in a row cut off at the output limit (`CUT_OFFS`); a turn with a tool call clears it.
     let cutOffs = 0;
@@ -2000,6 +2042,15 @@ export class Agent {
           if (pressed && isRetryLabel(`${pressed.name ?? ""} ${textOf(pressed, 60)}`)) turnRetried = true;
         }
         const durationMs = Date.now() - started;
+        // A question the person answered (a sign-in, a code, a payment, a question) is their time, not the run's work:
+        // its step is given back, up to PERSON_STEPS_BACK a run. 28 Nov, a booking: three sign-in and code questions,
+        // and the 50 steps ran out on the passenger page.
+        if (name === "ask_user" && !outcome.isError && !outcome.halt && durationMs >= PERSON_ANSWER_MS && this.personStepsBack < PERSON_STEPS_BACK) {
+          this.personStepsBack++;
+          this.opts.maxSteps = (this.opts.maxSteps ?? 50) + 1;
+          maxSteps++;
+          if (Number.isFinite(this.stepCap)) this.stepCap++;
+        }
         this.opts.onStep?.({ type: "tool_result", step, name, ok: !outcome.isError, summary: outcome.summary, evidence: outcome.evidence, durationMs, ...(outcome.answered ? { answered: outcome.answered } : {}), ...(outcome.timings ? { timings: outcome.timings } : {}) });
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: outcome.isError, content: outcome.content });
         const changedEarlier = changedIdx.length > 0;
@@ -2112,6 +2163,7 @@ export class Agent {
       const left = maxSteps - step;
       if (left > 0 && left <= WRAP_UP_STEPS && maxSteps - legStart >= 10 && (!wrapUpAt || (left === 1 && wrapUpAt > 1))) {
         wrapUpAt = left;
+        this.wrapUpGiven = true;
         directive = [directive, wrapUpNote(left)].filter(Boolean).join("\n\n");
       }
       if (directive) messages.push({ role: "system", content: directive });
@@ -4191,6 +4243,16 @@ export class Agent {
     // A tab that left one site for another (a redirect to an identity provider's sign-in): who sent it there.
     if (this.page === actedOn && /^https?:/.test(fromUrl) && siteOf(safeHost(this.page.url)) !== siteOf(safeHost(fromUrl))) this.cameFrom = { tab: this.page, site: siteOf(safeHost(fromUrl)) };
     lap("dismiss");
+    if (this.opts.awaitLoading && settle === true && after.document !== before.document) {
+      // A new document that shows almost nothing while it is still loading (an app's shell, its content drawn by
+      // scripts still on their way) is waited for here, once, up to SHELL_WAIT_MS: 28 Nov, a booking's passenger page
+      // read "Skip to main content A" and the model spent four steps waiting and reading it.
+      const shell = await this.shellWait();
+      if (shell) {
+        tabNotes.push(shell);
+        after = await captureSnapshot(this.page, { viewportBand: 1, previous: before });
+      }
+    }
     if (this.opts.awaitLoading && settle === true) {
       // An indicator that outlived a whole wait on this site (a spinner that never stops, kept across its filter and
       // page URLs) is not waited for again: on 4 Nov clicks over 6 s rose from 20 to 33 in 258 when it was per URL.
