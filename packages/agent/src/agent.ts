@@ -426,6 +426,8 @@ export interface AgentOptions {
   placeFirst?: () => boolean;
   /** Where the place's state is kept: one object for a run's executors, so a place set by one leg holds for the next. */
   placeState?: { set: boolean; held: number };
+  /** What a run's executors share about the person and its sign-ins (`RunShared`): one object, so a later leg knows. */
+  runShared?: RunShared;
   /**
    * The agent read a PDF a tab shows in Chrome's viewer (get_text): no download happened, so the host may keep
    * the document as a file of its own (18 Nov: "download the PDF" of an inline irs.gov form left only a link).
@@ -987,6 +989,47 @@ export function taskLanguage(task: string): "en" | null {
 
 /** Steps a leg must have left for a done(success=false) to be sent back once (`keepGoingNote`). */
 export const KEEP_GOING_STEPS = 12;
+
+/**
+ * What a picture of the page could show as text: its laid-out text (a text node with no layout is not captured), the
+ * values of its visible fields and the labels of chosen options. A password field's value is never in a snapshot (its
+ * dots are drawn), and an aria-label or alt text is not drawn.
+ */
+export function drawnText(snap: Snapshot): string {
+  const out: string[] = [];
+  for (const n of snap.nodes) {
+    if (n.nodeType === 3) {
+      if (n.text && n.parent?.visible !== false) out.push(n.text);
+      continue;
+    }
+    if (!n.visible) continue;
+    if (n.value) out.push(n.value);
+    for (const o of n.options ?? []) if (o.selected) out.push(o.label);
+  }
+  return out.join("\n");
+}
+
+/** What a run's executors share (`AgentOptions.runShared`): sites signed in, the person's last answer, the one choice asked. */
+export interface RunShared {
+  signedIn: Set<string>;
+  /** When the person last answered a question (ms), 0 for never. */
+  answeredAt: number;
+  /** `askPersonNote` was given (once a run). */
+  askSent: boolean;
+}
+export function newRunShared(): RunShared {
+  return { signedIn: new Set(), answeredAt: 0, askSent: false };
+}
+/** How recent the person's last answer must be for a choice left to them to be asked in the run (`askPersonNote`). */
+export const ASK_WINDOW_MS = 10 * 60_000;
+/** Steps a leg must have left to ask the person a choice and act on it (`askPersonNote`). */
+export const ASK_STEPS = 4;
+/**
+ * A result that leaves the person a decision: a choice between things ("choose whether to add", "which you prefer"), an
+ * offer ("do you want me to", "should I"), or a step held for their yes ("needs your approval"). Pleasantries ("let me
+ * know if you need anything else") are not: "let me know" counts only with whether, which or what they want.
+ */
+export const LEAVES_CHOICE = /\b(?:(?:choose|decide|pick) (?:whether|which|between|if)\b|(?:let me know|tell me|confirm) (?:whether|which|if you(?:['’]d)? (?:want|like|prefer|approve)|what you(?:['’]d)? (?:want|like|prefer))|(?:(?:do|would) you (?:want|like|prefer)|(?:should|shall) I)\b[^.?!\n]{0,160}\?|if you (?:approve|agree|are (?:ok|okay|fine) with|want me to)\b|(?:needs?|awaiting|waiting for|without) your (?:approval|go-?ahead|decision|choice|confirmation|ok|okay)\b|(?:it['’]?s|is|are) (?:yours|your (?:call|choice|decision))\b|whether (?:to|you(?:['’]d)? (?:want|like|prefer))\b)/i;
 /**
  * A done(success=false) result that names what stopped the work: a sign-in or account, a block, a check, an error, a
  * limit, nothing found or offered, the person's own choice, or something only the person can give (24 Nov: a run that
@@ -1417,6 +1460,8 @@ export class Agent {
    * and how often a search was held back for it (`placeGate`: twice at most). Shared by a run's executors (`placeState`).
    */
   private readonly place: { set: boolean; held: number };
+  /** The sites signed in and the person's last answer in this run, shared by its executors (`runShared`). */
+  private readonly shared: RunShared;
   /** Why the last code `fillCode` typed was not submitted (the page's field or boxes did not hold it whole), else null. */
   private codeMiss: string | null = null;
   /** The current hand-off's code or link was accepted (`handOver`). */
@@ -1601,6 +1646,7 @@ export class Agent {
     this.secrets = opts.guardSecretOutput ? guardedView(broker, opts.onSecretOutput ?? null) : broker;
     this.repeatFailures = opts.repeatFailures ?? new RepeatFailures();
     this.place = opts.placeState ?? { set: false, held: 0 };
+    this.shared = opts.runShared ?? newRunShared();
     // With secrets, a screenshot is refused page by page (pictureRisk), not for the whole run: before 1 Nov a saved
     // LinkedIn login took the screenshot tools from every task of that account, and a run asked the person what its
     // own page showed.
@@ -1825,6 +1871,29 @@ export class Agent {
    * done(false) after one or two of the plan's ten date pairs, with 40 or more of 60 steps unused and every search it had
    * made working, three runs out of three, and its retry legs did the same.
    */
+  /**
+   * The note sending back a done(success=false) whose result leaves the person a choice (`LEAVES_CHOICE`: "choose whether
+   * to add…", "do you want me to…", "needs your approval"), or "" to take it: once a run, when the person answered a
+   * question in it within `ASK_WINDOW_MS` (they are there) and the leg has `ASK_STEPS` left to ask and act. 28 Nov, a cart
+   * run: the person answered four questions, then the run ended partly done with "choose whether to add one of the plain
+   * packs above" in its report, a question it could have asked them while the cart was open.
+   */
+  private askPersonNote(input: Record<string, unknown>): string {
+    if (input["success"] !== false || this.shared.askSent) return "";
+    if (!this.shared.answeredAt || Date.now() - this.shared.answeredAt > ASK_WINDOW_MS) return "";
+    const left = Math.min((this.opts.maxSteps ?? 50) + (this.budgetExtended ? 10 : 0), this.stepCap) - this.liveStep;
+    if (!(left >= ASK_STEPS)) return "";
+    const said = String(input["result"] ?? "");
+    const m = LEAVES_CHOICE.exec(said);
+    if (!m) return "";
+    this.shared.askSent = true;
+    // The sentence that leaves the choice, as the model wrote it (scrubbed, short).
+    const from = Math.max(said.lastIndexOf("\n", m.index), said.lastIndexOf(". ", m.index)) + 1;
+    const end = said.slice(m.index).search(/[.?!\n]/);
+    const line = this.secrets.scrub(said.slice(from, end < 0 ? undefined : m.index + end + 1).trim()).slice(0, 240);
+    return `Not yet: the person answered your questions in this run, so they are there, and your result leaves them a choice ("${line}"). Ask it now, before ending: ask_user with \`questions\`, the choice as one question whose options are the real alternatives (each with what you found: its name, size, price, and what could not be checked) plus leaving it out. Then do what they answer and finish. If they give no answer, call done(success=false) again as you had it; that ends the run.`;
+  }
+
   private keepGoingNote(input: Record<string, unknown>): string {
     if (input["success"] !== false || this.keepGoingSent) return "";
     const left = Math.min((this.opts.maxSteps ?? 50) + (this.budgetExtended ? 10 : 0), this.stepCap) - this.liveStep;
@@ -1836,7 +1905,9 @@ export class Agent {
       // number, the site's own OTP tool failed once, and the executor quit at step 9 of 40 "sign-in required".
       const host = safeHost(this.page.url);
       const names = host ? this.secrets.namesFor(host) : [];
-      if (!names.length || STOPPED_BY.test(said.replace(SIGN_IN_STOP, " "))) return "";
+      // A site this run already signed in to needs no sign-in: its result's sign-in words tell how it got there (28 Nov,
+      // a cart run told to sign in again 200 s after the person had, with the cart showing their account).
+      if (!names.length || this.shared.signedIn.has(siteOf(host)) || STOPPED_BY.test(said.replace(SIGN_IN_STOP, " "))) return "";
       this.keepGoingSent = true;
       return `Not yet: ${Number.isFinite(left) ? `${left} of your steps are left` : "you have steps left"}, and you have sign-in details for ${host}: ${names.map((n) => `{{${n}}}`).join(", ")}. Sign in with the page's own form (its log-in link, button or dialog), typing them as placeholders; when it asks for a code, ask_user kind "code". A site tool that failed, or a note that the sign-in is completed on the page, means do it in the page yourself. Then carry on with the task. If the site itself refuses the sign-in, call done(success=false) again saying what it showed; that ends the run.`;
     }
@@ -1976,7 +2047,7 @@ export class Agent {
             // any flights on those dates" skipped both (27 Nov review).
             const success = !proseGaveUp(result);
             if (!success) {
-              const keepGoing = this.keepGoingNote({ success: false, result });
+              const keepGoing = this.askPersonNote({ success: false, result }) || this.keepGoingNote({ success: false, result });
               if (keepGoing) {
                 messages.push({ role: "user", content: [{ type: "text", text: keepGoing }] });
                 continue;
@@ -2045,7 +2116,10 @@ export class Agent {
         // A question the person answered (a sign-in, a code, a payment, a question) is their time, not the run's work:
         // its step is given back, up to PERSON_STEPS_BACK a run. 28 Nov, a booking: three sign-in and code questions,
         // and the 50 steps ran out on the passenger page.
-        if (name === "ask_user" && !outcome.isError && !outcome.halt && durationMs >= PERSON_ANSWER_MS && this.personStepsBack < PERSON_STEPS_BACK) {
+        // A question sent back unasked (a progress note, sorted by a helper call that can take seconds) waited on nobody.
+        const personAnswered = name === "ask_user" && !outcome.isError && !outcome.halt && durationMs >= PERSON_ANSWER_MS && !/\bnot asked\b/i.test(outcome.summary);
+        if (personAnswered) this.shared.answeredAt = Date.now();
+        if (personAnswered && this.personStepsBack < PERSON_STEPS_BACK) {
           this.personStepsBack++;
           this.opts.maxSteps = (this.opts.maxSteps ?? 50) + 1;
           maxSteps++;
@@ -4025,7 +4099,8 @@ export class Agent {
           // A held download or the traffic limit is being put to the person: their answer comes first.
           if (this.opts.control?.gated) return refusal("Not yet: something is being checked with the person (a held download or the traffic limit). Their answer comes at your next turn; finish after it.");
           // Giving up with most of the leg's steps unused and nothing named that stopped it: sent back once to carry on.
-          const keepGoing = this.keepGoingNote(input);
+          // A choice left to the person while they are there: asked now, once a run, before the rest.
+          const keepGoing = this.askPersonNote(input) || this.keepGoingNote(input);
           if (keepGoing) return refusal(keepGoing);
           let data: Record<string, unknown> | undefined;
           if (typeof input["data_json"] === "string" && input["data_json"].trim()) {
@@ -5087,6 +5162,7 @@ export class Agent {
     // Checked once more, then the entry goes and the host hears, with nothing awaited in between.
     if (!onDocumentOf(this.page, snap) || this.signingIn.get(site) !== s) return;
     this.signingIn.delete(site);
+    this.shared.signedIn.add(site);
     const { clearedMs } = this.challenge.forSite(site);
     await Promise.race([Promise.resolve().then(() => cb({ site, host, url: this.secrets.scrub(snap.url), by: s.by })).catch(() => undefined), sleep(clearedMs)]);
   }
@@ -5755,25 +5831,41 @@ export class Agent {
   }
 
   /**
-   * Why no picture of the page may be taken for the model or the person's question, or null: a secret is or was
-   * usable on its host or a frame's, or one is scoped to no host (pixels cannot be scrubbed), or the frames could not
-   * be read. allowScreenshots: true takes the caller's word.
+   * Why no picture of the page may be taken for the model or the person's question, or null. Pixels cannot be scrubbed,
+   * so on a page where a secret is or was usable (its host or a frame's, or one scoped to no host) the page is read
+   * first, every frame of such a host included: a picture is refused when its drawn text or a field shows a secret's
+   * value as a person would read it (`SecretBroker.shownIn`), or when the frames, or one such frame, could not be read.
+   * Before 28 Nov any such page was refused for the rest of the run: a phone number typed to sign in to a grocery site
+   * took the pictures of every product page after it, and the ingredients printed on a pack's photo could not be read.
+   * allowScreenshots: true takes the caller's word.
    */
   private async pictureRisk(): Promise<string | null> {
     if (this.opts.allowScreenshots === true || !this.secrets.size) return null;
-    type Tree = { frame: { url: string }; childFrames?: Tree[] };
+    type Tree = { frame: { id: string; url: string }; childFrames?: Tree[] };
     const hosts = new Set<string>([safeHost(this.page.url)]);
+    // The frames on a host where a secret may show: each must be read before a picture is taken.
+    const mustRead = new Set<string>();
     for (const f of this.page.frames()) {
       const tree = await f.session.send("Page.getFrameTree").then((t) => t.frameTree, () => null);
       if (!tree) return "No screenshot: this page's frames could not be read, and a saved login may show in one. Use read_page, find or get_text.";
       const walk = (t: Tree): void => {
-        hosts.add(safeHost(t.frame.url));
+        const h = safeHost(t.frame.url);
+        hosts.add(h);
+        if (h && this.secrets.mayShowOn(h)) mustRead.add(t.frame.id);
         for (const c of t.childFrames ?? []) walk(c);
       };
       walk(tree);
     }
     const host = [...hosts].find((h) => h && this.secrets.mayShowOn(h));
-    return host ? `No screenshot of this page: a saved login or code is used on ${host}, and a picture could show it. Use read_page, find or get_text.` : null;
+    if (!host) return null;
+    const refused = `No screenshot of this page: a saved login or code is used on ${host}, and this page shows one or could not be read whole. Use read_page, find or get_text.`;
+    const snap = await captureSnapshot(this.page, { viewportBand: Infinity }).catch(() => null);
+    if (!snap || snap.unsettled) return refused;
+    const read = new Set(snap.nodes.map((n) => n.frameId));
+    if ([...mustRead].some((id) => !read.has(id))) return refused;
+    if (this.secrets.shownIn(drawnText(snap))) return refused;
+    // The picture is of the page just read: one that moved on meanwhile is not taken.
+    return onDocumentOf(this.page, snap) ? null : refused;
   }
 
   /** A never-automate site (NEVER_AUTOMATE_HOSTS and neverHosts): the check's host, or where the page is now. */

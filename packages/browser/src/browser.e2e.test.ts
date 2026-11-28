@@ -387,6 +387,24 @@ describe.skipIf(!E2E)("browser e2e", () => {
     expect(png.subarray(1, 4).toString()).toBe("PNG");
     await p.close();
   });
+
+  it("goes back at once in an app that changes its address by script (28 Nov: 15 s per back)", async () => {
+    const p = await browser.newPage();
+    await p.navigate(`${a.origin}/`);
+    // Two in-page entries, as a single-page shop's search → item → back does.
+    await p.main.evaluate("history.pushState({}, '', '/search?q=x'); history.pushState({}, '', '/item/1'); true");
+    const started = Date.now();
+    expect(await p.goBack()).toBe(true);
+    const tookMs = Date.now() - started;
+    expect(p.url).toBe(`${a.origin}/search?q=x`);
+    expect(tookMs).toBeLessThan(3_000);
+    // And forward, the same way.
+    const again = Date.now();
+    expect(await p.goForward()).toBe(true);
+    expect(p.url).toBe(`${a.origin}/item/1`);
+    expect(Date.now() - again).toBeLessThan(3_000);
+    await p.close();
+  });
 });
 
 // Test-only helpers: resolve a CSS selector to a backendNodeId via DOM.getDocument/querySelector.

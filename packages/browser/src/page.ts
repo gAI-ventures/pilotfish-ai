@@ -1131,9 +1131,23 @@ export class Page {
     const { currentIndex, entries } = await this.session.send("Page.getNavigationHistory");
     const entry = entries[currentIndex + delta];
     if (!entry) return false;
-    const nav = this.session.waitFor("Page.frameNavigated", (e) => e.frame.id === this.main.frameId, 15_000).catch(() => undefined);
-    await this.session.send("Page.navigateToHistoryEntry", { entryId: entry.id });
-    await nav;
+    // The entry is reached by a new document (Page.frameNavigated) or, in an app that changes its address by script, on
+    // the same one (Page.navigatedWithinDocument): either ends the wait. 28 Nov: a shop app's every back took the full 15 s
+    // waiting for a document that never came, twice in one run.
+    let settle: () => void = () => undefined;
+    const reached = new Promise<void>((resolve) => (settle = resolve));
+    const offs = [
+      this.session.on("Page.frameNavigated", (e) => e.frame.id === this.main.frameId && settle()),
+      this.session.on("Page.navigatedWithinDocument", (e) => e.frameId === this.main.frameId && settle()),
+    ];
+    const timer = setTimeout(settle, 15_000);
+    try {
+      await this.session.send("Page.navigateToHistoryEntry", { entryId: entry.id });
+      await reached;
+    } finally {
+      clearTimeout(timer);
+      for (const off of offs) off();
+    }
     return true;
   }
 

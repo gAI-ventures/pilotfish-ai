@@ -153,6 +153,26 @@ export class SecretBroker {
     return false;
   }
 
+  /**
+   * Whether `text`, what a page draws (its text and field values), shows a secret's value as a person would read it
+   * (`pictureRisk`): any value set, given, typed, retired or issued, as written (case and runs of spaces aside), and a
+   * value mostly of digits (a phone number, a code) with the page's own spacing or dashes between them, or by its last
+   * ten digits (a phone without its country code). A value under 4 characters cannot be told from other text: true.
+   */
+  shownIn(text: string): boolean {
+    const page = text.replace(/\s+/g, " ").toLowerCase();
+    for (const v of this.guarded()) {
+      const flat = v.replace(/\s+/g, " ").trim();
+      if (flat.length < 4) return true;
+      if (page.includes(flat.toLowerCase())) return true;
+      const digits = flat.replace(/\D/g, "");
+      if (digits.length >= 6 && digits.length >= flat.replace(/ /g, "").length * 0.6) {
+        for (const d of new Set([digits, digits.slice(-10)])) if (d.length >= 6 && digitsShown(text, d)) return true;
+      }
+    }
+    return false;
+  }
+
   /** Guarded text with every form of every value replaced by the mark, only ever between marks; nothing but the mark if any is left. */
   private maskGuarded(text: string): string {
     const between = (s: string, f: (seg: string) => string) => s.split(TYPED_SECRET_MARK).map(f).join(TYPED_SECRET_MARK);
@@ -336,6 +356,15 @@ export function guardedView(broker: SecretBroker, onHit: (() => void) | null): S
  * characters around a fixed word: never a readable stand-in, and a caller that finds it withholds the whole output.
  */
 export const TYPED_SECRET_MARK = "\uE0F1typed-password\uE0F1";
+
+/**
+ * Whether `text` holds the digits `digits` in order with only a page's spacing between them (spaces, dashes, dots,
+ * slashes, brackets), and no digit right before or after: "+91 98765-43210" holds 9876543210.
+ */
+export function digitsShown(text: string, digits: string): boolean {
+  const body = [...digits].join("[\\s\\-./()]*");
+  return new RegExp(`(?<!\\d)${body}(?!\\d)`).test(text);
+}
 
 /**
  * Every form of `value` the output guard looks for (SecretBroker.holdsSecret), whatever its length: the value and its
