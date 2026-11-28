@@ -20,7 +20,12 @@ export type Interception =
 export interface RequestHandler {
   /** Resource types to pause ("Preflight" is not accepted by Chrome's Fetch filter). */
   types: readonly Protocol.Network.ResourceType[];
-  onRequest(e: PausedRequest): Interception | void | Promise<Interception | void>;
+  onRequest?(e: PausedRequest): Interception | void | Promise<Interception | void>;
+  /**
+   * Called for these types once the response's headers are in and before its body is read (`responseStatusCode`,
+   * `responseHeaders` set): "fail" drops it there (its body is never read), anything else lets it go on.
+   */
+  onResponse?(e: PausedRequest): Interception | void | Promise<Interception | void>;
 }
 
 export interface HandlerRegistration {
@@ -68,10 +73,12 @@ export class RequestInterceptor {
     };
   }
 
-  /** Tell Chrome the union of the handlers' types (or stop pausing when none is left). */
+  /** Tell Chrome the union of the handlers' types, at each stage they ask for (or stop pausing when none is left). */
   private sync(): Promise<void> {
-    const types = [...new Set(this.handlers.flatMap((h) => h.types))].sort();
-    const key = types.join(",");
+    const request = [...new Set(this.handlers.filter((h) => h.onRequest).flatMap((h) => h.types))].sort();
+    const response = [...new Set(this.handlers.filter((h) => h.onResponse).flatMap((h) => h.types))].sort();
+    const types = [...request, ...response];
+    const key = `${request.join(",")}|${response.join(",")}`;
     // Same patterns: the call already sent (perhaps still waiting on a paused target) covers them.
     if (key === this.patternsKey) return this.current;
     this.patternsKey = key;
@@ -81,16 +88,40 @@ export class RequestInterceptor {
       this.current = this.session.send("Fetch.disable").then(() => undefined, () => undefined);
       return this.current;
     }
-    this.current = this.session.send("Fetch.enable", { patterns: types.map((resourceType) => ({ urlPattern: "*", resourceType, requestStage: "Request" as const })) }).then(() => undefined);
+    const patterns = [...request.map((resourceType) => ({ urlPattern: "*", resourceType, requestStage: "Request" as const })), ...response.map((resourceType) => ({ urlPattern: "*", resourceType, requestStage: "Response" as const }))];
+    this.current = this.session.send("Fetch.enable", { patterns }).then(() => undefined);
     return this.current;
   }
 
-  private async paused(e: PausedRequest): Promise<void> {
-    const mine = this.handlers.filter((h) => h.types.includes(e.resourceType));
+  /** A request paused with its response's headers in: the response handlers decide whether its body is read. */
+  private async pausedResponse(e: PausedRequest): Promise<void> {
+    const mine = this.handlers.filter((h) => h.onResponse && h.types.includes(e.resourceType));
     const decisions = await Promise.all(
       mine.map(async (h) => {
         try {
-          return (await h.onRequest(e)) ?? undefined;
+          return (await h.onResponse!(e)) ?? undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    const s = this.session;
+    try {
+      const fail = decisions.find((d) => d?.action === "fail");
+      if (fail?.action === "fail") return void (await s.send("Fetch.failRequest", { requestId: e.requestId, errorReason: fail.reason ?? "BlockedByClient" }));
+      await s.send("Fetch.continueResponse", { requestId: e.requestId });
+    } catch {
+      await s.send("Fetch.continueRequest", { requestId: e.requestId }).catch(() => undefined);
+    }
+  }
+
+  private async paused(e: PausedRequest): Promise<void> {
+    if (e.responseStatusCode !== undefined || e.responseErrorReason !== undefined) return this.pausedResponse(e);
+    const mine = this.handlers.filter((h) => h.onRequest && h.types.includes(e.resourceType));
+    const decisions = await Promise.all(
+      mine.map(async (h) => {
+        try {
+          return (await h.onRequest!(e)) ?? undefined;
         } catch {
           return undefined;
         }
